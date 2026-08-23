@@ -1001,7 +1001,7 @@ t:case("contact accounting survives a pen passthrough sequence", function()
 
     t:eq(p.n_contacts, 0, "the palm was accounted for even during passthrough")
     t:eq(p.passthrough, false, "passthrough released")
-    t:eq(p.touch_geom_latched, false, "geometry latch released")
+    t:eq(next(p.contacts), nil, "contact bookkeeping released")
 
     -- The proof that it matters: a later palm swipe must still be swallowed.
     local swipe = pumpFrame(input, bus, { { slot = 0, fields = { id = 2, x = 200, y = 500 } } })
@@ -1033,6 +1033,25 @@ t:case("a pen on the toolbar does not latch passthrough for a palm", function()
     -- The palm is still down. It must stay suppressed.
     local moved = pumpFrame(input, bus, { { slot = 0, fields = { x = 320, y = 620 } } })
     t:eq(moved, 0, "the palm still cannot reach the reader")
+end)
+
+t:case("a resting palm does not make the toolbar unreachable", function()
+    -- The palm lands first, off the toolbar, and used to latch the geometry
+    -- decision for every later contact in the sequence. Stop is the only way
+    -- out of stylus drawing mode, so losing that tap is a lock-out.
+    local p, input = pipelinePlugin()
+    local bus = support.newSlotBus()
+    local bar = p.bar.dimen
+
+    pumpFrame(input, bus, { { slot = 0, fields = { id = 1, x = 300, y = 600 } } })
+
+    local n = pumpFrame(input, bus,
+        { { slot = 1, fields = { id = 2, x = bar.x + 5, y = bar.y + 5 } } })
+
+    t:check(n > 0, "the toolbar tap survives a resting palm")
+    t:eq(p.passthrough, true, "the bar contact latched passthrough on its own slot")
+    t:eq(p.contacts[0], "page", "the palm is remembered as off-bar")
+    t:eq(p.contacts[1], "bar", "the finger is remembered as on-bar")
 end)
 
 t:describe("main / stale coordinates and mid-stroke dialogs")

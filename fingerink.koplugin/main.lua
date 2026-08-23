@@ -71,7 +71,6 @@ function FingerInk:init()
     self.contacts = {}
     self.n_contacts = 0
     self.passthrough = false
-    self.touch_geom_latched = false
     self.draw_slot = nil
     self.stroke = nil
 
@@ -353,7 +352,6 @@ function FingerInk:resetContacts()
     end
     self.n_contacts = 0
     self.passthrough = false
-    self.touch_geom_latched = false
     self.draw_slot = nil
 end
 
@@ -636,16 +634,20 @@ function FingerInk:onStylusTouchFrame(slots)
 
             if id and id >= 0 then
                 if not self.contacts[slot] then
-                    self.contacts[slot] = true
+                    -- "new" until this contact's first frame with coordinates
+                    -- says where it started. The latch is per slot: a palm
+                    -- that landed off the toolbar must not answer for the
+                    -- finger reaching for Stop, which is the only way out.
+                    self.contacts[slot] = "new"
                     self.n_contacts = self.n_contacts + 1
                 end
-                -- Latched once per residual sequence, on the first frame that
-                -- actually carries coordinates.
-                if not self.passthrough and not self.touch_geom_latched and ev.x and ev.y then
-                    self.touch_geom_latched = true
+                if self.contacts[slot] == "new" and ev.x and ev.y then
                     local x, y = Capture.toScreen(ev.x, ev.y)
                     if self:inBar(x, y) then
+                        self.contacts[slot] = "bar"
                         self.passthrough = true
+                    else
+                        self.contacts[slot] = "page"
                     end
                 end
             else
@@ -656,7 +658,6 @@ function FingerInk:onStylusTouchFrame(slots)
                 if self.n_contacts <= 0 then
                     self.n_contacts = 0
                     self.passthrough = false
-                    self.touch_geom_latched = false
                 end
             end
         end
