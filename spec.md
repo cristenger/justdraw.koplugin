@@ -37,8 +37,8 @@ reMarkable set it — so Kobo stylus devices need the explicit mode.
 The emulator is deliberately left on `finger` too. koreader-base translates
 SDL3 pen events into the pen slot with a real tool, so a graphics tablet does
 drive the stylus route, but a plain mouse lands on slot 0 or 1 with no
-`ABS_MT_TOOL_TYPE`, never reaches the callback, and would be swallowed by the
-residual filter. Testers with a tablet select `stylus` by hand.
+`ABS_MT_TOOL_TYPE`, never reaches the callback, and would be suppressed as
+residual touch. Testers with a tablet select `stylus` by hand.
 
 `setInputMode` refuses while `drawing` is true, and the radio items are
 disabled as well. The guard lives in the setter, not only in the menu: swapping
@@ -52,18 +52,16 @@ which the plugin wraps **only while drawing mode is on**:
 
 ```lua
 gd.feedEvent = function(gd_self, slots)
-    local emit = handler(slots)      -- ours, runs first, on untouched slots
-    local evs  = original(gd_self, slots)
-    if emit then return evs end
-    for i = #evs, 1, -1 do evs[i] = nil end
-    return evs
+    handler(slots)                   -- ours, runs first, on untouched slots
+    return original(gd_self, slots)  -- output passed through untouched
 end
 ```
 
-The original is **always** called, so GestureDetector's internal state stays
-consistent; the plugin only decides whether the resulting gesture events reach
-the app. Without this, a swallowed finger-down would desynchronise the detector
-and the two-finger exit gesture would not fire.
+It is an observer, not a filter. The original is **always** called, so
+GestureDetector's internal state stays consistent, and its output is **always**
+returned, because emptying that array never could suppress the gestures that
+matter. What reaches the app is decided per gesture at the widget layer; see
+*Suppression* below.
 
 ### Stylus backend
 
@@ -75,13 +73,51 @@ Ordering is a hard guarantee, not luck. Every `handleTouchEv` variant runs
 `Input:routeStylusEvents()` and then `gesture_detector:feedEvent(MTSlots)`
 inside the same `EV_SYN:SYN_REPORT`. So within one frame `onStylusEvent` always
 runs before `onStylusTouchFrame`, and a dominated pen slot is already gone from
-the array the residual filter sees. That is what lets the residual filter
+the array the residual filter sees. That is what lets `onStylusTouchFrame`
 promise never to touch `self.stroke`.
 
 ```
-frame -> routeStylusEvents -> onStylusEvent(slot)   -> true drops the slot
-      -> feedEvent          -> onStylusTouchFrame() -> false empties gestures
+frame -> routeStylusEvents -> onStylusEvent(slot)      -> true drops the slot
+      -> feedEvent          -> onStylusTouchFrame()    -> contact bookkeeping
+      -> UIManager dispatch  -> InkBar:suppresses(ges) -> true swallows it
 ```
+
+`onStylusTouchFrame` no longer decides what is emitted. It counts the non-pen
+contacts that are down and remembers, per slot, whether each one started on the
+toolbar. Those are the two facts the suppression decision reads.
+
+### Suppression
+
+Suppression happens in `InkBar:suppresses(ges)`, not in either capture hook.
+
+```
+suppresses(ges) == true  when  the plugin is drawing
+                         and   a backend is installed
+                         and   the plugin is not in passthrough
+                         and   (ges.pos is nil, or ges.pos is outside the bar)
+```
+
+The toolbar is the topmost non-toast widget, and `UIManager:sendEvent` offers
+every input event to that widget first and stops if it returns true. Two
+properties follow, and both are why the decision lives here rather than in
+`feedEvent`:
+
+- **Timer-born gestures are visible.** `hold` and the deferred single `tap` are
+  produced by `Input:setTimeout` callbacks and returned straight from
+  `Input:waitEvent`, never passing through `feedEvent`. They reach the widget
+  layer through the same dispatch as everything else.
+- **The decision is per gesture.** Gestures arrive rotation-adjusted and carry
+  `pos`, so a palm's gesture can be swallowed in the same input frame that
+  carries the pen's tap on a button. No coordinate transform is needed here;
+  `Capture.toScreen` exists for raw slot data, which this is not.
+
+A gesture with no position cannot be attributed to a contact, so it is
+suppressed. Once drawing stops, `suppresses` returns false for everything and
+the reader behaves normally.
+
+This makes "drawing implies a visible toolbar" a safety requirement rather than
+a convenience: with no bar on the stack there is nothing to suppress with.
+`setBarShown(false)` calls `setDrawing(false)`, and that call is load-bearing.
 
 ### Ownership
 
@@ -104,8 +140,9 @@ unguarded error would take KOReader down *and* leave the monkey patch installed.
 
 Both handlers therefore run under `pcall`. On error the handler returns the
 value that makes KOReader behave as if the plugin were absent: `false` from the
-stylus callback (do not dominate the slot) and `true` from the residual wrapper
-(let the gestures out).
+stylus callback (do not dominate the slot), and for the frame wrapper it does
+not matter what the handler answers, because the detector's output is passed
+through either way.
 
 Disarming is two-phase. `Capture.active` is cleared **immediately**, which makes
 both wrappers inert, but the actual unhooking is deferred to the next UI tick.
@@ -199,17 +236,19 @@ the first time it sees a slot:
 Everything the pen did not take. Palm and finger are not told apart — refusing
 to guess is what makes rejection predictable.
 
-| Condition | Return |
-| --- | --- |
-| the pen handed its slot to the UI **in this frame** | `true` (whole frame) |
-| dialog above the reader | `true` |
-| sequence started inside `bar.dimen` | `true` until all contacts lift |
-| anything else, 1 or many contacts | `false` |
+It emits nothing and suppresses nothing; it always returns `true`. Its job is to
+maintain the two facts `InkBar:suppresses` reads:
 
-The first row reads a per-frame flag set by `stylusFrameResult`, **not** the
-latched `stylus_passthrough`. The lift frame is the one that carries a tap, and
-`onStylusEvent` resets the latch on that frame before this filter runs; reading
-the latch here made every toolbar button unreachable with the pen.
+| State | Meaning |
+| --- | --- |
+| `self.n_contacts` | how many non-pen contacts are currently down |
+| `self.contacts[slot]` | `"new"`, `"bar"` or `"page"` — where *that* contact started |
+| `self.passthrough` | a dialog is above the reader, or some contact started on the bar |
+
+**The geometry latch is per slot, not per sequence.** A palm that landed off the
+toolbar must not answer for the finger reaching for Stop, which is the only way
+out of stylus drawing mode. Latching once per sequence made a resting palm a
+lock-out.
 
 Pen slots are skipped by `Capture:isStylusSlot` rather than counted. Counting
 them corrupts `n_contacts` and lets the pen's toolbar position latch
@@ -225,32 +264,28 @@ contact and got dominated — and must not be read as "everything lifted".
 
 This filter never calls `onContactPoint` and never touches `self.stroke`.
 
-### Suppression is more than an empty array
+### Why suppression cannot live in `feedEvent`
 
 Emptying `feedEvent`'s return value does not stop `hold` or the deferred single
 `tap`. Those are produced by timer callbacks registered through
 `Input:setTimeout` (`gesturedetector.lua:641` and `:675`) and dispatched
-straight out of `Input:waitEvent` (`input.lua:1570-1585`), never passing through
-`feedEvent`. A palm resting for the hold interval would raise the text
-selection popup mid-stroke.
+straight out of `Input:waitEvent` (`input.lua:1584`), never passing through
+`feedEvent`. A palm resting for the hold interval would raise the text selection
+popup mid-stroke.
 
-So on the stylus backend a suppressed frame also drops the corresponding
-contacts via `GestureDetector:dropContact`, which clears their pending
-timeouts.
+It also cannot be selective. At that point the gestures do not exist yet, so the
+choice is the whole frame or none of it, and a frame released for a passthrough
+pen released a simultaneous palm with it.
 
-**Finger backend limitation (pre-existing).** The legacy route cannot do this:
-ADR-2 requires the detector's contact state to survive suppression, or the
-two-finger gesture stops firing. A stationary drawing finger can therefore still
-trip a `hold` after the hold interval. Unchanged by this work, and out of its
-scope.
+Both are answered by deciding at the widget layer instead, where every gesture
+is visible individually and already carries a screen position. See *Suppression*
+above and ADR-13.
 
-**Known limitation.** The emit decision is per frame, not per contact:
-GestureDetector's gesture events carry `pos` but no slot number, so a frame
-released for a passthrough pen also releases a simultaneous palm. Pinned by a
-test so any change is deliberate. The fallback, if hardware shows the toolbar
-becoming unusable, is to filter the returned array geometrically — remembering
-that `ges.pos` is still unrotated at that point, since `adjustGesCoordinate`
-runs later in `Input:handleTouchEv`.
+An earlier version dropped the suppressed frame's contacts with
+`GestureDetector:dropContact`, which does clear their pending timeouts. It was
+destructive, and the finger route could never use it: ADR-2 requires the
+detector's contact state to survive suppression or the two-finger gesture stops
+firing. Nothing needs it now.
 
 ### Shared point route
 

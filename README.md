@@ -120,15 +120,14 @@ since two-finger gestures keep working while drawing.
   touch.
 - **Stylus route: touch navigation is off while drawing.** Not a bug — see
   above.
-- **Stylus route, narrow case:** if you tap the toolbar with the pen while a
-  palm rests on the screen, that one input frame is released as a whole and the
-  palm's gesture can get through with it. KOReader's gesture events carry a
-  position but not a slot number, so the decision cannot be made per contact.
-- **Finger route: a stationary finger can still trigger a long-press.**
-  KOReader produces `hold` from a timer that does not pass through the hook this
-  route uses, so holding still while drawing can raise the text-selection popup.
-  Pre-existing; the stylus route does not have this problem, because it drops
-  suppressed contacts outright.
+- **Both routes: touch gestures are filtered by position while drawing.** A
+  gesture that lands on the toolbar goes to the toolbar; everything else is
+  swallowed until you press Stop. That includes long-presses, which used to slip
+  through on the finger route, and a palm's gesture in the same frame as a pen
+  tap on a button, which used to slip through on the stylus route.
+- **The toolbar has to be on screen for that filtering to happen.** It always
+  is — hiding it stops drawing — but it is now a requirement rather than a
+  convenience.
 - **Suspend stops drawing.** Resuming leaves drawing off and the toolbar up;
   press Draw again. Suspending mid-stroke means KOReader never delivers the pen
   lift, so restarting from a clean state is the only safe option.

@@ -200,7 +200,7 @@ does it, but the zones have to name every reader zone they override
 (`tap_forward`, `readerhighlight_tap`, and so on) — a brittle list, for a bigger
 change than the bug warrants.
 
-## ADR-11 — Stylus callback *plus* a residual touch filter
+## ADR-11 — Stylus callback *plus* a residual touch filter *(superseded in part by ADR-13)*
 
 **Context.** KOReader v2026.07 added `Input:registerStylusCallback`. Returning
 true from it removes the pen slot from `MTSlots` before
@@ -238,6 +238,10 @@ the pen.
 
 **Consequences.** Real palm rejection on the Scribe, at the price of no touch
 navigation while drawing — Stop is the way back. Two hooks instead of one.
+
+**Superseded in part.** The residual filter no longer suppresses anything; it
+only keeps the contact bookkeeping the suppression decision reads. Suppression
+moved to the widget layer, and `dropContact` went with it. See ADR-13.
 Coexistence with another stylus plugin is impossible by construction, which is
 reported rather than papered over. The emit decision stays per frame, so a
 passthrough pen frame releases a simultaneous palm; gestures carry no slot
@@ -296,6 +300,51 @@ the frame we failed in.
 Rejected: letting errors propagate and relying on KOReader's crash log. It is
 the current behaviour, and it is how a one-line typo becomes a device that has
 to be restarted with the pen still on the page.
+
+## ADR-13 — Suppress at the widget layer, not in the capture hook
+
+**Context.** Clearing `GestureDetector:feedEvent`'s return array suppressed only
+what feedEvent produced. `hold` and the deferred single `tap` come from
+`Input:setTimeout` callbacks dispatched directly by `Input:waitEvent`
+(input.lua:1584 @ v2026.07), so they escaped it: a stationary finger raised the
+text-selection popup mid-stroke. The stylus route papered over that with
+`dropContact`, which destroys the contact and was unusable on the finger route
+because ADR-2 needs that state alive.
+
+The decision was also per frame. Gestures carry a position but not a slot, so
+releasing the frame that carried the pen's tap on a toolbar button released a
+simultaneous palm's gesture with it.
+
+And it forced the plugin to keep its own copy of GestureDetector's contact
+bookkeeping to reconstruct what was happening. Every bug in that copy was a
+behaviour bug: a palm that landed first answered for the finger reaching for
+Stop, and the pen's per-frame flag leaking past an error disarm released the
+next session's first frame.
+
+**Decision.** Suppress in `InkBar:onGesture`, via `InkBar:suppresses`.
+`UIManager:sendEvent` offers every input event to the topmost non-toast widget
+and stops when it returns true (uimanager.lua:884 @ v2026.07), timer-born
+gestures included — they arrive through the same `handleInputEvent` path.
+Gestures reach a widget rotation-adjusted and carrying `pos`, so the decision is
+per gesture and needs no coordinate transform of its own. A gesture with no
+position cannot be attributed to a contact and is suppressed. The capture hook
+goes back to its original job: observing contacts to draw from.
+
+**Consequences.** The timer path is covered on both routes. Palm rejection is
+per gesture, so the narrow case where a palm escaped with the pen's toolbar tap
+is closed. `dropSuppressedContacts` is gone and the plugin's contact bookkeeping
+shrank to what the decision actually reads.
+
+The price is a hard dependency on the toolbar being the topmost widget. The
+invariant "drawing implies a visible toolbar" stops being a UX promise and
+becomes a safety requirement — `setBarShown(false)` already calls
+`setDrawing(false)`, and that call is now load-bearing.
+
+Rejected: clearing `contact.pending_hold_timer` on suppressed contacts. It works
+— the hold timer is only ever armed on the initial contact down
+(gesturedetector.lua:673 @ v2026.07) and its callback re-checks the field — but
+it reaches into another module's private state, it cannot fix the per-frame
+problem, and it would silently kill a legitimate two-finger hold.
 
 ## Deferred
 
