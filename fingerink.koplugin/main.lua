@@ -356,7 +356,9 @@ function FingerInk:resetContacts()
 end
 
 --- Per-sequence pen state. `stylus_lift_x/y` deliberately survives, because it
---- is how the next contact-down detects stale coordinates.
+--- is how the next contact-down detects stale coordinates. `stylus_frame_ui`
+--- does not: a raise mid-frame skips stylusFrameResult entirely and would
+--- otherwise leave the flag set for the next session's first residual frame.
 function FingerInk:resetStylusState()
     self.stylus_active = false
     self.stylus_passthrough = false
@@ -364,6 +366,7 @@ function FingerInk:resetStylusState()
     self.stylus_geom_latched = false
     self.stylus_suspended = false
     self.stylus_stale_xy = false
+    self.stylus_frame_ui = false
 end
 
 function FingerInk:onFingerInkToggle()

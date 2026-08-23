@@ -1035,6 +1035,25 @@ t:case("a pen on the toolbar does not latch passthrough for a palm", function()
     t:eq(moved, 0, "the palm still cannot reach the reader")
 end)
 
+t:case("an error disarm does not leave the pen's frame flag set", function()
+    local input = reset{ wacom_protocol = true }
+    local p = newPlugin()
+    p:setDrawing(true)
+
+    -- A raise inside the stylus handler returns the guard's fail value without
+    -- ever reaching stylusFrameResult, so the flag keeps whatever it held.
+    p.stylus_frame_ui = true
+    Capture:fail("boom")
+    env.UIManager:flush()
+
+    t:eq(p.stylus_frame_ui, false, "the per-frame flag was cleared with the rest")
+
+    p:setDrawing(true)
+    local bus = support.newSlotBus()
+    local n = pumpFrame(input, bus, { { slot = 0, fields = { id = 1, x = 300, y = 600 } } })
+    t:eq(n, 0, "the first palm frame after restarting is still suppressed")
+end)
+
 t:case("a resting palm does not make the toolbar unreachable", function()
     -- The palm lands first, off the toolbar, and used to latch the geometry
     -- decision for every later contact in the sequence. Stop is the only way
