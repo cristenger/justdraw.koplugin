@@ -141,7 +141,21 @@ lua test.lua                          # any Lua 5.1+, no LuaJIT needed
 
 All three run the same suite; it needs no KOReader session. Every push and
 pull request runs it on CI, together with a syntax sweep over every Lua file
-in the plugin. Covers rasterisation,
+in the plugin.
+
+The suite fakes KOReader. `tests/conformance.lua` is what checks those fakes
+against the real thing — run it from inside a KOReader build directory:
+
+```sh
+cd /path/to/koreader-emulator-*/koreader
+./luajit /path/to/fingerink.koplugin/tests/conformance.lua
+```
+
+It prints one line per assumption: `OK`, `MISMATCH`, or `UNCHECKABLE` when the
+runtime is older than the API in question. **`UNCHECKABLE` is not a pass** — on
+a KOReader without the stylus API, the pen claims come back unchecked and the
+stylus route is still only covered by fakes. A `MISMATCH` means a fake lies;
+fix the fake. Covers rasterisation,
 the stroke store and hit test, the rotation transform for all four rotations,
 both capture backends, ownership-safe install and removal, error containment,
 the pen state machine (latching, sticky tracking ids, the physical eraser), the

@@ -807,6 +807,11 @@ KOREADER_RUNTIME=/Users/christianstenger/koreader/koreader/koreader-emulator-arm
 (cd fingerink.koplugin && "$KOREADER_QA" preflight)
 (cd fingerink.koplugin && "$KOREADER_QA" test)     # debe correr tests/run.lua, no imprimir SKIP
 "$KOREADER_RUNTIME/luajit" test.lua                 # shim de raíz, misma suite
+lua test.lua                                        # cualquier Lua 5.1+, sin LuaJIT
+
+# Contrasta los stubs de la suite contra el Device real del runtime instalado.
+# UNCHECKABLE no es un pase: significa que este runtime no tiene esa API.
+(cd "$KOREADER_RUNTIME" && ./luajit "$PWD"/../../../../GitHub/fingerink.koplugin/fingerink.koplugin/tests/conformance.lua)
 ```
 
 Para una sesión visual aislada:
