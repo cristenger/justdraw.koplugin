@@ -89,8 +89,14 @@ Ink is saved into the book's sidecar, per page, when KOReader flushes settings.
 ## Menu and gestures
 
 Top menu → More tools → Finger Ink: start drawing, show/hide the toolbar, put
-it on the left instead, input mode, pen width, refresh quality, clear page,
-clear document.
+it on the left instead, input mode, pen width, refresh quality, stylus
+diagnostics, clear page, clear document.
+
+**Log stylus diagnostics** is for reporting pen problems on hardware. It writes
+one line per pen event for a minute, capped at 500 lines, and stops on its own.
+Each line carries the digitizer's slot, tracking id, tool, position and whether
+that position repeated the last lift — nothing about the book you have open.
+Only selectable while the stylus route is actually running.
 "Start drawing" closes the menu on purpose — an open menu is useless once
 single-finger taps are going to ink.
 

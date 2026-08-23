@@ -39,6 +39,12 @@ local SUSPENDED = -1   -- draw_slot sentinel: ignore this contact until it lifts
 
 local INPUT_MODES = { auto = true, stylus = true, finger = true }
 
+-- Bounded twice on purpose. The only thing worse than no data from a hardware
+-- session is a log that filled the device and got truncated at the interesting
+-- part.
+local DIAG_SECONDS = 60
+local DIAG_MAX_LINES = 500
+
 -- Reasons Capture can refuse, mapped to something a user can act on.
 local INPUT_ERRORS = {
     no_stylus_api = _("Stylus input requires KOReader v2026.07 or newer"),
@@ -84,6 +90,9 @@ function FingerInk:init()
     self.stylus_inked = false
     self.stylus_tool = nil
     self.stylus_lift_x, self.stylus_lift_y = nil, nil
+
+    self.diag_until = nil
+    self.diag_lines = 0
 
     self.store = Store.new(self.ui.doc_settings:readSetting(SETTING_KEY))
 
@@ -509,6 +518,7 @@ hold timer that blocks the slot until the next dropContacts().
 ]]
 function FingerInk:onStylusEvent(slot)
     local id, x, y, tool = slot.id, slot.x, slot.y, slot.tool
+    if self.diag_until then self:diag(slot, x, y) end
 
     -- Hover before this slot ever carried a tracking id. Consume, change nothing.
     if id == nil then return self:stylusFrameResult(true) end
@@ -600,6 +610,34 @@ button unreachable with the pen.
 function FingerInk:stylusFrameResult(dominate)
     if not dominate then self.stylus_frame_ui = true end
     return dominate
+end
+
+--[[--
+One bounded diagnostic session, for reporting hardware problems.
+
+Digitizer numbers only: slot, tracking id, tool, the screen position, and
+whether this frame's raw coordinates repeated the previous lift. No paths, no
+titles, nothing from the book. See the plan's stopping conditions.
+]]
+function FingerInk:startDiagnostics()
+    self.diag_until = os.time() + DIAG_SECONDS
+    self.diag_lines = 0
+    logger.info("FI-DIAG start",
+        "pen_slot", tostring(Device.input and Device.input.pen_slot),
+        "wacom", tostring(Device.input and Device.input.wacom_protocol),
+        "backend", tostring(self.input_backend))
+end
+
+function FingerInk:diag(slot, sx, sy)
+    if not self.diag_until then return end
+    if self.diag_lines >= DIAG_MAX_LINES or os.time() > self.diag_until then
+        logger.info("FI-DIAG end", self.diag_lines, "lines")
+        self.diag_until = nil
+        return
+    end
+    self.diag_lines = self.diag_lines + 1
+    logger.info("FI-DIAG", slot.slot, slot.id, tostring(slot.tool),
+        sx, sy, tostring(self.stylus_stale_xy))
 end
 
 --[[--
@@ -887,6 +925,13 @@ function FingerInk:addToMainMenu(menu_items)
                     G_reader_settings:saveSetting("fingerink_live_fast", self.live_fast)
                 end,
                 help_text = _([[On: strokes appear with the DU waveform — quick, but grainy and it leaves ghosting until the next page turn. Off: slower, cleaner.]]),
+                separator = true,
+            },
+            {
+                text = _("Log stylus diagnostics (60 s)"),
+                enabled_func = function() return self.input_backend == "stylus" end,
+                callback = function() self:startDiagnostics() end,
+                help_text = _([[Writes one line per pen event to the log for a minute, capped at 500 lines: slot, tracking id, tool, position, and whether the position repeated. Digitizer numbers only - nothing from the book. For reporting hardware problems.]]),
                 separator = true,
             },
             {

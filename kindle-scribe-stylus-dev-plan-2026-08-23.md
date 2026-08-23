@@ -811,7 +811,8 @@ lua test.lua                                        # cualquier Lua 5.1+, sin Lu
 
 # Contrasta los stubs de la suite contra el Device real del runtime instalado.
 # UNCHECKABLE no es un pase: significa que este runtime no tiene esa API.
-(cd "$KOREADER_RUNTIME" && ./luajit "$PWD"/../../../../GitHub/fingerink.koplugin/fingerink.koplugin/tests/conformance.lua)
+PROBE="$PWD/fingerink.koplugin/tests/conformance.lua"
+(cd "$KOREADER_RUNTIME" && ./luajit "$PROBE")
 ```
 
 Para una sesión visual aislada:

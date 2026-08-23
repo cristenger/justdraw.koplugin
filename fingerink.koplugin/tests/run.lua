@@ -1056,6 +1056,25 @@ t:case("a pen on the toolbar does not latch passthrough for a palm", function()
     t:eq(moved, 0, "the palm still cannot reach the reader")
 end)
 
+t:case("diagnostics stop on their own", function()
+    local p = pipelinePlugin()
+    p:startDiagnostics()
+    t:check(p.diag_until ~= nil, "diagnostics armed")
+
+    local before = #env.logs.info
+    for i = 1, 600 do p:diag({ slot = 4, id = 4, tool = 1 }, 10, i) end
+
+    t:eq(p.diag_until, nil, "the line budget disarmed them")
+    t:check(#env.logs.info - before <= 502, "and the log did not run away")
+end)
+
+t:case("diagnostics log nothing until they are armed", function()
+    local p = pipelinePlugin()
+    local before = #env.logs.info
+    p:diag({ slot = 4, id = 4, tool = 1 }, 10, 10)
+    t:eq(#env.logs.info, before, "disarmed is silent")
+end)
+
 t:case("a dot placed where the last one lifted is not lost", function()
     -- The stale-coordinate guard compares the contact-down frame against the
     -- previous lift, so a pen that comes back down on the same spot is judged
