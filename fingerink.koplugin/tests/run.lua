@@ -1035,6 +1035,21 @@ t:case("a pen on the toolbar does not latch passthrough for a palm", function()
     t:eq(moved, 0, "the palm still cannot reach the reader")
 end)
 
+t:case("a dot placed where the last one lifted is not lost", function()
+    -- The stale-coordinate guard compares the contact-down frame against the
+    -- previous lift, so a pen that comes back down on the same spot is judged
+    -- stale and the whole sequence produces nothing.
+    local p, input = pipelinePlugin()
+    local bus = support.newSlotBus()
+
+    pumpFrame(input, bus, { { slot = 4, fields = { id = 4, x = 400, y = 400, tool = 1 } } })
+    pumpFrame(input, bus, { { slot = 4, fields = { id = -1 } } })
+    pumpFrame(input, bus, { { slot = 4, fields = { id = 5, x = 400, y = 400, tool = 1 } } })
+    pumpFrame(input, bus, { { slot = 4, fields = { id = -1 } } })
+
+    t:eq(#p.store:get(p:currentPage()), 2, "both dots were stored")
+end)
+
 t:case("an error disarm does not leave the pen's frame flag set", function()
     local input = reset{ wacom_protocol = true }
     local p = newPlugin()

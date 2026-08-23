@@ -81,6 +81,8 @@ function FingerInk:init()
     self.stylus_suspended = false
     self.stylus_stale_xy = false
     self.stylus_frame_ui = false
+    self.stylus_inked = false
+    self.stylus_tool = nil
     self.stylus_lift_x, self.stylus_lift_y = nil, nil
 
     self.store = Store.new(self.ui.doc_settings:readSetting(SETTING_KEY))
@@ -367,6 +369,8 @@ function FingerInk:resetStylusState()
     self.stylus_suspended = false
     self.stylus_stale_xy = false
     self.stylus_frame_ui = false
+    self.stylus_inked = false
+    self.stylus_tool = nil
 end
 
 function FingerInk:onFingerInkToggle()
@@ -525,6 +529,14 @@ function FingerInk:onStylusEvent(slot)
         end
         if self.stylus_passthrough then return self:stylusFrameResult(false) end
 
+        -- Remember the last tool that was not the TOOL_TYPE_FINGER a pen slot
+        -- reports on its way out of proximity. The lift frame often carries
+        -- exactly that, and a point recovered from it must not silently become
+        -- ink when the user was erasing.
+        if tool ~= nil and tool ~= Capture.TOOL_FINGER then
+            self.stylus_tool = tool
+        end
+
         -- A dialog opened mid-stroke. Stop inking, but keep dominating to the
         -- lift: handing the slot back now would make GestureDetector open a
         -- fresh contact mid-stroke and emit a spurious tap.
@@ -560,6 +572,15 @@ function FingerInk:onStylusEvent(slot)
         return self:stylusFrameResult(not self.stylus_passthrough)
     end
     local was_passthrough = self.stylus_passthrough
+    -- A contact-down frame judged stale is sometimes a false positive: the pen
+    -- really did come back down where it lifted last time. If the sequence
+    -- produced no point at all, recover it from the lift frame, which by now
+    -- carries a real position.
+    if not was_passthrough and not self.stylus_inked
+        and not self.stylus_suspended and x and y then
+        local sx, sy = Capture.toScreen(x, y)
+        self:onStylusPoint(sx, sy, self.stylus_tool)
+    end
     if not was_passthrough then
         self:endStroke()
     end
@@ -593,6 +614,7 @@ function FingerInk:onStylusPoint(x, y, tool)
         self.stylus_suspended = true
         return
     end
+    self.stylus_inked = true
     self:applyPoint(x, y, tool)
 end
 
