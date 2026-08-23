@@ -14,11 +14,19 @@ Stack: plugin KOReader en Lua/LuaJIT, KOReader **v2026.07** o posterior para sty
 
 ### 0.0 Estado de implementación (2026-08-23)
 
-Fases 0 a 5 implementadas en la rama `codex/kindle-scribe-stylus`. Suite:
-**184 comprobaciones, 0 fallos**, ejecutada con el LuaJIT de KOReader tanto por
-`koreader_qa.sh test` como por el shim de raíz. `preflight` PASS, barrido de
-sintaxis 8 ficheros PASS, y ReaderUI carga el plugin sobre un PDF a geometría
-Scribe (1860×2480 @300 dpi) sin ningún traceback.
+Fases 0 a 5 implementadas en la rama `codex/kindle-scribe-stylus`, más la
+remediación posterior descrita en
+[`kindle-scribe-stylus-remediation-plan-2026-08-23.md`](kindle-scribe-stylus-remediation-plan-2026-08-23.md).
+Suite: **302 comprobaciones, 0 fallos**, ejecutada con el LuaJIT de KOReader
+tanto por `koreader_qa.sh test` como por el shim de raíz, y también bajo un Lua
+del sistema sin KOReader. `preflight` PASS, barrido de sintaxis 9 ficheros PASS,
+y ReaderUI carga el plugin sobre un PDF a geometría Scribe (1860×2480 @300 dpi)
+sin ningún traceback.
+
+La supresión de entrada ya no vive en el wrapper de `feedEvent`: desde ADR-13
+está en `InkBar:suppresses`, por gesto y por posición. Eso cerró el `hold` que
+se escapaba en la ruta de dedo y el gesto de palma que salía con el tap del
+lápiz sobre la barra.
 
 Un probe de integración contra el `Device` real del runtime v2025.08 confirma
 que los stubs de la suite describen la realidad: `pen_slot == 4`,

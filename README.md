@@ -160,13 +160,20 @@ It prints one line per assumption: `OK`, `MISMATCH`, or `UNCHECKABLE` when the
 runtime is older than the API in question. **`UNCHECKABLE` is not a pass** — on
 a KOReader without the stylus API, the pen claims come back unchecked and the
 stylus route is still only covered by fakes. A `MISMATCH` means a fake lies;
-fix the fake. Covers rasterisation,
-the stroke store and hit test, the rotation transform for all four rotations,
-both capture backends, ownership-safe install and removal, error containment,
-the pen state machine (latching, sticky tracking ids, the physical eraser), the
-residual touch filter, and toolbar reachability — that a tap starting on the bar
-passes through and inks nothing, and that a stroke dragged onto it is truncated
-rather than painted over the buttons.
+fix the fake.
+
+The suite covers rasterisation, the stroke store and hit test, the rotation
+transform for all four rotations, both capture backends, ownership-safe install
+and removal, error containment, the pen state machine (latching, sticky tracking
+ids, the physical eraser), the residual contact bookkeeping, the widget-layer
+suppression rule, and toolbar reachability — that a tap starting on the bar
+passes through and inks nothing, that a stroke dragged onto it is truncated
+rather than painted over the buttons, and that a resting palm cannot make Stop
+unreachable.
+
+What it cannot prove is the toolbar's pixel layout: the fake buttons have no hit
+rectangles, so "the tap reached the toolbar" is as far as it goes. Whether it
+landed on the right button is what the physical test matrix is for.
 
 The pen tests drive synthetic slots that reproduce KOReader's real slot
 lifetime: one persistent table per slot, reused across frames, with `id`, `x`
