@@ -40,9 +40,10 @@ drive the stylus route, but a plain mouse lands on slot 0 or 1 with no
 `ABS_MT_TOOL_TYPE`, never reaches the callback, and would be swallowed by the
 residual filter. Testers with a tablet select `stylus` by hand.
 
-The mode cannot be changed while `drawing` is true; the radio items are
-disabled. Swapping backends inside a live contact sequence would tear down
-capture mid-stroke.
+`setInputMode` refuses while `drawing` is true, and the radio items are
+disabled as well. The guard lives in the setter, not only in the menu: swapping
+backends inside a live contact sequence would tear down capture mid-stroke, and
+the menu is not the only possible caller.
 
 ### Finger backend
 
@@ -101,11 +102,19 @@ Nothing between the plugin and KOReader's main loop is protected:
 `handleTouchEv` bare, and neither UIManager nor `reader.lua` wraps that path. An
 unguarded error would take KOReader down *and* leave the monkey patch installed.
 
-Both handlers therefore run under `pcall`. On error the capture disarms itself
-and the handler returns the value that makes KOReader behave as if the plugin
-were absent: `false` from the stylus callback (do not dominate the slot) and
-`true` from the residual wrapper (let the gestures out). The plugin then stops
-drawing, drops the stroke in flight, and notifies once.
+Both handlers therefore run under `pcall`. On error the handler returns the
+value that makes KOReader behave as if the plugin were absent: `false` from the
+stylus callback (do not dominate the slot) and `true` from the residual wrapper
+(let the gestures out).
+
+Disarming is two-phase. `Capture.active` is cleared **immediately**, which makes
+both wrappers inert, but the actual unhooking is deferred to the next UI tick.
+`Input:routeStylusEvents` re-reads `input.stylus_callback` on *every* slot of
+the frame (`input.lua:506`), so clearing it from inside the callback would make
+the next stylus slot in that same frame call a nil value — the very crash the
+guard exists to prevent. On the next tick the hooks come out from a safe stack,
+the plugin stops drawing, the stroke in flight is dropped, and the user is told
+once.
 
 ### Slot data
 
@@ -157,15 +166,27 @@ convenience, not the exit route — the toolbar is.
 | first `id >= 0` | latch `stylus_passthrough` from `dialogOnTop()` | — |
 | latched passthrough | nothing | `false` |
 | first frame with `x`/`y`, inside `bar.dimen` | latch passthrough | `false` |
+| contact-down repeating the previous lift's `x`/`y` | ignore the frame's coordinates | `true` |
 | `id >= 0` with coordinates | draw or erase | `true` |
 | dragged onto the bar | end the stroke at the edge, park until lift | `true` |
+| dialog opens mid-stroke | abort the stroke, keep dominating | `true` |
 | `id < 0`, was drawing | `endStroke`, reset | `true` |
 | `id < 0`, was passthrough | reset | `false` |
 | `id < 0`, not active | nothing (idempotent) | latched value |
 
-**The domination decision is latched at contact-down and cannot change before
-the lift.** This is correctness, not style. `GestureDetector:feedEvent` creates
-a `Contact` the first time it sees a slot:
+Coordinates are sticky, so a contact-down frame that only carried `BTN_TOUCH`
+still presents the position where the *previous* sequence ended. Latching
+geometry from it can swallow the whole next stroke (if that position was on the
+toolbar) or ink a phantom dot at the old spot. `stylus_lift_x/y` remembers the
+last lift and the next contact-down refuses to trust an identical pair.
+
+A dialog appearing mid-stroke aborts the ink but keeps dominating to the lift —
+handing the slot back at that point is the `true` → `false` flip described
+below.
+
+**Once a frame has been dominated, the decision cannot change before the lift.**
+This is correctness, not style. `GestureDetector:feedEvent` creates a `Contact`
+the first time it sees a slot:
 
 - `true` → `false` mid-sequence: the detector opens a *new* contact at the
   current position, marks it down, and emits a spurious tap on lift.
@@ -180,15 +201,48 @@ to guess is what makes rejection predictable.
 
 | Condition | Return |
 | --- | --- |
-| pen sequence is passthrough | `true` (whole frame) |
+| the pen handed its slot to the UI **in this frame** | `true` (whole frame) |
 | dialog above the reader | `true` |
 | sequence started inside `bar.dimen` | `true` until all contacts lift |
 | anything else, 1 or many contacts | `false` |
+
+The first row reads a per-frame flag set by `stylusFrameResult`, **not** the
+latched `stylus_passthrough`. The lift frame is the one that carries a tap, and
+`onStylusEvent` resets the latch on that frame before this filter runs; reading
+the latch here made every toolbar button unreachable with the pen.
+
+Pen slots are skipped by `Capture:isStylusSlot` rather than counted. Counting
+them corrupts `n_contacts` and lets the pen's toolbar position latch
+`passthrough` for the *touch* state machine, which then survives the pen's lift
+and lets a resting palm turn pages.
+
+Contact accounting runs on every frame, including frames the pen already
+decided. Skipping it stranded contacts that lifted inside the pen's passthrough
+window.
 
 An empty `slots` array is normal — it happens whenever the pen was the only
 contact and got dominated — and must not be read as "everything lifted".
 
 This filter never calls `onContactPoint` and never touches `self.stroke`.
+
+### Suppression is more than an empty array
+
+Emptying `feedEvent`'s return value does not stop `hold` or the deferred single
+`tap`. Those are produced by timer callbacks registered through
+`Input:setTimeout` (`gesturedetector.lua:641` and `:675`) and dispatched
+straight out of `Input:waitEvent` (`input.lua:1570-1585`), never passing through
+`feedEvent`. A palm resting for the hold interval would raise the text
+selection popup mid-stroke.
+
+So on the stylus backend a suppressed frame also drops the corresponding
+contacts via `GestureDetector:dropContact`, which clears their pending
+timeouts.
+
+**Finger backend limitation (pre-existing).** The legacy route cannot do this:
+ADR-2 requires the detector's contact state to survive suppression, or the
+two-finger gesture stops firing. A stationary drawing finger can therefore still
+trip a `hold` after the hold interval. Unchanged by this work, and out of its
+scope.
 
 **Known limitation.** The emit decision is per frame, not per contact:
 GestureDetector's gesture events carry `pos` but no slot number, so a frame

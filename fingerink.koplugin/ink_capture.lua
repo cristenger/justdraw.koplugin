@@ -20,6 +20,7 @@ installed. See ADR-12.
 ]]
 
 local Device = require("device")
+local UIManager = require("ui/uimanager")
 local logger = require("logger")
 
 -- Fallbacks for runtimes older than the Input.TOOL_TYPE_* exports, which
@@ -38,9 +39,12 @@ local Capture = {
     input = nil,
     gesture_detector = nil,
     original_feed = nil,
+    feed_was_own = false,     -- was feedEvent an instance field before us?
     feed_wrapper = nil,
     stylus_callback = nil,
+    drop_suppressed = false,
     on_error = nil,
+    failing = false,
 
     TOOL_FINGER = TOOL_TYPE_FINGER,
     TOOL_PEN = TOOL_TYPE_PEN,
@@ -86,6 +90,9 @@ Mirrors the `is_stylus` test in Input:routeStylusEvents: a tool match, *or* the
 dedicated pen slot regardless of tool. The slot-number clause is the one that
 matters on Wacom, and it is why a frame can arrive here reporting
 TOOL_TYPE_FINGER.
+
+Used by the residual filter to skip pen slots that were handed back to the UI:
+they are not touch, and counting them as contacts corrupts the bookkeeping.
 ]]
 function Capture:isStylusSlot(slot, input)
     if not slot then return false end
@@ -101,20 +108,32 @@ end
 -- -------------------------------------------------------- error handling
 
 --[[--
-Disarm after a handler error. Runs remove() *before* notifying, so a caller
-that disarms again from its own error handler finds nothing left to do.
+Disarm after a handler error.
+
+The unhooking is deferred to the next UI tick on purpose. `routeStylusEvents`
+re-reads `input.stylus_callback` on *every* slot of the frame
+(frontend/device/input.lua:506), so clearing it from inside the callback would
+make the next stylus slot in that same frame call a nil value — exactly the
+crash this guard exists to prevent. Clearing `active` is enough to make both
+wrappers inert immediately; the actual unhook happens from a safe stack.
 ]]
 function Capture:fail(err)
+    if self.failing then return end
+    self.failing = true
     logger.err("FingerInk: input handler failed:", err)
+    self.active = false
     local on_error = self.on_error
-    self:remove()
-    if on_error then
-        -- A failure in the notifier must not resurrect the original error.
-        local ok, nested = pcall(on_error, err)
-        if not ok then
-            logger.err("FingerInk: error handler itself failed:", nested)
+    UIManager:nextTick(function()
+        self.failing = false
+        self:remove()
+        if on_error then
+            -- A failure in the notifier must not resurrect the original error.
+            local ok, nested = pcall(on_error, err)
+            if not ok then
+                logger.err("FingerInk: error handler itself failed:", nested)
+            end
         end
-    end
+    end)
 end
 
 --[[--
@@ -122,17 +141,48 @@ Wrap a plugin handler so a raised error degrades instead of propagating.
 `fail_value` is the answer that makes KOReader behave as if we were not here:
 false for the stylus callback (do not dominate the slot) and true for the
 residual wrapper (let the gestures out).
+
+`fail` itself is called under pcall too — it is not part of the caller's
+contract, and a raise from it would escape to exactly the place we are
+protecting.
 ]]
 local function guard(self, fn, fail_value)
     return function(...)
         local ok, res = pcall(fn, ...)
         if ok then return res end
-        self:fail(res)
+        pcall(self.fail, self, res)
         return fail_value
     end
 end
 
 -- ------------------------------------------------------------- install
+
+--[[--
+Drop GestureDetector's contacts for the slots in a suppressed frame.
+
+Emptying feedEvent's return array is not enough. `hold` and the deferred single
+`tap` are produced by timer callbacks registered through `Input:setTimeout`
+(frontend/device/gesturedetector.lua:641 and :675) and dispatched straight from
+`Input:waitEvent` (frontend/device/input.lua:1570-1585) without ever going
+through feedEvent. A palm resting for the hold interval would raise a text
+selection popup mid-stroke. `dropContact` clears those pending timeouts.
+
+Stylus backend only. On the finger backend the detector's contact state has to
+survive suppression, or the two-finger gesture stops firing. See ADR-2.
+]]
+local function dropSuppressedContacts(gd, slots)
+    if type(gd.getContact) ~= "function" or type(gd.dropContact) ~= "function" then
+        return
+    end
+    for i = 1, #slots do
+        local ev = slots[i]
+        local slot = ev and ev.slot
+        if slot ~= nil then
+            local contact = gd:getContact(slot)
+            if contact then gd:dropContact(contact) end
+        end
+    end
+end
 
 --[[--
 Build the feedEvent wrapper. It stays transparent once we are no longer the
@@ -150,12 +200,16 @@ function Capture:_installFeedWrapper(frame_handler, fail_value)
         local emit = handler(slots)
         local evs = original(gd_self, slots)
         if emit then return evs end
+        if self.drop_suppressed then
+            dropSuppressedContacts(gd_self, slots)
+        end
         for i = #evs, 1, -1 do
             evs[i] = nil
         end
         return evs
     end
     self.feed_wrapper = wrapper
+    self.feed_was_own = rawget(self.gesture_detector, "feedEvent") ~= nil
     self.gesture_detector.feedEvent = wrapper
 end
 
@@ -174,6 +228,7 @@ function Capture:installFinger(frame_handler, on_error)
     self.gesture_detector = gd
     self.original_feed = gd.feedEvent
     self.on_error = on_error
+    self.drop_suppressed = false
     self.backend = "finger"
     self.active = true
     self:_installFeedWrapper(frame_handler, true)
@@ -203,8 +258,10 @@ function Capture:installStylus(stylus_handler, residual_frame_handler, on_error)
         return false, "no_gesture_detector"
     end
     -- The callback is a singleton with no chaining and no owner query, so the
-    -- only safe move against another plugin is to refuse.
-    if input.stylus_callback ~= nil and input.stylus_callback ~= self.stylus_callback then
+    -- only safe move against another plugin is to refuse. Our own callback is
+    -- always nil here: we return early when active, and every removal path
+    -- clears it.
+    if input.stylus_callback ~= nil then
         return false, "stylus_callback_busy"
     end
 
@@ -213,6 +270,7 @@ function Capture:installStylus(stylus_handler, residual_frame_handler, on_error)
     self.gesture_detector = gd
     self.original_feed = gd.feedEvent
     self.on_error = on_error
+    self.drop_suppressed = true
     self.backend = "stylus"
     self.active = true
 
@@ -223,7 +281,16 @@ function Capture:installStylus(stylus_handler, residual_frame_handler, on_error)
         return handler(slot) and true or false
     end
     self.stylus_callback = callback
-    input:registerStylusCallback(callback)
+
+    -- Registration is the first mutation of the runtime; if a device override
+    -- raises here, the refusal must still leave nothing behind.
+    local registered, reg_err = pcall(input.registerStylusCallback, input, callback)
+    if not registered then
+        logger.err("FingerInk: registerStylusCallback failed:", reg_err)
+        self.active = false
+        self:_forget()
+        return false, "no_stylus_api"
+    end
 
     self:_installFeedWrapper(residual_frame_handler, true)
 
@@ -237,28 +304,30 @@ function Capture:_forget()
     self.input = nil
     self.gesture_detector = nil
     self.original_feed = nil
+    self.feed_was_own = false
     self.feed_wrapper = nil
     self.stylus_callback = nil
+    self.drop_suppressed = false
     self.backend = nil
     self.on_error = nil
+    self:resolveTools(nil)
 end
 
 --[[--
 Give back everything we still own, and only what we still own. Idempotent.
 
-Order matters: clearing `active` first turns our own handlers into passthrough,
-so a wrapper someone else chained on top of ours keeps working even in the case
-where we cannot unhook.
+Deliberately not gated on `active`: an error disarms by clearing `active` and
+schedules this for the next tick, so by the time it runs the flag is already
+false but the hooks are still in place.
 ]]
 function Capture:remove()
-    if not self.active then
+    local input = self.input
+    local gd = self.gesture_detector
+    if not (input or gd) then
         self:_forget()
         return
     end
     self.active = false
-
-    local input = self.input
-    local gd = self.gesture_detector
 
     if self.stylus_callback and input then
         if input.stylus_callback == self.stylus_callback then
@@ -270,7 +339,14 @@ function Capture:remove()
 
     if self.feed_wrapper and gd then
         if gd.feedEvent == self.feed_wrapper then
-            gd.feedEvent = self.original_feed
+            -- feedEvent is normally inherited from the GestureDetector class.
+            -- Writing the original back as an instance field would pin a
+            -- snapshot of it forever, so restore the exact shape we found.
+            if self.feed_was_own then
+                gd.feedEvent = self.original_feed
+            else
+                gd.feedEvent = nil
+            end
         else
             logger.warn("FingerInk: feedEvent was replaced by someone else; leaving it in place")
         end
@@ -284,7 +360,8 @@ end
 --[[--
 Slot coordinates are pre-rotation: GestureDetector applies the transform after
 detection, in Input:handleTouchEv, so both capture routes have to do it
-themselves. Formulas mirror GestureDetector:translateCoordinates exactly.
+themselves. Formulas mirror GestureDetector:translateCoordinates exactly,
+including its identity default for a mode outside 0..3.
 
 getTouchRotation is the contract GestureDetector itself uses; it can diverge
 from getRotationMode on backends that override it (PocketBook does). The
@@ -298,14 +375,14 @@ function Capture.toScreen(x, y)
     local mode = screen.getTouchRotation
         and screen:getTouchRotation()
         or screen:getRotationMode()
-    if mode == screen.DEVICE_ROTATED_UPRIGHT then
-        return x, y
-    elseif mode == screen.DEVICE_ROTATED_CLOCKWISE then
+    if mode == screen.DEVICE_ROTATED_CLOCKWISE then
         return screen:getWidth() - y, x
     elseif mode == screen.DEVICE_ROTATED_UPSIDE_DOWN then
         return screen:getWidth() - x, screen:getHeight() - y
-    else -- DEVICE_ROTATED_COUNTER_CLOCKWISE
+    elseif mode == screen.DEVICE_ROTATED_COUNTER_CLOCKWISE then
         return y, screen:getHeight() - x
+    else -- DEVICE_ROTATED_UPRIGHT, and anything unexpected: identity
+        return x, y
     end
 end
 

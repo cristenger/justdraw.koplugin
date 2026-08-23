@@ -221,6 +221,21 @@ identity, and treat the pen's domination decision as latched from contact-down
 to lift, because GestureDetector's contact bookkeeping cannot survive a flip
 mid-sequence.
 
+**Suppression has to drop contacts, not just blank the array.** `hold` and the
+deferred single `tap` come from `Input:setTimeout` callbacks dispatched directly
+by `Input:waitEvent`; they never pass through `feedEvent`, so clearing its
+return value cannot stop them. A resting palm would raise the text selection
+popup mid-stroke. The stylus backend therefore calls
+`GestureDetector:dropContact` for the slots in a suppressed frame. The finger
+backend deliberately does not — ADR-2 needs that state alive for the two-finger
+gesture — so the legacy route keeps that (pre-existing) hole.
+
+**The pen's per-frame decision is published to the touch filter.** The two
+handlers run in the same input frame, and the lift frame — the one carrying a
+toolbar tap — resets the passthrough latch before the filter runs. The filter
+reads a per-frame flag instead. Without it, no toolbar button was reachable with
+the pen.
+
 **Consequences.** Real palm rejection on the Scribe, at the price of no touch
 navigation while drawing — Stop is the way back. Two hooks instead of one.
 Coexistence with another stylus plugin is impossible by construction, which is
@@ -265,11 +280,18 @@ out). It then calls the plugin's `on_error`, itself guarded so a failure there
 cannot resurrect the original. The plugin stops drawing, drops the stroke in
 flight, and notifies once.
 
+**Unhooking is deferred one UI tick.** `Input:routeStylusEvents` re-reads
+`input.stylus_callback` on every slot of the frame, so unregistering from inside
+the callback makes the next stylus slot in that same frame call a nil value —
+reintroducing exactly the crash this ADR exists to prevent. Clearing `active` is
+enough to make both wrappers inert immediately; the hooks come out on the next
+tick, from a safe stack.
+
 **Consequences.** One `pcall` per input frame, which is noise next to the
 per-segment refresh ioctl already on that path. A bug surfaces as "drawing
-stopped, here is a notification" instead of a crash. Removal is re-entrant:
-`fail` removes before notifying, so a handler that disarms again finds nothing
-to do.
+stopped, here is a notification" instead of a crash. There is a one-tick window
+where the hooks are installed but inert, which is the price of not corrupting
+the frame we failed in.
 
 Rejected: letting errors propagate and relying on KOReader's crash log. It is
 the current behaviour, and it is how a one-line typo becomes a device that has

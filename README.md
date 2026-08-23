@@ -118,6 +118,11 @@ since two-finger gestures keep working while drawing.
   palm rests on the screen, that one input frame is released as a whole and the
   palm's gesture can get through with it. KOReader's gesture events carry a
   position but not a slot number, so the decision cannot be made per contact.
+- **Finger route: a stationary finger can still trigger a long-press.**
+  KOReader produces `hold` from a timer that does not pass through the hook this
+  route uses, so holding still while drawing can raise the text-selection popup.
+  Pre-existing; the stylus route does not have this problem, because it drops
+  suppressed contacts outright.
 - **Suspend stops drawing.** Resuming leaves drawing off and the toolbar up;
   press Draw again. Suspending mid-stroke means KOReader never delivers the pen
   lift, so restarting from a clean state is the only safe option.

@@ -45,6 +45,7 @@ local INPUT_ERRORS = {
     stylus_callback_busy = _("Another plugin is already using stylus input"),
     no_gesture_detector = _("Finger Ink: cannot hook touch input"),
     no_input = _("Finger Ink: cannot hook touch input"),
+    already_installed = _("Finger Ink: input is already captured"),
     handler_error = _("Finger Ink: drawing stopped after an input error"),
 }
 
@@ -76,8 +77,12 @@ function FingerInk:init()
 
     self.stylus_active = false
     self.stylus_passthrough = false
+    self.stylus_dominated = false
     self.stylus_geom_latched = false
     self.stylus_suspended = false
+    self.stylus_stale_xy = false
+    self.stylus_frame_ui = false
+    self.stylus_lift_x, self.stylus_lift_y = nil, nil
 
     self.store = Store.new(self.ui.doc_settings:readSetting(SETTING_KEY))
 
@@ -280,12 +285,13 @@ function FingerInk:setDrawing(on)
     if on == self.drawing then return end
 
     if on then
-        if not self.bar then self:setBarShown(true) end
-
+        -- Resolve before touching the toolbar: a refusal must not leave the
+        -- bar forced on and the preference rewritten.
         local backend, reason = self:resolveInputBackend()
         if not backend then
             return self:reportInputFailure(reason)
         end
+        if not self.bar then self:setBarShown(true) end
 
         local ok
         if backend == "stylus" then
@@ -320,6 +326,13 @@ end
 
 function FingerInk:setInputMode(mode)
     if not INPUT_MODES[mode] or mode == self.input_mode then return end
+    -- The menu item is disabled while drawing, but the guard belongs here:
+    -- swapping backends inside a live contact sequence tears down capture
+    -- mid-stroke, and the menu is not the only possible caller.
+    if self.drawing then
+        logger.warn("FingerInk: refusing to change input mode while drawing")
+        return
+    end
     self.input_mode = mode
     G_reader_settings:saveSetting(MODE_KEY, mode)
     logger.info("FingerInk: input mode set to", mode)
@@ -344,11 +357,15 @@ function FingerInk:resetContacts()
     self.draw_slot = nil
 end
 
+--- Per-sequence pen state. `stylus_lift_x/y` deliberately survives, because it
+--- is how the next contact-down detects stale coordinates.
 function FingerInk:resetStylusState()
     self.stylus_active = false
     self.stylus_passthrough = false
+    self.stylus_dominated = false
     self.stylus_geom_latched = false
     self.stylus_suspended = false
+    self.stylus_stale_xy = false
 end
 
 function FingerInk:onFingerInkToggle()
@@ -489,43 +506,78 @@ function FingerInk:onStylusEvent(slot)
     local id, x, y, tool = slot.id, slot.x, slot.y, slot.tool
 
     -- Hover before this slot ever carried a tracking id. Consume, change nothing.
-    if id == nil then return true end
+    if id == nil then return self:stylusFrameResult(true) end
 
     if id >= 0 then
         if not self.stylus_active then
             self.stylus_active = true
             self.stylus_passthrough = self:dialogOnTop()
             self.stylus_geom_latched = self.stylus_passthrough
+            self.stylus_dominated = false
             self.stylus_suspended = false
+            -- Coordinates are sticky. A contact-down frame that only carried
+            -- BTN_TOUCH still presents the *previous* sequence's position, and
+            -- latching or painting from it would either lose this whole stroke
+            -- or ink a phantom dot at the old spot.
+            self.stylus_stale_xy = x ~= nil
+                and x == self.stylus_lift_x and y == self.stylus_lift_y
         end
-        if self.stylus_passthrough then return false end
+        if self.stylus_passthrough then return self:stylusFrameResult(false) end
 
-        if x and y then
+        -- A dialog opened mid-stroke. Stop inking, but keep dominating to the
+        -- lift: handing the slot back now would make GestureDetector open a
+        -- fresh contact mid-stroke and emit a spurious tap.
+        if self.stylus_dominated and not self.stylus_suspended and self:dialogOnTop() then
+            self:abortStroke()
+            self.stylus_suspended = true
+        end
+
+        if x and y and not self.stylus_stale_xy then
             local sx, sy = Capture.toScreen(x, y)
-            -- Geometry is latched on the first frame that actually carries
-            -- coordinates, which is not always the contact-down frame.
             if not self.stylus_geom_latched then
                 self.stylus_geom_latched = true
-                if self:inBar(sx, sy) then
+                -- Only reachable before the first dominated frame, so the
+                -- decision can still go to passthrough without a flip.
+                if not self.stylus_dominated and self:inBar(sx, sy) then
                     self.stylus_passthrough = true
-                    return false
+                    return self:stylusFrameResult(false)
                 end
             end
             self:onStylusPoint(sx, sy, tool)
         end
-        return true
+        -- Only the contact-down frame can be carrying stale coordinates.
+        self.stylus_stale_xy = false
+        self.stylus_dominated = true
+        return self:stylusFrameResult(true)
     end
 
-    -- Contact lift.
+    -- Contact lift. Remember where it happened, for the staleness check above.
+    if x and y then
+        self.stylus_lift_x, self.stylus_lift_y = x, y
+    end
     if not self.stylus_active then
-        return not self.stylus_passthrough
+        return self:stylusFrameResult(not self.stylus_passthrough)
     end
     local was_passthrough = self.stylus_passthrough
     if not was_passthrough then
         self:endStroke()
     end
     self:resetStylusState()
-    return not was_passthrough
+    return self:stylusFrameResult(not was_passthrough)
+end
+
+--[[--
+Record this frame's pen decision and return it.
+
+The residual filter runs later in the same input frame and needs to know
+whether the pen handed its slot to the UI. It cannot read `stylus_passthrough`,
+because the lift frame — the one that carries the toolbar's tap — resets that
+state before the filter runs. Reading it there is what made every toolbar
+button unreachable with the pen.
+]]
+function FingerInk:stylusFrameResult(dominate)
+    if not dominate then self.stylus_frame_ui = true end
+    return dominate
 end
 
 --[[--
@@ -558,10 +610,13 @@ apart; refusing to guess is what makes rejection predictable. The only touches
 that survive are the ones aimed at the toolbar or at a dialog above the reader.
 ]]
 function FingerInk:onStylusTouchFrame(slots)
-    -- A pen sequence bound for the UI needs its gestures to come out, and the
-    -- decision is per frame: gestures carry `pos` but not `slot`, so releasing
-    -- the pen's gesture also releases a simultaneous palm's. Known limitation.
-    if self.stylus_passthrough then return true end
+    -- The pen already ran in this frame. If it handed its slot to the UI, this
+    -- frame has to be emitted so the toolbar button or the dialog gets it.
+    -- Gestures carry `pos` but not `slot`, so the decision is necessarily per
+    -- frame: releasing the pen's gesture also releases a simultaneous palm's.
+    -- Known limitation, documented in the README.
+    local pen_wants_ui = self.stylus_frame_ui
+    self.stylus_frame_ui = false
 
     if not self.passthrough and self:dialogOnTop() then
         self.passthrough = true
@@ -569,39 +624,45 @@ function FingerInk:onStylusTouchFrame(slots)
 
     local was_passthrough = self.passthrough
 
+    -- Contact accounting runs unconditionally, even when the pen has already
+    -- decided this frame. Skipping it used to strand `n_contacts` and leave
+    -- `passthrough` latched, at which point a palm could turn pages.
     for i = 1, #slots do
         local ev = slots[i]
-        local slot = ev.slot or 0
-        local id = ev.id
+        -- A pen slot handed back to the UI is not residual touch.
+        if not Capture:isStylusSlot(ev) then
+            local slot = ev.slot or 0
+            local id = ev.id
 
-        if id and id >= 0 then
-            if not self.contacts[slot] then
-                self.contacts[slot] = true
-                self.n_contacts = self.n_contacts + 1
-            end
-            -- Latched once per residual sequence, on the first frame that
-            -- actually carries coordinates.
-            if not self.passthrough and not self.touch_geom_latched and ev.x and ev.y then
-                self.touch_geom_latched = true
-                local x, y = Capture.toScreen(ev.x, ev.y)
-                if self:inBar(x, y) then
-                    self.passthrough = true
+            if id and id >= 0 then
+                if not self.contacts[slot] then
+                    self.contacts[slot] = true
+                    self.n_contacts = self.n_contacts + 1
                 end
-            end
-        else
-            if self.contacts[slot] then
-                self.contacts[slot] = nil
-                self.n_contacts = self.n_contacts - 1
-            end
-            if self.n_contacts <= 0 then
-                self.n_contacts = 0
-                self.passthrough = false
-                self.touch_geom_latched = false
+                -- Latched once per residual sequence, on the first frame that
+                -- actually carries coordinates.
+                if not self.passthrough and not self.touch_geom_latched and ev.x and ev.y then
+                    self.touch_geom_latched = true
+                    local x, y = Capture.toScreen(ev.x, ev.y)
+                    if self:inBar(x, y) then
+                        self.passthrough = true
+                    end
+                end
+            else
+                if self.contacts[slot] then
+                    self.contacts[slot] = nil
+                    self.n_contacts = self.n_contacts - 1
+                end
+                if self.n_contacts <= 0 then
+                    self.n_contacts = 0
+                    self.passthrough = false
+                    self.touch_geom_latched = false
+                end
             end
         end
     end
 
-    return self.passthrough or was_passthrough
+    return pen_wants_ui or self.passthrough or was_passthrough
 end
 
 -- ------------------------------------------------------------------ stroke

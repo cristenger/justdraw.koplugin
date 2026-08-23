@@ -107,16 +107,31 @@ end
 
 local function newGestureDetector(opts)
     opts = opts or {}
-    local gd = { calls = 0, last_slots = nil }
-    -- The real feedEvent returns a fresh array of gesture events per frame.
+    local gd = { calls = 0, last_slots = nil, active_contacts = {}, dropped = {} }
+    -- The real feedEvent returns a fresh array of gesture events per frame,
+    -- and opens a Contact the first time it sees a slot.
     gd.feedEvent = function(gd_self, slots)
         gd.calls = gd.calls + 1
         gd.last_slots = slots
+        for i = 1, #slots do
+            local n = slots[i].slot
+            if n ~= nil and not gd.active_contacts[n] then
+                -- Mimics the pending hold timer the real Contact registers on
+                -- first contact down; dropContact is what clears it.
+                gd.active_contacts[n] = { slot = n, pending_hold_timer = true }
+            end
+        end
         local out = {}
         for i = 1, (opts.gestures_per_frame or 1) do
             out[i] = { ges = "tap", pos = { x = 1, y = 2 } }
         end
         return out
+    end
+    function gd:getContact(slot) return self.active_contacts[slot] end
+    function gd:dropContact(contact)
+        self.active_contacts[contact.slot] = nil
+        contact.pending_hold_timer = nil
+        self.dropped[#self.dropped + 1] = contact.slot
     end
     return gd
 end
@@ -245,6 +260,21 @@ function support.install()
         if o.init then o:init() end
         return o
     end
+    --- Minimal stand-in for KOReader's dispatch: try our own handler, then
+    --- offer the event to numeric children.
+    function WidgetContainer:handleEvent(event)
+        local handler = self[event.handler]
+        if type(handler) == "function" then
+            local res = handler(self, unpack(event.args or {}))
+            if res then return res end
+        end
+        for i = 1, #self do
+            local child = self[i]
+            if type(child) == "table" and child.handleEvent then
+                if child:handleEvent(event) then return true end
+            end
+        end
+    end
 
     local Notification = {}
     function Notification:new(o)
@@ -292,6 +322,59 @@ function support.install()
     function InkBar:windowBelow() return env.window_below end
     package.preload["ink_bar"] = function() return InkBar end
     env.InkBar = InkBar
+
+    -- Enough of the widget toolkit to load the real ink_bar.lua.
+    local Geom = {}
+    Geom.__index = Geom
+    function Geom:new(o) return setmetatable(o or {}, Geom) end
+    package.preload["ui/geometry"] = function() return Geom end
+
+    package.preload["ui/size"] = function()
+        return {
+            radius = { button = 4, window = 6 },
+            border = { window = 2 },
+            padding = { small = 2, large = 8 },
+        }
+    end
+
+    local Button = {}
+    Button.__index = Button
+    function Button:new(o)
+        o = setmetatable(o or {}, Button)
+        o.texts = { o.text }
+        return o
+    end
+    function Button:setText(text) self.text = text; self.texts[#self.texts + 1] = text end
+    function Button:getSize() return { w = self.width or 60, h = 30 } end
+    function Button:paintTo() end
+    package.preload["ui/widget/button"] = function() return Button end
+
+    local function sizedContainer(name)
+        local C = {}
+        C.__index = C
+        function C:new(o) return setmetatable(o or {}, C) end
+        function C:getSize()
+            local w, h = 0, 0
+            for i = 1, #self do
+                local size = self[i].getSize and self[i]:getSize() or { w = 0, h = 0 }
+                if size.w > w then w = size.w end
+                h = h + size.h
+            end
+            if name == "frame" then w = w + 8; h = h + 8 end
+            return { w = w, h = h }
+        end
+        function C:paintTo() end
+        return C
+    end
+    package.preload["ui/widget/container/framecontainer"] = function() return sizedContainer("frame") end
+    package.preload["ui/widget/verticalgroup"] = function() return sizedContainer("vgroup") end
+
+    local Event = {}
+    function Event:new(name, ...)
+        return { handler = "on" .. name, args = { ... } }
+    end
+    package.preload["ui/event"] = function() return Event end
+    env.Event = Event
 
     _G.G_reader_settings = {
         data = {},
