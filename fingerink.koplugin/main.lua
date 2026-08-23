@@ -5,6 +5,12 @@ The side toolbar is the control surface: it is a normal widget sitting above
 ReaderUI, and the capture handler passes through any contact that starts inside
 it, so Draw/Stop stays reachable even while every other single-finger touch is
 being swallowed. Drawing can never be on without the toolbar visible.
+
+Two input backends share that toolbar. `finger` is the legacy route: one
+contact draws, two pass through. `stylus` uses KOReader's stylus callback for
+the pen and suppresses every remaining touch, because the callback on its own
+only hides the pen from gesture detection and would leave a palm free to turn
+pages. See ADR-11 and ADR-12.
 ]]
 
 local Blitbuffer = require("ffi/blitbuffer")
@@ -28,7 +34,19 @@ local INK = Blitbuffer.COLOR_BLACK
 local PEN_THIN, PEN_MEDIUM, PEN_THICK = 2, 4, 7
 local ERASER_RADIUS = 18
 local SETTING_KEY = "fingerink_strokes"
+local MODE_KEY = "fingerink_input_mode"
 local SUSPENDED = -1   -- draw_slot sentinel: ignore this contact until it lifts
+
+local INPUT_MODES = { auto = true, stylus = true, finger = true }
+
+-- Reasons Capture can refuse, mapped to something a user can act on.
+local INPUT_ERRORS = {
+    no_stylus_api = _("Stylus input requires KOReader v2026.07 or newer"),
+    stylus_callback_busy = _("Another plugin is already using stylus input"),
+    no_gesture_detector = _("Finger Ink: cannot hook touch input"),
+    no_input = _("Finger Ink: cannot hook touch input"),
+    handler_error = _("Finger Ink: drawing stopped after an input error"),
+}
 
 local FingerInk = WidgetContainer:extend{
     name = "fingerink",
@@ -45,11 +63,21 @@ function FingerInk:init()
     self.live_fast = G_reader_settings:readSetting("fingerink_live_fast") ~= false
     self.bar_side = G_reader_settings:readSetting("fingerink_bar_side") or "right"
 
+    local mode = G_reader_settings:readSetting(MODE_KEY)
+    self.input_mode = INPUT_MODES[mode] and mode or "auto"
+    self.input_backend = nil
+
     self.contacts = {}
     self.n_contacts = 0
     self.passthrough = false
+    self.touch_geom_latched = false
     self.draw_slot = nil
     self.stroke = nil
+
+    self.stylus_active = false
+    self.stylus_passthrough = false
+    self.stylus_geom_latched = false
+    self.stylus_suspended = false
 
     self.store = Store.new(self.ui.doc_settings:readSetting(SETTING_KEY))
 
@@ -93,8 +121,18 @@ function FingerInk:onSuspend()
     self:setDrawing(false)
 end
 
+--[[--
+Every exit path lands here. It has to do exactly what stopping does, including
+dropping the stroke in flight: an unfinished stroke is not in the store yet, so
+leaving it dangling loses it silently and leaks contact state into whatever
+document is opened next in the same session.
+]]
 function FingerInk:teardown()
+    self:abortStroke()
     Capture:remove()
+    self:resetContacts()
+    self:resetStylusState()
+    self.input_backend = nil
     self.drawing = false
     if self.bar then
         UIManager:close(self.bar)
@@ -178,26 +216,113 @@ function FingerInk:currentPage()
     return self.view.state.page or 1
 end
 
+--[[--
+Which capture backend to install, or nil plus a reason.
+
+`auto` falls back to finger rather than to stylus on purpose. The stylus
+backend swallows all touch, so picking it on a device with no pen would leave
+the user unable to draw at all.
+
+`wacom_protocol` is the only capability flag KOReader offers here and it is
+narrow: the three Kindle Scribes and the reMarkable set it, Kobo never does.
+Kobo stylus devices report their tool through ABS_MT_TOOL_TYPE instead and do
+work, but they have to be opted in with the explicit `stylus` mode, which
+deliberately does not require the flag.
+
+isSDL deliberately does *not* widen `auto`. koreader-base does translate SDL3
+pen events into the pen slot with a real tool, so a graphics tablet would work
+— but a plain mouse goes to slot 0 or 1 with no ABS_MT_TOOL_TYPE at all, so it
+never reaches the stylus callback and the residual filter would swallow it.
+Auto-selecting stylus in the emulator would mean the mouse could not draw.
+Testers with a tablet pick `stylus` by hand.
+]]
+function FingerInk:resolveInputBackend()
+    local mode = self.input_mode
+    if mode == "finger" then return "finger" end
+
+    local has_api = Capture:supportsStylus()
+    if mode == "stylus" then
+        if not has_api then return nil, "no_stylus_api" end
+        return "stylus"
+    end
+
+    if has_api and Device.input.wacom_protocol == true then
+        return "stylus"
+    end
+    return "finger"
+end
+
+function FingerInk:reportInputFailure(reason)
+    logger.warn("FingerInk: cannot start drawing:", reason)
+    self:notify(INPUT_ERRORS[reason] or INPUT_ERRORS.no_gesture_detector)
+end
+
+--[[--
+Emergency stop after an input handler raised. Capture has already unhooked
+itself by the time this runs; this is the plugin-side half. Guarded so a second
+call — Capture disarming and the handler disarming again — stays silent.
+]]
+function FingerInk:disarmInput(err)
+    if not self.drawing and self.input_backend == nil then return end
+    logger.err("FingerInk: disarming input capture after a handler error:", err)
+    self.drawing = false
+    self.input_backend = nil
+    Capture:remove()
+    self:abortStroke()
+    self:resetContacts()
+    self:resetStylusState()
+    self:notify(INPUT_ERRORS.handler_error)
+    if self.bar then self.bar:update(true) end
+end
+
 function FingerInk:setDrawing(on)
     on = on and true or false
     if on == self.drawing then return end
 
     if on then
         if not self.bar then self:setBarShown(true) end
-        local ok = Capture:install(function(slots) return self:onTouchFrame(slots) end)
-        if not ok then
-            logger.warn("FingerInk: no gesture_detector to hook")
-            self:notify(_("Finger Ink: cannot hook touch input"))
-            return
+
+        local backend, reason = self:resolveInputBackend()
+        if not backend then
+            return self:reportInputFailure(reason)
         end
+
+        local ok
+        if backend == "stylus" then
+            ok, reason = Capture:installStylus(
+                function(slot) return self:onStylusEvent(slot) end,
+                function(slots) return self:onStylusTouchFrame(slots) end,
+                function(err) self:disarmInput(err) end)
+        else
+            ok, reason = Capture:installFinger(
+                function(slots) return self:onTouchFrame(slots) end,
+                function(err) self:disarmInput(err) end)
+        end
+        -- Drawing only goes on after a complete install, never before.
+        if not ok then
+            return self:reportInputFailure(reason)
+        end
+
+        self.input_backend = backend
         self.drawing = true
+        logger.info("FingerInk: drawing on, mode", self.input_mode, "backend", backend)
     else
         self:abortStroke()
         Capture:remove()
         self:resetContacts()
+        self:resetStylusState()
+        self.input_backend = nil
         self.drawing = false
+        logger.info("FingerInk: drawing off")
     end
     if self.bar then self.bar:update(true) end
+end
+
+function FingerInk:setInputMode(mode)
+    if not INPUT_MODES[mode] or mode == self.input_mode then return end
+    self.input_mode = mode
+    G_reader_settings:saveSetting(MODE_KEY, mode)
+    logger.info("FingerInk: input mode set to", mode)
 end
 
 function FingerInk:setEraser(on)
@@ -215,7 +340,15 @@ function FingerInk:resetContacts()
     end
     self.n_contacts = 0
     self.passthrough = false
+    self.touch_geom_latched = false
     self.draw_slot = nil
+end
+
+function FingerInk:resetStylusState()
+    self.stylus_active = false
+    self.stylus_passthrough = false
+    self.stylus_geom_latched = false
+    self.stylus_suspended = false
 end
 
 function FingerInk:onFingerInkToggle()
@@ -280,7 +413,9 @@ function FingerInk:onTouchFrame(slots)
     return self.passthrough or was_passthrough
 end
 
-function FingerInk:onContactPoint(slot, raw_x, raw_y)
+--- Finger route. `tool` is always nil here and exists only so both backends
+--- share one entry point; see applyPoint.
+function FingerInk:onContactPoint(slot, raw_x, raw_y, tool)
     local x, y = Capture.toScreen(raw_x, raw_y)
 
     if self.draw_slot == nil then
@@ -304,13 +439,169 @@ function FingerInk:onContactPoint(slot, raw_x, raw_y)
         return
     end
 
-    if self.eraser then
+    self:applyPoint(x, y, tool)
+end
+
+--[[--
+The single place that decides ink versus erase, shared by both backends.
+
+`tool` is whatever KOReader reported for this contact, or nil on the finger
+route. A physical eraser wins over the toolbar's setting; everything else —
+pen, highlighter, and the TOOL_TYPE_FINGER a pen slot reports on its way out of
+proximity — defers to it.
+]]
+function FingerInk:applyPoint(x, y, tool)
+    if tool == Capture.TOOL_ERASER or self.eraser then
         self:eraseAt(x, y)
     elseif self.stroke then
         self:addPoint(x, y)
     else
         self:startStroke(x, y)
     end
+end
+
+-- ------------------------------------------------------------- stylus input
+
+--[[--
+Called for every pen slot KOReader routes to us, before gesture detection.
+Returning true dominates the slot: KOReader drops it from MTSlots and the
+gesture detector never sees it.
+
+Two properties of the slot data shape this function, and both are easy to get
+wrong (c.f. frontend/device/input.lua:1381-1450):
+
+  * the table is Input's own persistent `ev_slots[n]`, reused frame after
+    frame, so `id`, `x` and `y` all survive a contact lift. Only transitions of
+    `id` open and close strokes; coordinates alone never mean "there is
+    contact", and a repeated lift must be idempotent because hover frames keep
+    re-delivering `id == -1`.
+  * `tool` can be TOOL_TYPE_FINGER on the pen slot, because leaving proximity
+    writes exactly that, and the slot is still routed here by slot number. So
+    `tool` picks ink-or-erase, never draw-or-not.
+
+The domination decision is latched at contact-down and cannot change before the
+lift. Flipping it mid-sequence corrupts GestureDetector's bookkeeping: true to
+false makes it open a fresh contact mid-stroke and emit a spurious tap on lift,
+and false to true strands a contact that never sees its lift, leaving a pending
+hold timer that blocks the slot until the next dropContacts().
+]]
+function FingerInk:onStylusEvent(slot)
+    local id, x, y, tool = slot.id, slot.x, slot.y, slot.tool
+
+    -- Hover before this slot ever carried a tracking id. Consume, change nothing.
+    if id == nil then return true end
+
+    if id >= 0 then
+        if not self.stylus_active then
+            self.stylus_active = true
+            self.stylus_passthrough = self:dialogOnTop()
+            self.stylus_geom_latched = self.stylus_passthrough
+            self.stylus_suspended = false
+        end
+        if self.stylus_passthrough then return false end
+
+        if x and y then
+            local sx, sy = Capture.toScreen(x, y)
+            -- Geometry is latched on the first frame that actually carries
+            -- coordinates, which is not always the contact-down frame.
+            if not self.stylus_geom_latched then
+                self.stylus_geom_latched = true
+                if self:inBar(sx, sy) then
+                    self.stylus_passthrough = true
+                    return false
+                end
+            end
+            self:onStylusPoint(sx, sy, tool)
+        end
+        return true
+    end
+
+    -- Contact lift.
+    if not self.stylus_active then
+        return not self.stylus_passthrough
+    end
+    local was_passthrough = self.stylus_passthrough
+    if not was_passthrough then
+        self:endStroke()
+    end
+    self:resetStylusState()
+    return not was_passthrough
+end
+
+--[[--
+One drawing point from the pen. Starting on the toolbar is already settled by
+the latch, so the only case left is a stroke dragged *onto* the bar, which ends
+at the edge rather than scribbling over the buttons.
+]]
+function FingerInk:onStylusPoint(x, y, tool)
+    if self.stylus_suspended then return end
+    if self:inBar(x, y) then
+        self:endStroke()
+        self.stylus_suspended = true
+        return
+    end
+    self:applyPoint(x, y, tool)
+end
+
+--[[--
+The residual touch filter: everything the pen callback did not take.
+
+Runs after onStylusEvent within the same input frame, because
+Input:routeStylusEvents is called immediately before feedEvent in every
+handleTouchEv variant. So the pen's decision for this frame is already made and
+a dominated pen slot is already gone from `slots`. That ordering is what lets
+this function promise never to touch `self.stroke` — a palm landing mid-stroke
+is precisely what the stylus backend exists to ignore.
+
+While drawing is on, touch does not navigate. Finger and palm are not told
+apart; refusing to guess is what makes rejection predictable. The only touches
+that survive are the ones aimed at the toolbar or at a dialog above the reader.
+]]
+function FingerInk:onStylusTouchFrame(slots)
+    -- A pen sequence bound for the UI needs its gestures to come out, and the
+    -- decision is per frame: gestures carry `pos` but not `slot`, so releasing
+    -- the pen's gesture also releases a simultaneous palm's. Known limitation.
+    if self.stylus_passthrough then return true end
+
+    if not self.passthrough and self:dialogOnTop() then
+        self.passthrough = true
+    end
+
+    local was_passthrough = self.passthrough
+
+    for i = 1, #slots do
+        local ev = slots[i]
+        local slot = ev.slot or 0
+        local id = ev.id
+
+        if id and id >= 0 then
+            if not self.contacts[slot] then
+                self.contacts[slot] = true
+                self.n_contacts = self.n_contacts + 1
+            end
+            -- Latched once per residual sequence, on the first frame that
+            -- actually carries coordinates.
+            if not self.passthrough and not self.touch_geom_latched and ev.x and ev.y then
+                self.touch_geom_latched = true
+                local x, y = Capture.toScreen(ev.x, ev.y)
+                if self:inBar(x, y) then
+                    self.passthrough = true
+                end
+            end
+        else
+            if self.contacts[slot] then
+                self.contacts[slot] = nil
+                self.n_contacts = self.n_contacts - 1
+            end
+            if self.n_contacts <= 0 then
+                self.n_contacts = 0
+                self.passthrough = false
+                self.touch_geom_latched = false
+            end
+        end
+    end
+
+    return self.passthrough or was_passthrough
 end
 
 -- ------------------------------------------------------------------ stroke
@@ -441,6 +732,18 @@ function FingerInk:sideItem(text, side)
     }
 end
 
+--- Radio item for the input mode. Locked while drawing, because swapping
+--- backends mid-sequence would tear down capture inside a live contact.
+function FingerInk:inputModeItem(text, value)
+    return {
+        text = text,
+        checked_func = function() return self.input_mode == value end,
+        radio = true,
+        enabled_func = function() return not self.drawing end,
+        callback = function() self:setInputMode(value) end,
+    }
+end
+
 function FingerInk:addToMainMenu(menu_items)
     menu_items.fingerink = {
         text = _("Finger Ink"),
@@ -469,6 +772,16 @@ function FingerInk:addToMainMenu(menu_items)
                 sub_item_table = {
                     self:sideItem(_("Left"), "left"),
                     self:sideItem(_("Right"), "right"),
+                },
+            },
+            {
+                text = _("Input mode"),
+                separator = true,
+                help_text = _([[Automatic uses the stylus route on devices that report a pen digitizer, and the finger route everywhere else. While the stylus route is active, finger and palm never draw and never turn pages — press Stop to read again.]]),
+                sub_item_table = {
+                    self:inputModeItem(_("Automatic"), "auto"),
+                    self:inputModeItem(_("Stylus"), "stylus"),
+                    self:inputModeItem(_("Finger"), "finger"),
                 },
             },
             {
