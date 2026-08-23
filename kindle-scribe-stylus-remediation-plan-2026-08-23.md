@@ -29,6 +29,57 @@ revertible.
 
 ---
 
+## 0. Estado de ejecución (2026-08-23)
+
+Etapas 1 y 2 completas. **PUERTA A: autorizada** por el autor — Etapa 2 completa
+ahora. **PUERTA B: los tres criterios del spike pasaron**, así que T9 no se
+ejecutó y R2/R3 se cerraron por la vía arquitectónica.
+
+| Tarea | Estado | Evidencia |
+| --- | --- | --- |
+| T1 — latch por slot (R1) | ✅ | Test falló 4/4 antes; mutación *latch per-sequence* → 2 fallos |
+| T2 — bandera por frame (R4) | ✅ | Test falló 2/2 antes; el campo desapareció entero en T7 |
+| T3 — punto recuperado (R5) | ✅ | Test falló 1/1 antes; dos mutaciones (recuperación, guarda `stylus_inked`) → falla |
+| T4 — orden de propagación (R9) | ✅ | Test falló antes; suite idéntica bajo LuaJIT y Lua del sistema |
+| T5 — CI (R7) | ✅ (sin push) | Ambas puertas ensayadas en local; suite roja → exit 1 y `grep` en rojo |
+| T6 — spike | ✅ | Tres criterios en verde |
+| T7 — supresión en widget (R2, R3) | ✅ | 4 mutaciones de `suppresses` → 14/2/1/8 fallos |
+| T8 — ADR-13 y docs | ✅ | `decisions.md`, `spec.md`, `README.md` |
+| T10 — conformidad (R8) | ✅ | 9 afirmaciones, 0 mismatches, 2 `UNCHECKABLE` nombradas |
+| T11 — diagnóstico | ✅ | Acotado por reloj y por líneas, con test |
+| **T12 — gate físico (R6)** | ❌ **PENDIENTE** | Requiere un Kindle Scribe. No hay hardware. |
+
+Suite: **302 comprobaciones, 0 fallos** bajo el LuaJIT de KOReader, bajo el shim
+de raíz desde `/`, y bajo un Lua del sistema. `preflight` PASS. ReaderUI carga
+el plugin sobre un PDF a 1860×2480 @300 dpi con las dos líneas de log exigidas y
+0 tracebacks.
+
+### Dos huecos que encontró la pasada de mutación, no el plan
+
+Ninguno de los dos rompía la suite antes de añadirles un test:
+
+- **`disarmInput` sin `resetStylusState()` no fallaba nada**, y sin embargo
+  pierde el primer trazo de la sesión siguiente: `stylus_active` queda en `true`,
+  el contact-down siguiente se salta su propia inicialización y hereda el latch
+  de passthrough. Verificado con una sonda antes de escribir el test.
+- **La guarda `stylus_inked` tampoco estaba cubierta**: sin ella la recuperación
+  del punto corre en cada lift y añade la posición del lift a *todos* los trazos.
+
+### Correcciones al propio plan, hechas al implementar
+
+- La afirmación de que la suite devuelve 0 pase o falle era falsa; ver la nota
+  en T5.
+- T6 necesitaba más andamiaje del previsto: el falso ReaderUI no tenía
+  `handleEvent`, el toast de `Notification` tampoco, y los contenedores del
+  arnés no propagaban a sus hijos. Los tres eran fallos de fidelidad del mismo
+  tipo que R9.
+- T7 obligó a que toda la suite use la barra real en vez de la falsa, y a que
+  `pumpFrame` despache los gestos como hace `UIManager` y cuente los que llegan
+  al lector. Sin eso, las aserciones de "la palma no produjo gesto" habrían
+  seguido midiendo el array de `feedEvent`, que ya no decide nada.
+
+---
+
 ## Restricciones globales
 
 Heredadas del plan predecesor; se aplican a **todas** las tareas.
