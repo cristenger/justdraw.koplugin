@@ -1,0 +1,31 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LuaJIT
+        run: sudo apt-get update && sudo apt-get install -y luajit
+
+      - name: Syntax sweep
+        run: |
+          set -e
+          n=0
+          for f in $(find fingerink.koplugin -name '*.lua'); do
+            luajit -b "$f" /dev/null
+            n=$((n + 1))
+          done
+          echo "LuaJIT syntax: $n files"
+          test "$n" -ge 8
+
+      - name: Run the suite
+        run: |
+          set -o pipefail
+          luajit test.lua | tee result.txt
+          grep -q '0 failed' result.txt

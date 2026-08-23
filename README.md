@@ -136,9 +136,12 @@ since two-finger gestures keep working while drawing.
 ```sh
 luajit test.lua                       # from the repository root
 luajit tests/run.lua                  # from inside fingerink.koplugin/
+lua test.lua                          # any Lua 5.1+, no LuaJIT needed
 ```
 
-Both run the same suite; it needs no KOReader session. Covers rasterisation,
+All three run the same suite; it needs no KOReader session. Every push and
+pull request runs it on CI, together with a syntax sweep over every Lua file
+in the plugin. Covers rasterisation,
 the stroke store and hit test, the rotation transform for all four rotations,
 both capture backends, ownership-safe install and removal, error containment,
 the pen state machine (latching, sticky tracking ids, the physical eraser), the
