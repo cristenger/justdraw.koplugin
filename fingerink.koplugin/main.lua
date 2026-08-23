@@ -52,6 +52,9 @@ local INPUT_ERRORS = {
     no_stylus_api = _("Stylus input requires KOReader v2026.07 or newer"),
     stylus_callback_busy = _("Another plugin is already using stylus input"),
     no_gesture_detector = _("Finger Ink: cannot hook touch input"),
+    -- Not a refusal: drawing still starts, on the finger route. It is the
+    -- answer to "my pen does nothing", given before the user has to ask.
+    pen_unavailable = _("Pen input needs KOReader v2026.07 or newer. Drawing with finger."),
     no_input = _("Finger Ink: cannot hook touch input"),
     already_installed = _("Finger Ink: input is already captured"),
     handler_error = _("Finger Ink: drawing stopped after an input error"),
@@ -94,6 +97,7 @@ function FingerInk:init()
 
     self.diag_until = nil
     self.diag_lines = 0
+    self.pen_notice_shown = false
 
     self.store = Store.new(self.ui.doc_settings:readSetting(SETTING_KEY))
 
@@ -323,6 +327,7 @@ function FingerInk:setDrawing(on)
         self.input_backend = backend
         self.drawing = true
         logger.info("FingerInk: drawing on, mode", self.input_mode, "backend", backend)
+        self:notePenUnavailable(backend)
     else
         self:abortStroke()
         Capture:remove()
@@ -333,6 +338,26 @@ function FingerInk:setDrawing(on)
         logger.info("FingerInk: drawing off")
     end
     if self.bar then self.bar:update(true) end
+end
+
+--[[--
+Say it out loud when a device that has a pen ends up on the finger route.
+
+`auto` needs two things and only reports neither: the runtime's stylus callback
+API, and a device that claims a pen digitizer. A Kindle Scribe on KOReader
+v2026.03 has the second and not the first, so drawing starts, the finger inks,
+the pen does nothing, and nothing on screen connects those facts.
+
+Once per session. Repeating it on every Draw would be nagging about something
+the user cannot fix without reflashing.
+]]
+function FingerInk:notePenUnavailable(backend)
+    if backend ~= "finger" or self.pen_notice_shown then return end
+    if self.input_mode ~= "auto" then return end
+    if Device.input == nil or Device.input.wacom_protocol ~= true then return end
+    self.pen_notice_shown = true
+    logger.warn("FingerInk: device reports a pen digitizer but this runtime has no stylus API")
+    self:notify(INPUT_ERRORS.pen_unavailable)
 end
 
 function FingerInk:setInputMode(mode)

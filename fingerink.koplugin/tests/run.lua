@@ -1151,6 +1151,35 @@ t:case("a pen on the toolbar does not latch passthrough for a palm", function()
     t:eq(moved, 0, "the palm still cannot reach the reader")
 end)
 
+t:case("a pen device on an old KOReader says so instead of falling back silently", function()
+    -- The Scribe on v2026.03: the device claims a digitizer, but the runtime
+    -- has no stylus API, so auto quietly drops to finger. The finger draws, the
+    -- pen does nothing, and nothing on screen explains it.
+    reset{ stylus_api = false, wacom_protocol = true }
+    local p = newPlugin()
+    p:setDrawing(true)
+
+    t:eq(p.input_backend, "finger", "it still starts, on the finger route")
+    t:eq(#env.notifications, 1, "and it says why, once")
+    t:check(env.notifications[1]:find("v2026.07"), "naming the version needed")
+end)
+
+t:case("the fallback notice is not repeated every time drawing starts", function()
+    reset{ stylus_api = false, wacom_protocol = true }
+    local p = newPlugin()
+    p:setDrawing(true)
+    p:setDrawing(false)
+    p:setDrawing(true)
+    t:eq(#env.notifications, 1, "said once per session, not on every Draw")
+end)
+
+t:case("a device with no pen digitizer gets no such notice", function()
+    reset{ stylus_api = false, wacom_protocol = false }
+    local p = newPlugin()
+    p:setDrawing(true)
+    t:eq(#env.notifications, 0, "a Paperwhite has nothing to be told")
+end)
+
 t:case("the capability report explains why auto chose a backend", function()
     -- The question this answers is "the pen does nothing, why". It has to work
     -- when the stylus route is *not* running, which is the only situation in

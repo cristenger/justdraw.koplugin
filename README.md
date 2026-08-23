@@ -103,9 +103,23 @@ The quickest thing to know: **if your finger draws, the pen route is not
 running.** The stylus route suppresses all touch, so a finger that inks proves
 the plugin fell back to the finger route. The report says why.
 
-The most common cause is the KOReader version. The pen route needs **v2026.07**;
-v2026.03 in particular shipped a Scribe regression that broke the stylus while
-touch kept working, which looks exactly like this.
+The most common cause is the KOReader version. The pen route needs **v2026.07**.
+On a device that reports a pen digitizer but runs an older KOReader, drawing
+still starts on the finger route and the plugin says so once.
+
+**v2026.03 cannot drive the pen on a Scribe at all**, for two independent
+reasons, and no plugin can work around either:
+
+- it has no `Input:registerStylusCallback` — the API the pen route is built on
+  does not exist in that release;
+- its Kindle input match mask still includes the raw `INPUT_TABLET`
+  device alongside the properly scaled one, so the two emit conflicting pen
+  events ([#15164](https://github.com/koreader/koreader/issues/15164), reverted
+  for v2026.07 in [#15675](https://github.com/koreader/koreader/pull/15675)).
+
+It also only knows one Scribe model. `KindleScribe3` and `KindleScribeColorSoft`
+were added in v2026.07, so on v2026.03 those two are not detected as Scribes and
+never get their pen set up in the first place.
 
 The same screen also arms a log: one line per pen event for a minute, capped at
 500 lines, then it stops on its own. Each line carries the digitizer's slot,
