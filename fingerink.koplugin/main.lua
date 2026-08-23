@@ -17,8 +17,10 @@ local Blitbuffer = require("ffi/blitbuffer")
 local ConfirmBox = require("ui/widget/confirmbox")
 local Device = require("device")
 local Dispatcher = require("dispatcher")
+local InfoMessage = require("ui/widget/infomessage")
 local Notification = require("ui/widget/notification")
 local UIManager = require("ui/uimanager")
+local Version = require("version")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local logger = require("logger")
 local _ = require("gettext")
@@ -595,6 +597,70 @@ function FingerInk:onStylusEvent(slot)
 end
 
 --[[--
+Why the pen route is or is not running, in one place.
+
+This is the first thing to look at when the pen does nothing. The symptom on
+its own already says a lot -- if a finger draws, the effective backend is
+`finger`, because the stylus route never inks touch -- but it does not say
+*which* precondition failed, and there are three.
+
+Deliberately callable with drawing off and no backend installed. That is the
+only state anybody is in when they ask this question.
+]]
+function FingerInk:diagnosticReport()
+    local input = Device.input or {}
+    local backend, reason = self:resolveInputBackend()
+    local r = {
+        version   = Version:getCurrentRevision(),
+        model     = Device.model,
+        mode      = self.input_mode,
+        backend   = backend,
+        reason    = reason,
+        stylus_api = Capture:supportsStylus(),
+        wacom     = input.wacom_protocol == true,
+        pen_slot  = input.pen_slot,
+        tool_types = input.TOOL_TYPE_PEN ~= nil,
+        callback_taken = input.stylus_callback ~= nil,
+    }
+
+    -- The first unmet precondition, in the order the user can act on them.
+    if r.mode == "finger" then
+        r.blocker = _("Input mode is set to Finger. Set it to Automatic or Stylus.")
+    elseif not r.stylus_api then
+        r.blocker = _("This KOReader has no stylus API. The pen route needs v2026.07 or newer.")
+    elseif r.callback_taken and backend ~= "stylus" then
+        r.blocker = _("Another plugin already owns the stylus input callback.")
+    elseif backend ~= "stylus" then
+        r.blocker = _("This device does not report a pen digitizer. Set Input mode to Stylus by hand.")
+    end
+    return r
+end
+
+--- The report as lines, for the log and for the on-screen message.
+function FingerInk:diagnosticLines()
+    local r = self:diagnosticReport()
+    local lines = {
+        "KOReader: " .. tostring(r.version),
+        "Device: " .. tostring(r.model),
+        "Input mode: " .. tostring(r.mode) .. "  ->  backend: " .. tostring(r.backend),
+        "Stylus API: " .. tostring(r.stylus_api)
+            .. "   tool types: " .. tostring(r.tool_types),
+        "Pen digitizer flag: " .. tostring(r.wacom)
+            .. "   pen slot: " .. tostring(r.pen_slot),
+        "Callback owned by another plugin: " .. tostring(r.callback_taken),
+    }
+    if r.blocker then lines[#lines + 1] = "" ; lines[#lines + 1] = r.blocker end
+    return lines, r
+end
+
+--- Put the report on screen. On a device the log is not always reachable, and
+--- this is the answer to a question the user is asking right now.
+function FingerInk:showDiagnostics()
+    local lines = self:startDiagnostics()
+    UIManager:show(InfoMessage:new{ text = table.concat(lines, "\n") })
+end
+
+--[[--
 One bounded diagnostic session, for reporting hardware problems.
 
 Digitizer numbers only: slot, tracking id, tool, the screen position, and
@@ -602,12 +668,15 @@ whether this frame's raw coordinates repeated the previous lift. No paths, no
 titles, nothing from the book. See the plan's stopping conditions.
 ]]
 function FingerInk:startDiagnostics()
+    local lines = self:diagnosticLines()
+    for i = 1, #lines do
+        if lines[i] ~= "" then logger.info("FI-DIAG", lines[i]) end
+    end
+
     self.diag_until = os.time() + DIAG_SECONDS
     self.diag_lines = 0
-    logger.info("FI-DIAG start",
-        "pen_slot", tostring(Device.input and Device.input.pen_slot),
-        "wacom", tostring(Device.input and Device.input.wacom_protocol),
-        "backend", tostring(self.input_backend))
+    logger.info("FI-DIAG start, per-event log armed")
+    return lines
 end
 
 function FingerInk:diag(slot, sx, sy)
@@ -898,10 +967,12 @@ function FingerInk:addToMainMenu(menu_items)
                 separator = true,
             },
             {
-                text = _("Log stylus diagnostics (60 s)"),
-                enabled_func = function() return self.input_backend == "stylus" end,
-                callback = function() self:startDiagnostics() end,
-                help_text = _([[Writes one line per pen event to the log for a minute, capped at 500 lines: slot, tracking id, tool, position, and whether the position repeated. Digitizer numbers only - nothing from the book. For reporting hardware problems.]]),
+                -- Deliberately not gated on the stylus backend being live: the
+                -- only person who opens this is someone whose pen does nothing,
+                -- and for them it never is.
+                text = _("Stylus diagnostics"),
+                callback = function() self:showDiagnostics() end,
+                help_text = _([[Shows why the pen route is or is not running, and writes the same report to the log along with one line per pen event for a minute, capped at 500 lines. Digitizer numbers only - nothing from the book.]]),
                 separator = true,
             },
             {

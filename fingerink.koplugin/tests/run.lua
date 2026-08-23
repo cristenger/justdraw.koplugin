@@ -38,6 +38,7 @@ local function reset(input_opts)
     Device.screen.refreshes = {}
     Device.screen.bb.rects = {}
     env.notifications = {}
+    env.shown_messages = {}
     env.reader_events = {}
     env.UIManager._window_stack = {}
     _G.G_reader_settings.data = {}
@@ -1148,6 +1149,75 @@ t:case("a pen on the toolbar does not latch passthrough for a palm", function()
     -- The palm is still down. It must stay suppressed.
     local moved = pumpFrame(input, bus, { { slot = 0, fields = { x = 320, y = 620 } } })
     t:eq(moved, 0, "the palm still cannot reach the reader")
+end)
+
+t:case("the capability report explains why auto chose a backend", function()
+    -- The question this answers is "the pen does nothing, why". It has to work
+    -- when the stylus route is *not* running, which is the only situation in
+    -- which anybody asks it.
+    local input = reset{ stylus_api = false, wacom_protocol = true }
+    local p = newPlugin()
+    local r = p:diagnosticReport()
+
+    t:eq(r.mode, "auto", "the configured mode")
+    t:eq(r.backend, "finger", "what auto resolved to")
+    t:eq(r.stylus_api, false, "the reason: no callback API in this runtime")
+    t:eq(r.wacom, true, "even though the device reports a pen digitizer")
+    t:check(r.blocker ~= nil, "and a blocker is named")
+end)
+
+t:case("the report names a missing digitizer as the blocker", function()
+    local input = reset{ wacom_protocol = false }
+    local p = newPlugin()
+    local r = p:diagnosticReport()
+
+    t:eq(r.stylus_api, true, "the runtime has the API")
+    t:eq(r.wacom, false, "but the device does not claim a pen")
+    t:eq(r.backend, "finger", "so auto stayed on finger")
+    t:check(r.blocker ~= nil, "blocker named")
+end)
+
+t:case("the report is clean when the stylus route is available", function()
+    local input = reset{ wacom_protocol = true }
+    local p = newPlugin()
+    local r = p:diagnosticReport()
+
+    t:eq(r.backend, "stylus", "auto picks the pen route")
+    t:eq(r.blocker, nil, "nothing to report")
+end)
+
+--- Find a menu entry by label anywhere under the plugin's menu tree.
+local function menuItem(plugin, label)
+    local items = {}
+    plugin:addToMainMenu(items)
+    local function walk(list)
+        for i = 1, #list do
+            local it = list[i]
+            if it.text == label then return it end
+            if it.sub_item_table then
+                local found = walk(it.sub_item_table)
+                if found then return found end
+            end
+        end
+    end
+    return walk(items.fingerink.sub_item_table)
+end
+
+t:case("the diagnostics menu entry is reachable with the pen route dead", function()
+    -- It used to be gated on input_backend == "stylus", which disabled it in
+    -- precisely the situation it exists for.
+    local input = reset{ stylus_api = false }
+    local p = newPlugin()
+    t:eq(p.drawing, false, "not drawing, no backend installed")
+
+    local item = menuItem(p, "Stylus diagnostics")
+    t:check(item ~= nil, "the entry exists")
+    t:check(item.enabled_func == nil or item.enabled_func(), "and it is selectable")
+
+    item.callback()
+    t:check(p.diag_until ~= nil, "armed")
+    t:check(#env.logs.info > 0, "and the capability report was written")
+    t:check(#env.notifications > 0 or #env.shown_messages > 0, "and shown to the user")
 end)
 
 t:case("diagnostics stop on their own", function()

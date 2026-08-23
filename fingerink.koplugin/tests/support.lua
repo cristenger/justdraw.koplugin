@@ -239,12 +239,13 @@ env.Device, env.UIManager, env.notifications, env.logs.
 function support.install()
     local env = {
         notifications = {},
+        shown_messages = {},
         reader_events = {},
         logs = { warn = {}, err = {}, info = {} },
         dispatcher_actions = {},
     }
 
-    local Device = { screen = support.newScreen(), input = support.newInput() }
+    local Device = { model = "Emulator", screen = support.newScreen(), input = support.newInput() }
     function Device:isSDL() return self._is_sdl == true end
     env.Device = Device
 
@@ -457,6 +458,18 @@ function support.install()
         return { handler = "on" .. name, args = { ... } }
     end
     package.preload["ui/event"] = function() return Event end
+
+    local InfoMessage = {}
+    function InfoMessage:new(o)
+        env.shown_messages[#env.shown_messages + 1] = o.text
+        o.handleEvent = function() end
+        return o
+    end
+    package.preload["ui/widget/infomessage"] = function() return InfoMessage end
+
+    package.preload["version"] = function()
+        return { getCurrentRevision = function() return "v2025.08-test" end }
+    end
     env.Event = Event
 
     _G.G_reader_settings = {
