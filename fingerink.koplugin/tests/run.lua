@@ -1169,6 +1169,20 @@ t:case("diagnostics log nothing until they are armed", function()
     t:eq(#env.logs.info, before, "disarmed is silent")
 end)
 
+t:case("the lift frame only contributes a point when nothing was drawn", function()
+    -- The recovery exists for a contact-down frame wrongly judged stale. If it
+    -- ran unconditionally it would append the lift position to every stroke,
+    -- moving its end whenever the lift frame carries a fresh sample.
+    local p, input = pipelinePlugin()
+    local bus = support.newSlotBus()
+
+    pumpFrame(input, bus, { { slot = 4, fields = { id = 4, x = 100, y = 100, tool = 1 } } })
+    pumpFrame(input, bus, { { slot = 4, fields = { x = 200, y = 100 } } })
+    pumpFrame(input, bus, { { slot = 4, fields = { id = -1, x = 900, y = 900 } } })
+
+    t:eq(p.store:get(p:currentPage())[1].n, 2, "the lift position was not appended")
+end)
+
 t:case("a dot placed where the last one lifted is not lost", function()
     -- The stale-coordinate guard compares the contact-down frame against the
     -- previous lift, so a pen that comes back down on the same spot is judged
@@ -1182,6 +1196,30 @@ t:case("a dot placed where the last one lifted is not lost", function()
     pumpFrame(input, bus, { { slot = 4, fields = { id = -1 } } })
 
     t:eq(#p.store:get(p:currentPage()), 2, "both dots were stored")
+end)
+
+t:case("an error disarm resets the pen state machine, not just the hooks", function()
+    -- disarmInput has to undo the pen's per-sequence state too. Leaving
+    -- stylus_active set makes the next session's contact-down skip its own
+    -- initialisation, so a stale passthrough latch silently eats the first
+    -- stroke after the error.
+    local p = drawingPlugin()
+    local bus = support.newSlotBus()
+    local d = p.bar.dimen
+    p:onStylusEvent(bus:set(4, { id = 4, x = d.x + 5, y = d.y + 5, tool = 1 }))
+    t:eq(p.stylus_passthrough, true, "latched over the toolbar mid-sequence")
+
+    Capture:fail("boom")
+    env.UIManager:flush()
+    t:eq(p.stylus_active, false, "the pen sequence was closed out")
+    t:eq(p.stylus_passthrough, false, "and its latch released")
+
+    p:setDrawing(true)
+    local next_bus = support.newSlotBus()
+    p:onStylusEvent(next_bus:set(4, { id = 9, x = 400, y = 400, tool = 1 }))
+    p:onStylusEvent(next_bus:set(4, { x = 450, y = 400 }))
+    p:onStylusEvent(next_bus:set(4, { id = -1 }))
+    t:eq(#p.store:get(p:currentPage()), 1, "the next session's first stroke survives")
 end)
 
 t:case("an error disarm leaves nothing released behind it", function()
