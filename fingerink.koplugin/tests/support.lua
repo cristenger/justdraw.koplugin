@@ -220,6 +220,7 @@ env.Device, env.UIManager, env.notifications, env.logs.
 function support.install()
     local env = {
         notifications = {},
+        reader_events = {},
         logs = { warn = {}, err = {}, info = {} },
         dispatcher_actions = {},
     }
@@ -349,12 +350,16 @@ function support.install()
         return x >= d.x and x < d.x + d.w and y >= d.y and y < d.y + d.h
     end
     function InkBar:update() self.updates = self.updates + 1 end
-    -- windowBelow stays stubbed for the InkBar that main.lua requires:
-    -- newPlugin registers the ReaderUI fake as env.window_below without ever
-    -- showing it through UIManager, so the real implementation would find
-    -- nothing under the bar. The ink_bar section loads its own copy of the
-    -- widget and exercises the real one against the real window stack.
-    function InkBar:windowBelow() return env.window_below end
+    --- Same walk as the production widget: skip ourselves and any toast, and
+    --- return the first real window underneath. Reading the actual stack is
+    --- what makes `dialogOnTop` mean something in these tests.
+    function InkBar:windowBelow()
+        local stack = UIManager._window_stack
+        for i = #stack, 1, -1 do
+            local widget = stack[i].widget
+            if widget ~= self and not widget.toast then return widget end
+        end
+    end
     package.preload["ink_bar"] = function() return InkBar end
     env.InkBar = InkBar
 
@@ -451,16 +456,25 @@ function support.newPlugin(FingerInk, env, opts)
         saveSetting = function(self, k, v) self.data[k] = v end,
         delSetting = function(self, k) self.data[k] = nil end,
     }
+    -- Stands in for ReaderUI: the window under the bar, and the thing that
+    -- turns pages when a gesture it should never have seen reaches it.
     local ui = {
         doc_settings = doc_settings,
         menu = { registerToMainMenu = function() end },
+        handleEvent = function(_, event)
+            env.reader_events[#env.reader_events + 1] = event.handler
+            return true
+        end,
     }
     local view = {
         state = { page = opts.page or 1 },
         registerViewModule = function() end,
     }
+    -- ReaderUI has to be a real entry in the stack: the bar's forwarding, the
+    -- dialogOnTop test and the whole suppression decision are defined relative
+    -- to what sits below it.
+    env.UIManager._window_stack = { { widget = ui } }
     local plugin = FingerInk:new{ ui = ui, view = view }
-    env.window_below = ui
     return plugin
 end
 

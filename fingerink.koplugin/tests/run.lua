@@ -38,7 +38,7 @@ local function reset(input_opts)
     Device.screen.refreshes = {}
     Device.screen.bb.rects = {}
     env.notifications = {}
-    env.window_below = nil
+    env.reader_events = {}
     env.UIManager._window_stack = {}
     _G.G_reader_settings.data = {}
     return Device.input
@@ -48,6 +48,15 @@ local function newPlugin(opts)
     local p = support.newPlugin(FingerInk, env, opts)
     env.UIManager:flush()   -- let the deferred setBarShown run
     return p
+end
+
+--- Put a window above the toolbar, the way UIManager:show would. `dialogOnTop`
+--- and the suppression decision both read the real stack now, so a dialog has
+--- to actually be on it.
+local function showDialog(name)
+    local w = { name = name }
+    env.UIManager:show(w)
+    return w
 end
 
 -- =====================================================================
@@ -581,7 +590,7 @@ end)
 t:case("a dialog on top hands the pen to the UI", function()
     local p = drawingPlugin()
     local bus = support.newSlotBus()
-    env.window_below = { name = "some dialog" }
+    showDialog("some dialog")
     t:eq(p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 1 })), false, "pen passes through")
     t:eq(p.store:get(1), nil, "no ink")
 end)
@@ -655,7 +664,7 @@ end)
 t:case("a dialog on top releases residual touch to the UI", function()
     local p = drawingPlugin()
     local bus = support.newSlotBus()
-    env.window_below = { name = "some dialog" }
+    showDialog("some dialog")
     bus:set(0, { id = 1, x = 100, y = 400 })
     t:eq(p:onStylusTouchFrame(bus:frame(0)), true, "touch reaches the UI")
 end)
@@ -1178,7 +1187,7 @@ t:case("a dialog opening mid-stroke stops the ink but keeps the slot", function(
     p:onStylusEvent(bus:set(4, { x = 150, y = 100 }))
     t:check(p.stroke ~= nil, "stroke in flight")
 
-    env.window_below = { name = "a dialog that just opened" }
+    showDialog("a dialog that just opened")
     t:eq(p:onStylusEvent(bus:set(4, { x = 200, y = 100 })), true,
          "still dominating: handing the slot back mid-sequence corrupts the detector")
     t:eq(p.stroke, nil, "the stroke was aborted rather than drawn over the dialog")
@@ -1210,6 +1219,20 @@ local RealInkBar = dofile(plugin_dir .. "/ink_bar.lua")
 
 local function newRealBar(plugin, side)
     return RealInkBar:new{ plugin = plugin, side = side or "right" }
+end
+
+--- A plugin whose toolbar is the real widget, on the real window stack. The
+--- fake bar newPlugin puts up is closed first: production only ever has one,
+--- and a second one in the middle of the stack would be the thing `windowBelow`
+--- finds instead of the reader.
+local function realBarPlugin()
+    reset()
+    local p = newPlugin()
+    p:setBarShown(false)
+    local bar = newRealBar(p)
+    p.bar = bar
+    env.UIManager:show(bar)
+    return p, bar
 end
 
 t:case("builds four buttons and a screen-relative geometry", function()
@@ -1294,6 +1317,50 @@ t:case("forwards input it does not want to the window below", function()
     bar:handleEvent(env.Event:new("SomethingElse"))
     t:eq(#seen, before, "non-input events are left alone")
     env.UIManager._window_stack = {}
+end)
+
+t:describe("spike / widget-layer gesture visibility")
+
+--- A Gesture event as UIManager builds it: rotation already applied by
+--- adjustGesCoordinate, so `pos` is in screen coordinates.
+local function gestureEvent(x, y, name)
+    return env.Event:new("Gesture", { ges = name or "tap", pos = { x = x, y = y } })
+end
+
+t:case("a gesture reaches the bar while it is topmost", function()
+    local p, bar = realBarPlugin()
+
+    local seen = {}
+    local original = bar.onGesture
+    bar.onGesture = function(self, ges) seen[#seen + 1] = ges; return original(self, ges) end
+
+    env.UIManager:sendEvent(gestureEvent(300, 600))
+
+    t:eq(#seen, 1, "the bar saw the gesture")
+    t:eq(seen[1].pos.x, 300, "position arrives in screen coordinates")
+end)
+
+t:case("a dialog above the bar takes the gesture instead", function()
+    local p, bar = realBarPlugin()
+
+    local seen = 0
+    local original = bar.onGesture
+    bar.onGesture = function(self, ges) seen = seen + 1; return original(self, ges) end
+
+    local dialog_got = false
+    env.UIManager:show({ handleEvent = function() dialog_got = true; return true end })
+
+    env.UIManager:sendEvent(gestureEvent(300, 600))
+
+    t:eq(seen, 0, "the bar never saw it")
+    t:eq(dialog_got, true, "the dialog did")
+end)
+
+t:case("bar membership is decidable from ges.pos alone", function()
+    local _, bar = realBarPlugin()
+    local d = bar.dimen
+    t:eq(bar:contains(d.x + 5, d.y + 5), true, "inside needs no transform")
+    t:eq(bar:contains(d.x - 50, d.y + 5), false, "outside needs no transform")
 end)
 
 t:case("relabels Draw/Stop and Pen/Eraser from plugin state", function()
