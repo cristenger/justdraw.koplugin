@@ -18,6 +18,10 @@ the bugs they exist to catch are invisible to a naive stub:
 
 local support = {}
 
+-- LuaJIT and Lua 5.1 expose unpack as a global; 5.2+ moved it to table. Keeping
+-- both alive is what lets this suite run in CI without a KOReader build.
+local unpack = unpack or table.unpack
+
 -- ------------------------------------------------------------------ runner
 
 local Runner = {}
@@ -228,7 +232,27 @@ function support.install()
     function UIManager:nextTick(fn) self._queue[#self._queue + 1] = fn end
     function UIManager:scheduleIn(_, fn) self._queue[#self._queue + 1] = fn end
     function UIManager:unschedule() end
-    function UIManager:show(w) self.shown[#self.shown + 1] = w end
+    function UIManager:show(w)
+        self.shown[#self.shown + 1] = w
+        self._window_stack[#self._window_stack + 1] = { widget = w }
+    end
+    --- Mirrors UIManager:sendEvent @ v2026.07: toasts are offered the event but
+    --- never consume it, the topmost non-toast widget gets first refusal, and a
+    --- true return stops propagation.
+    function UIManager:sendEvent(event)
+        local top
+        for i = #self._window_stack, 1, -1 do
+            local w = self._window_stack[i].widget
+            if w.toast then
+                w:handleEvent(event)
+            else
+                top = w
+                break
+            end
+        end
+        if not top then return false end
+        return top:handleEvent(event) and true or false
+    end
     function UIManager:close(w)
         for i = #self._window_stack, 1, -1 do
             if self._window_stack[i].widget == w then table.remove(self._window_stack, i) end
@@ -260,19 +284,24 @@ function support.install()
         if o.init then o:init() end
         return o
     end
-    --- Minimal stand-in for KOReader's dispatch: try our own handler, then
-    --- offer the event to numeric children.
+    --- KOReader's dispatch order: numeric children first, in array order, and
+    --- only then our own handler. c.f. WidgetContainer:handleEvent ->
+    --- propagateEvent -> Widget.handleEvent
+    --- (frontend/ui/widget/container/widgetcontainer.lua @ v2026.07).
+    ---
+    --- Getting this backwards makes a toolbar button unreachable in the fake
+    --- while it works on the device, or the reverse -- exactly the class of bug
+    --- this suite exists to catch.
     function WidgetContainer:handleEvent(event)
-        local handler = self[event.handler]
-        if type(handler) == "function" then
-            local res = handler(self, unpack(event.args or {}))
-            if res then return res end
-        end
         for i = 1, #self do
             local child = self[i]
             if type(child) == "table" and child.handleEvent then
                 if child:handleEvent(event) then return true end
             end
+        end
+        local handler = self[event.handler]
+        if type(handler) == "function" then
+            return handler(self, unpack(event.args or {}))
         end
     end
 
@@ -298,6 +327,7 @@ function support.install()
     package.preload["ffi/blitbuffer"] = function()
         return { COLOR_BLACK = "black", COLOR_WHITE = "white" }
     end
+    env.WidgetContainer = WidgetContainer
     package.preload["ui/widget/container/widgetcontainer"] = function() return WidgetContainer end
     package.preload["ui/widget/notification"] = function() return Notification end
     package.preload["ui/widget/confirmbox"] = function() return ConfirmBox end
@@ -319,6 +349,11 @@ function support.install()
         return x >= d.x and x < d.x + d.w and y >= d.y and y < d.y + d.h
     end
     function InkBar:update() self.updates = self.updates + 1 end
+    -- windowBelow stays stubbed for the InkBar that main.lua requires:
+    -- newPlugin registers the ReaderUI fake as env.window_below without ever
+    -- showing it through UIManager, so the real implementation would find
+    -- nothing under the bar. The ink_bar section loads its own copy of the
+    -- widget and exercises the real one against the real window stack.
     function InkBar:windowBelow() return env.window_below end
     package.preload["ink_bar"] = function() return InkBar end
     env.InkBar = InkBar
@@ -342,7 +377,15 @@ function support.install()
     function Button:new(o)
         o = setmetatable(o or {}, Button)
         o.texts = { o.text }
+        o.seen = {}
         return o
+    end
+    --- Records the offer and declines it. The stub has no hit rectangle of its
+    --- own, so it cannot decide a tap; what it can prove is that KOReader would
+    --- have offered it the event before the container's own handler ran.
+    function Button:handleEvent(event)
+        self.seen[#self.seen + 1] = event.handler
+        return false
     end
     function Button:setText(text) self.text = text; self.texts[#self.texts + 1] = text end
     function Button:getSize() return { w = self.width or 60, h = 30 } end
@@ -364,6 +407,19 @@ function support.install()
             return { w = w, h = h }
         end
         function C:paintTo() end
+        --- FrameContainer and VerticalGroup are WidgetContainers on the device,
+        --- so they propagate to their children. Without this the buttons are
+        --- unreachable in the fake and the bar looks like it swallows
+        --- everything.
+        function C:handleEvent(event)
+            for i = 1, #self do
+                local child = self[i]
+                if type(child) == "table" and child.handleEvent then
+                    if child:handleEvent(event) then return true end
+                end
+            end
+            return false
+        end
         return C
     end
     package.preload["ui/widget/container/framecontainer"] = function() return sizedContainer("frame") end

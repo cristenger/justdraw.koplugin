@@ -39,6 +39,7 @@ local function reset(input_opts)
     Device.screen.bb.rects = {}
     env.notifications = {}
     env.window_below = nil
+    env.UIManager._window_stack = {}
     _G.G_reader_settings.data = {}
     return Device.input
 end
@@ -868,6 +869,26 @@ end)
 -- then hand what is left to feedEvent.
 -- =====================================================================
 
+t:describe("test harness fidelity")
+
+t:case("widget containers offer events to children before themselves", function()
+    -- KOReader's WidgetContainer:handleEvent calls propagateEvent (children)
+    -- first and only then its own handler. A fake with that backwards makes a
+    -- toolbar button unreachable in the suite while it works on the device,
+    -- or the reverse.
+    reset()
+    local seen = {}
+    local Container = env.WidgetContainer:extend{}
+    function Container:onGesture() seen[#seen + 1] = "parent" end
+    local child = { handleEvent = function() seen[#seen + 1] = "child" end }
+    local c = Container:new{ child }
+
+    c:handleEvent({ handler = "onGesture", args = { {} } })
+
+    t:eq(seen[1], "child", "the child saw the event first")
+    t:eq(seen[2], "parent", "the container's own handler ran second")
+end)
+
 t:describe("full input frame pipeline")
 
 --- Returns: gestures emitted for this frame, and whether the pen was dominated.
@@ -1206,6 +1227,15 @@ t:case("swallows gestures that hit the bar but miss every button", function()
     t:eq(bar:onGesture{ pos = { x = d.x + 1, y = d.y + 1 } }, true, "consumed inside the bar")
     t:eq(bar:onGesture{ pos = { x = d.x - 20, y = d.y } }, nil, "not consumed outside")
     t:eq(bar:onGesture{}, nil, "a gesture with no position is left alone")
+
+    -- And through the real dispatch path, the buttons get first refusal:
+    -- KOReader offers an event to a container's children before the container
+    -- itself, so onGesture only ever sees what no button wanted.
+    env.UIManager._window_stack = { { widget = { handleEvent = function() return true end } },
+                                    { widget = bar } }
+    bar:handleEvent(env.Event:new("Gesture", { pos = { x = d.x + 1, y = d.y + 1 } }))
+    t:eq(bar.draw_btn.seen[1], "onGesture", "the buttons were offered it first")
+    env.UIManager._window_stack = {}
 end)
 
 t:case("windowBelow skips toasts and finds the reader", function()
