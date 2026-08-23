@@ -7,7 +7,10 @@ fingerink.koplugin/
   _meta.lua        plugin manifest
   main.lua         plugin object: state machine, menu, persistence, paintTo
   ink_bar.lua      always-reachable side toolbar widget
-  ink_capture.lua  GestureDetector:feedEvent wrapper + rotation transform
+  ink_capture.lua  dual capture backend (feedEvent wrapper + stylus callback),
+                   ownership-safe install/removal, guarded handlers,
+                   rotation transform
+  tests/           LuaJIT regression suite (support.lua + run.lua)
   ink_render.lua   allocation-free segment/stroke rasterisation
   ink_store.lua    per-page stroke list, hit test
 ```
@@ -17,9 +20,34 @@ module (`require("input")` would collide with `device/input`).
 
 ## Input capture
 
-KOReader v2026.03 exposes no API for reading parsed touch slots. The only
-device-agnostic hook is `Device.input.gesture_detector.feedEvent`, which the
-plugin wraps **only while drawing mode is on**:
+Two backends, one installed at a time, chosen by `fingerink_input_mode`
+(`auto` | `stylus` | `finger`, default `auto`, persisted in `G_reader_settings`).
+
+| Mode | Resolution |
+| --- | --- |
+| `finger` | always the legacy route |
+| `stylus` | needs `Input:registerStylusCallback`; refuses with a reason if absent or already owned |
+| `auto` | `stylus` when the API exists **and** `Device.input.wacom_protocol`; `finger` otherwise |
+
+`auto` falls back to `finger`, never to `stylus`: the stylus backend suppresses
+all touch, so choosing it on a device with no pen would leave the user unable to
+draw. `wacom_protocol` is narrow — only the three Kindle Scribes and the
+reMarkable set it — so Kobo stylus devices need the explicit mode.
+
+The emulator is deliberately left on `finger` too. koreader-base translates
+SDL3 pen events into the pen slot with a real tool, so a graphics tablet does
+drive the stylus route, but a plain mouse lands on slot 0 or 1 with no
+`ABS_MT_TOOL_TYPE`, never reaches the callback, and would be swallowed by the
+residual filter. Testers with a tablet select `stylus` by hand.
+
+The mode cannot be changed while `drawing` is true; the radio items are
+disabled. Swapping backends inside a live contact sequence would tear down
+capture mid-stroke.
+
+### Finger backend
+
+The only device-agnostic hook is `Device.input.gesture_detector.feedEvent`,
+which the plugin wraps **only while drawing mode is on**:
 
 ```lua
 gd.feedEvent = function(gd_self, slots)
@@ -36,13 +64,76 @@ consistent; the plugin only decides whether the resulting gesture events reach
 the app. Without this, a swallowed finger-down would desynchronise the detector
 and the two-finger exit gesture would not fire.
 
+### Stylus backend
+
+`Capture:installStylus` registers `Input:registerStylusCallback` **and** wraps
+`feedEvent` as well. The callback alone is not palm rejection: it only removes
+the pen from gesture detection, leaving every palm contact free to turn pages.
+
+Ordering is a hard guarantee, not luck. Every `handleTouchEv` variant runs
+`Input:routeStylusEvents()` and then `gesture_detector:feedEvent(MTSlots)`
+inside the same `EV_SYN:SYN_REPORT`. So within one frame `onStylusEvent` always
+runs before `onStylusTouchFrame`, and a dominated pen slot is already gone from
+the array the residual filter sees. That is what lets the residual filter
+promise never to touch `self.stroke`.
+
+```
+frame -> routeStylusEvents -> onStylusEvent(slot)   -> true drops the slot
+      -> feedEvent          -> onStylusTouchFrame() -> false empties gestures
+```
+
+### Ownership
+
+The stylus callback is a singleton: `registerStylusCallback` just assigns, there
+is no chaining and no owner query. `installStylus` validates everything before
+its first mutation and refuses with `stylus_callback_busy` if
+`input.stylus_callback` belongs to somebody else. `Capture:remove` is idempotent
+and unhooks **by identity** — it unregisters only if the live callback is still
+ours, restores `feedEvent` only if the live value is still our wrapper, and
+warns instead of clobbering otherwise. It clears `active` first, so a wrapper
+someone chained on top of ours finds ours transparent rather than filtering
+through a dead handler.
+
+### Error containment
+
+Nothing between the plugin and KOReader's main loop is protected:
+`routeStylusEvents` calls the callback bare, `Input:waitEvent` calls
+`handleTouchEv` bare, and neither UIManager nor `reader.lua` wraps that path. An
+unguarded error would take KOReader down *and* leave the monkey patch installed.
+
+Both handlers therefore run under `pcall`. On error the capture disarms itself
+and the handler returns the value that makes KOReader behave as if the plugin
+were absent: `false` from the stylus callback (do not dominate the slot) and
+`true` from the residual wrapper (let the gestures out). The plugin then stops
+drawing, drops the stroke in flight, and notifies once.
+
+### Slot data
+
 A slot table is `{ slot, id, x, y, tool, timev }`. `id >= 0` is a contact,
-`id == -1` is a lift. `x`/`y` may be absent on lift frames.
+`id == -1` is a lift, `id == nil` is a slot that never carried a tracking id.
+
+The table is Input's own `ev_slots[n]` and is **persistent**: `initMtSlot` never
+clears fields, `newFrame` only empties `MTSlots`, and `MTSlots` holds references
+to those durable tables. Consequences the implementation depends on:
+
+- `id` is sticky. After a lift it stays `-1` and repeats on every hover frame,
+  so the lift handler must be idempotent.
+- `x`/`y` are sticky. They outlive the contact, so coordinates alone never mean
+  "there is contact".
+- The table must never be retained past the call; scalars are copied out first.
+- `tool` can be `TOOL_TYPE_FINGER` on the pen slot, because leaving proximity
+  writes exactly that and the slot is still routed by slot number. `tool`
+  selects ink-or-erase, never draw-or-not.
+
+Tool constants are read from `Device.input.TOOL_TYPE_*` at install time, with
+the documented literals (0/1/2/3) only as a fallback.
 
 Coordinates are pre-rotation; `Capture.toScreen(x, y)` applies the same
-transform GestureDetector applies after detection, and returns two numbers.
+transform GestureDetector applies after detection, and returns two numbers. It
+prefers `Screen:getTouchRotation()` — the contract GestureDetector itself uses,
+which some backends override — and falls back to `getRotationMode()`.
 
-## Contact arbitration
+## Contact arbitration — finger backend
 
 | Active contacts | Behaviour |
 | --- | --- |
@@ -55,6 +146,64 @@ because the return value is `self.passthrough or was_passthrough`.
 
 **Single finger draws. Two fingers behave normally.** Two-finger gestures are a
 convenience, not the exit route — the toolbar is.
+
+## Contact arbitration — stylus backend
+
+### Pen: `onStylusEvent(slot)`
+
+| Condition | Action | Return |
+| --- | --- | --- |
+| `id == nil` | nothing | `true` |
+| first `id >= 0` | latch `stylus_passthrough` from `dialogOnTop()` | — |
+| latched passthrough | nothing | `false` |
+| first frame with `x`/`y`, inside `bar.dimen` | latch passthrough | `false` |
+| `id >= 0` with coordinates | draw or erase | `true` |
+| dragged onto the bar | end the stroke at the edge, park until lift | `true` |
+| `id < 0`, was drawing | `endStroke`, reset | `true` |
+| `id < 0`, was passthrough | reset | `false` |
+| `id < 0`, not active | nothing (idempotent) | latched value |
+
+**The domination decision is latched at contact-down and cannot change before
+the lift.** This is correctness, not style. `GestureDetector:feedEvent` creates
+a `Contact` the first time it sees a slot:
+
+- `true` → `false` mid-sequence: the detector opens a *new* contact at the
+  current position, marks it down, and emits a spurious tap on lift.
+- `false` → `true` mid-sequence: the existing contact never sees its lift and
+  stays in `active_contacts` with a live `pending_hold_timer`, firing a phantom
+  hold and blocking the slot until the next `dropContacts()`.
+
+### Touch: `onStylusTouchFrame(slots)`
+
+Everything the pen did not take. Palm and finger are not told apart — refusing
+to guess is what makes rejection predictable.
+
+| Condition | Return |
+| --- | --- |
+| pen sequence is passthrough | `true` (whole frame) |
+| dialog above the reader | `true` |
+| sequence started inside `bar.dimen` | `true` until all contacts lift |
+| anything else, 1 or many contacts | `false` |
+
+An empty `slots` array is normal — it happens whenever the pen was the only
+contact and got dominated — and must not be read as "everything lifted".
+
+This filter never calls `onContactPoint` and never touches `self.stroke`.
+
+**Known limitation.** The emit decision is per frame, not per contact:
+GestureDetector's gesture events carry `pos` but no slot number, so a frame
+released for a passthrough pen also releases a simultaneous palm. Pinned by a
+test so any change is deliberate. The fallback, if hardware shows the toolbar
+becoming unusable, is to filter the returned array geometrically — remembering
+that `ges.pos` is still unrotated at that point, since `adjustGesCoordinate`
+runs later in `Input:handleTouchEv`.
+
+### Shared point route
+
+`applyPoint(x, y, tool)` is the one place that decides ink versus erase. A
+`tool` equal to `TOOL_TYPE_ERASER` erases regardless of the toolbar; everything
+else defers to it. The finger route calls `onContactPoint(slot, x, y)` with no
+`tool`, so its behaviour is bit-for-bit what it was.
 
 ## Toolbar
 
@@ -137,8 +286,17 @@ empty. No write on every stroke.
 
 ## Lifecycle
 
-`onCloseDocument`, `onCloseWidget` and `onSuspend` all call `Capture:remove()`.
-The wrapper is never left installed.
+`onSuspend` calls `setDrawing(false)`; `onCloseDocument` and `onCloseWidget`
+call `teardown()`, which does the same work and then closes the bar. Both abort
+the stroke in flight, reset both state machines, and remove capture. No hook is
+ever left installed.
+
+There is no `onResume`, deliberately. `Input:inhibitInput(true)` swaps
+`handleTouchEv` for `voidEv` and calls `resetState()`, which drops every
+contact and rebuilds `ev_slots` from scratch — so suspending mid-stroke means
+the pen lift is never delivered and any cached slot reference is dead. Stopping
+on suspend and requiring an explicit Draw after resume is the only state that
+is knowably clean.
 
 ## Menu
 
@@ -148,6 +306,8 @@ Top menu → Finger Ink:
   open menu is unusable once single-finger taps are being swallowed)
 - Show toolbar (toggle, default on, persisted)
 - Toolbar side: left / right
+- Input mode: automatic / stylus / finger (radio, persisted, **disabled while
+  drawing**)
 - Pen width: thin (2) / medium (4) / thick (7)
 - Fast refresh while drawing (toggle, default on)
 - Clear this page

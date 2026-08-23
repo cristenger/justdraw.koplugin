@@ -1,13 +1,14 @@
 # decisions.md — Finger Ink
 
-## ADR-1 — Hook `GestureDetector:feedEvent`, not the stylus callback
+## ADR-1 — Hook `GestureDetector:feedEvent`, not the stylus callback *(superseded by ADR-11)*
 
 **Context.** `pencil.koplugin` and `stylus-annotations.koplugin` both route
 through `Input:registerStylusCallback` / `Input:routeStylusEvents`. That path
 filters on `slot.tool == TOOL_TYPE_PEN/ERASER` or `slot.slot == Input.pen_slot`
 (`pen_slot = main_finger_slot + 4`). A Kindle touch panel reports neither: no
 `ABS_MT_TOOL_TYPE`, contacts in slots 0/1. The callback can never fire for a
-finger. `registerStylusCallback` also does not exist in v2026.03.
+finger. `registerStylusCallback` also does not exist in v2026.03 — it landed in
+v2026.07, which is what reopened this decision. See ADR-11.
 
 **Decision.** Wrap `Device.input.gesture_detector.feedEvent`, the same hook
 `notes.koplugin` uses. It is the only place in v2026.03 where fully parsed MT
@@ -29,7 +30,7 @@ event list in place when the plugin is consuming the sequence.
 **Consequences.** GestureDetector does redundant work during ink strokes. Cheap
 relative to the e-ink refresh, and clearing in place adds no allocation.
 
-## ADR-3 — Single finger inks, two fingers pass through *(superseded in part by ADR-8)*
+## ADR-3 — Single finger inks, two fingers pass through *(superseded in part by ADR-8, and entirely on the stylus backend by ADR-11)*
 
 **Context.** Something has to turn drawing off while single-finger touch is
 being consumed, on a device with no buttons but power. A floating toolbar means
@@ -198,6 +199,81 @@ ReaderUI touch zones for input. Architecturally the tidiest, and how ReaderFoote
 does it, but the zones have to name every reader zone they override
 (`tap_forward`, `readerhighlight_tap`, and so on) — a brittle list, for a bigger
 change than the bug warrants.
+
+## ADR-11 — Stylus callback *plus* a residual touch filter
+
+**Context.** KOReader v2026.07 added `Input:registerStylusCallback`. Returning
+true from it removes the pen slot from `MTSlots` before
+`GestureDetector:feedEvent`, which is exactly the hook ADR-1 said did not
+exist. But it only hides *the pen*. Every palm contact still reaches the reader
+and still turns pages, so the callback on its own is not palm rejection — it is
+half of one.
+
+The callback is also a singleton: `registerStylusCallback` assigns, there is no
+chaining and no way to ask who owns it.
+
+**Decision.** On the stylus backend, register the callback *and* keep the
+ADR-1 `feedEvent` wrapper, now suppressing all residual touch outside the
+toolbar and dialogs. Keep the two backends separate rather than generalising
+one: the finger route has no tool data and must not change. Refuse activation
+outright when another plugin owns the callback; never overwrite it. Remove by
+identity, and treat the pen's domination decision as latched from contact-down
+to lift, because GestureDetector's contact bookkeeping cannot survive a flip
+mid-sequence.
+
+**Consequences.** Real palm rejection on the Scribe, at the price of no touch
+navigation while drawing — Stop is the way back. Two hooks instead of one.
+Coexistence with another stylus plugin is impossible by construction, which is
+reported rather than papered over. The emit decision stays per frame, so a
+passthrough pen frame releases a simultaneous palm; gestures carry no slot
+number, so per-contact filtering is not available without geometry.
+
+Rejected: dropping the `feedEvent` wrapper and relying on the callback alone.
+Simpler, and it does put ink on the page — but a palm still turns the page
+mid-sentence, which is the entire problem on a Scribe.
+
+Rejected: classifying palm versus finger by contact size or count. No size data
+in the slot, and any count-based rule makes rejection unpredictable, which is
+worse than a blunt rule the user can learn.
+
+Rejected: widening `auto` to cover the SDL emulator. It looked free —
+`stylus_tool_protocol` is `wacom_protocol or is_sdl` in core, and koreader-base
+really does translate SDL3 pen events into the pen slot with a proper tool. But
+a plain **mouse** goes to slot 0/1 emitting no `ABS_MT_TOOL_TYPE` at all, so it
+never reaches the callback and the residual filter would eat it: the emulator
+would open with a plugin that cannot draw. Serving the rare tablet case by
+breaking the common one is the wrong trade, and the explicit `stylus` mode
+already covers the tablet.
+
+## ADR-12 — Input handlers run guarded, and disarm themselves
+
+**Context.** Nothing between this plugin and KOReader's main event loop catches
+errors. `Input:routeStylusEvents` calls `self.stylus_callback(self, slot)`
+bare; `Input:waitEvent` calls `self:handleTouchEv(event)` bare — the nearby
+`pcall` covers only the C-level `waitForEvent` — and neither
+`UIManager:handleInput` nor `reader.lua` wraps that path.
+
+So a Lua error in a handler does not degrade the ink. It takes KOReader down
+with a traceback, *and* leaves the monkey patch installed, so the session ends
+with input captured by a plugin in an unknown state.
+
+**Decision.** Both handlers are installed as guarded wrappers. On error:
+`Capture` logs, removes itself by identity, and returns the value that makes
+KOReader behave as though the plugin were absent — `false` from the stylus
+callback (do not dominate), `true` from the residual wrapper (let gestures
+out). It then calls the plugin's `on_error`, itself guarded so a failure there
+cannot resurrect the original. The plugin stops drawing, drops the stroke in
+flight, and notifies once.
+
+**Consequences.** One `pcall` per input frame, which is noise next to the
+per-segment refresh ioctl already on that path. A bug surfaces as "drawing
+stopped, here is a notification" instead of a crash. Removal is re-entrant:
+`fail` removes before notifying, so a handler that disarms again finds nothing
+to do.
+
+Rejected: letting errors propagate and relying on KOReader's crash log. It is
+the current behaviour, and it is how a one-line typo becomes a device that has
+to be restarted with the pen still on the page.
 
 ## Deferred
 

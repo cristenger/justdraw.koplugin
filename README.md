@@ -2,11 +2,28 @@
 
 https://github.com/user-attachments/assets/66a1f825-9707-4755-bf09-310789dac2b5
 
-Draw on book pages with your **finger** in KOReader, on e-readers that have no
-stylus — Kindle Paperwhite included.
+Draw on book pages in KOReader with your **finger** on e-readers that have no
+stylus (Kindle Paperwhite included), or with the **pen** on a Kindle Scribe.
 
-Built against KOReader **v2026.03**. No core files are patched; it is a plain
-drop-in plugin folder.
+No core files are patched; it is a plain drop-in plugin folder.
+
+## Compatibility
+
+| Route | Minimum KOReader | Devices |
+| --- | --- | --- |
+| Finger | v2026.03 | any touch e-reader |
+| Stylus | **v2026.07** | Kindle Scribe (Scribe, Scribe 3, Scribe Colorsoft) |
+
+The stylus route needs `Input:registerStylusCallback`, which landed in
+v2026.07. Do not use v2026.03 for pen input: it shipped a Kindle Scribe
+regression that broke the stylus while touch kept working
+([#15164](https://github.com/koreader/koreader/issues/15164)), reverted for the
+v2026.07 milestone ([#15675](https://github.com/koreader/koreader/pull/15675)).
+
+Kobo stylus devices (Elipsa, Sage, Libra Colour) are **not supported**: they
+are untested here. They report their tool differently from the Kindle Scribe,
+so the stylus route may well work — select *Stylus* by hand under Input mode
+and treat it as experimental.
 
 ## Install
 
@@ -31,12 +48,36 @@ tappable, including while drawing is on — that is the whole point of it.
 | **Undo** | remove the last stroke on this page |
 | **Hide** | stop drawing and hide the toolbar |
 
-Then:
+### Input modes
+
+Top menu → More tools → Finger Ink → **Input mode**. Not changeable while
+drawing; press Stop first.
+
+- **Automatic** (default) — the stylus route on devices that report a pen
+  digitizer, the finger route everywhere else. A Paperwhite is unaffected.
+- **Stylus** — force the pen route. Refuses to start, with an explanation, if
+  this KOReader has no stylus API or another plugin already owns it.
+- **Finger** — force the legacy route.
+
+### Finger route
 
 - **One finger** draws, anywhere except on the toolbar.
 - **Two fingers** work exactly as they normally do — page turn, menus,
   gestures. Landing a second finger cancels the stroke in progress.
 - Eraser removes a whole stroke you touch, not part of one.
+
+### Stylus route
+
+- **The pen tip** draws. **The eraser end** erases whole strokes, whatever the
+  toolbar's tool is set to.
+- **Finger and palm do nothing at all** while Draw is on: no ink, no page
+  turns, no gestures, and they never cancel the pen's stroke. That is the palm
+  rejection, and it is deliberately blunt — no attempt is made to tell a palm
+  from a finger. **Press Stop to read again.**
+- The toolbar still takes taps from finger *and* pen, and an open menu or
+  dialog still takes input, so nothing can trap you.
+- The side button, if your Scribe's firmware reports one, is handled by
+  KOReader as an eraser modifier while held. Unverified on hardware.
 - Dragging a stroke onto the toolbar ends it at the edge instead of scribbling
   over the buttons.
 
@@ -48,7 +89,8 @@ Ink is saved into the book's sidecar, per page, when KOReader flushes settings.
 ## Menu and gestures
 
 Top menu → More tools → Finger Ink: start drawing, show/hide the toolbar, put
-it on the left instead, pen width, refresh quality, clear page, clear document.
+it on the left instead, input mode, pen width, refresh quality, clear page,
+clear document.
 "Start drawing" closes the menu on purpose — an open menu is useless once
 single-finger taps are going to ink.
 
@@ -66,22 +108,45 @@ since two-finger gestures keep working while drawing.
 - Fast refresh uses the DU waveform: grainy, and ghosting builds up until the
   next page turn. Turn it off in the menu if you would rather have clean strokes
   slowly.
-- No palm rejection. There is no tool-type data on this hardware to do it with.
-  A palm landing as a second contact cancels the stroke in progress.
+- **Finger route: no palm rejection.** There is no tool-type data on that
+  hardware to do it with, so a palm landing as a second contact cancels the
+  stroke in progress. The stylus route does reject palms, by suppressing all
+  touch.
+- **Stylus route: touch navigation is off while drawing.** Not a bug — see
+  above.
+- **Stylus route, narrow case:** if you tap the toolbar with the pen while a
+  palm rests on the screen, that one input frame is released as a whole and the
+  palm's gesture can get through with it. KOReader's gesture events carry a
+  position but not a slot number, so the decision cannot be made per contact.
+- **Suspend stops drawing.** Resuming leaves drawing off and the toolbar up;
+  press Draw again. Suspending mid-stroke means KOReader never delivers the pen
+  lift, so restarting from a clean state is the only safe option.
+- **A handler error stops drawing** rather than taking KOReader down: the
+  plugin unhooks itself, tells you once, and leaves reading working.
 - The toolbar takes about 15% of the screen width. Hide it when you are just
   reading.
 
 ## Tests
 
 ```sh
-luajit test.lua
+luajit test.lua                       # from the repository root
+luajit tests/run.lua                  # from inside fingerink.koplugin/
 ```
 
-Covers rasterisation, the stroke store and hit test, the rotation transform, the
-`feedEvent` wrapper, the one/two-finger arbitration state machine, and toolbar
-reachability — that a tap starting on the bar passes through and inks nothing,
-and that a stroke dragged onto it is truncated rather than painted over the
-buttons. Nothing that needs a running KOReader.
+Both run the same suite; it needs no KOReader session. Covers rasterisation,
+the stroke store and hit test, the rotation transform for all four rotations,
+both capture backends, ownership-safe install and removal, error containment,
+the pen state machine (latching, sticky tracking ids, the physical eraser), the
+residual touch filter, and toolbar reachability — that a tap starting on the bar
+passes through and inks nothing, and that a stroke dragged onto it is truncated
+rather than painted over the buttons.
+
+The pen tests drive synthetic slots that reproduce KOReader's real slot
+lifetime: one persistent table per slot, reused across frames, with `id`, `x`
+and `y` surviving a lift.
+
+**Not covered:** real Wacom hardware, e-ink ghosting and latency, and Kindle
+firmware. Those need a physical Kindle Scribe.
 
 ## Docs
 
