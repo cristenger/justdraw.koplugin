@@ -59,6 +59,33 @@ local function showDialog(name)
     return w
 end
 
+local RealInkBar = dofile(plugin_dir .. "/ink_bar.lua")
+
+local function newRealBar(plugin, side)
+    return RealInkBar:new{ plugin = plugin, side = side or "right" }
+end
+
+--- Swap in the real toolbar widget, on the real window stack. The fake bar
+--- newPlugin puts up is closed first: production only ever has one, and a
+--- second one in the middle of the stack would be what `windowBelow` finds
+--- instead of the reader.
+---
+--- Every plugin the input tests drive uses this, because the suppression
+--- decision now lives in the widget and a fake bar could not answer it.
+local function realBar(plugin)
+    plugin:setBarShown(false)
+    local bar = newRealBar(plugin)
+    plugin.bar = bar
+    env.UIManager:show(bar)
+    return bar
+end
+
+local function realBarPlugin(opts)
+    reset(opts)
+    local p = newPlugin()
+    return p, realBar(p)
+end
+
 -- =====================================================================
 -- ink_capture.lua
 -- =====================================================================
@@ -122,22 +149,31 @@ t:case("callback returning false reaches KOReader as false", function()
     t:eq(input.stylus_callback(input, { slot = 4, id = 4 }), false, "false propagates")
 end)
 
-t:case("residual handler returning false empties the gesture array", function()
+t:case("the wrapper observes the frame and passes the detector's output through", function()
+    -- ADR-13: emptying this array never could suppress hold or the deferred
+    -- tap, so the wrapper stopped trying. It observes; InkBar:suppresses
+    -- decides. Whatever the handler answers, the detector's output survives.
+    local input = reset()
+    local gd = input.gesture_detector
+    local seen
+    Capture:installStylus(function() return true end,
+        function(slots) seen = slots; return false end)
+    local frame = { { slot = 0, id = 1, x = 10, y = 20 } }
+    local evs = gd.feedEvent(gd, frame)
+    t:eq(gd.calls, 1, "original feedEvent was still called")
+    t:eq(seen, frame, "the residual handler saw the frame")
+    t:eq(#evs, 1, "and the detector's gestures were not touched")
+end)
+
+t:case("the wrapper drops no contacts", function()
+    -- dropContact was the old way to reach hold timers. It is destructive and
+    -- the finger route could never use it; nothing needs it now.
     local input = reset()
     local gd = input.gesture_detector
     Capture:installStylus(function() return true end, function() return false end)
-    local evs = gd.feedEvent(gd, {})
-    t:eq(gd.calls, 1, "original feedEvent was still called")
-    t:eq(#evs, 0, "gestures suppressed")
-end)
-
-t:case("residual handler returning true keeps the gesture array", function()
-    local input = reset()
-    local gd = input.gesture_detector
-    Capture:installStylus(function() return true end, function() return true end)
-    local evs = gd.feedEvent(gd, {})
-    t:eq(gd.calls, 1, "original feedEvent was called")
-    t:eq(#evs, 1, "gestures preserved")
+    gd.feedEvent(gd, { { slot = 0, id = 1, x = 10, y = 20 } })
+    t:check(gd:getContact(0) ~= nil, "the contact is left alone")
+    t:eq(#gd.dropped, 0, "nothing was dropped")
 end)
 
 t:case("finger backend keeps its existing semantics", function()
@@ -148,10 +184,10 @@ t:case("finger backend keeps its existing semantics", function()
     t:eq(ok, true, "install succeeded")
     t:eq(backend, "finger", "backend reported")
     t:eq(input.stylus_callback, nil, "finger backend registers no stylus callback")
-    local frame = { { slot = 0 } }
+    local frame = { { slot = 0, id = 1, x = 10, y = 20 } }
     local evs = gd.feedEvent(gd, frame)
     t:eq(seen, frame, "handler saw the frame")
-    t:eq(#evs, 0, "gestures suppressed")
+    t:eq(#evs, 1, "and the detector's output passes through untouched")
 end)
 
 t:describe("ink_capture / ownership-safe removal")
@@ -192,7 +228,7 @@ t:case("remove does not restore over a wrapper chained after us", function()
 
     -- Our own wrapper is still reachable through the chain: it must now be
     -- transparent instead of filtering with a dead handler.
-    local evs = gd.feedEvent(gd, {})
+    local evs = gd.feedEvent(gd, { { slot = 0, id = 1, x = 10, y = 20 } })
     t:eq(handler_calls, 0, "our handler no longer runs")
     t:eq(#evs, 1, "our wrapper passes gestures through unchanged")
     t:eq(gd.calls, 1, "original feedEvent reached exactly once")
@@ -320,7 +356,7 @@ t:case("a throwing residual handler does not escape and disarms capture", functi
                           function() error("boom") end,
                           function() errors = errors + 1 end)
     local wrapper = gd.feedEvent
-    local ok, evs = pcall(wrapper, gd, {})
+    local ok, evs = pcall(wrapper, gd, { { slot = 0, id = 1, x = 10, y = 20 } })
     t:eq(ok, true, "error did not propagate to KOReader")
     t:eq(#evs, 1, "safe return value emits: gestures reach the reader")
     t:eq(Capture.active, false, "capture went inert immediately")
@@ -452,8 +488,7 @@ end)
 -- =====================================================================
 
 local function drawingPlugin()
-    reset{ wacom_protocol = true }
-    local p = newPlugin()
+    local p = realBarPlugin{ wacom_protocol = true }
     p:setDrawing(true)
     return p
 end
@@ -610,7 +645,7 @@ t:case("an empty residual frame changes nothing", function()
     p:onStylusEvent(bus:set(4, { x = 150, y = 100 }))
     t:check(p.stroke ~= nil, "stroke in flight")
 
-    t:eq(p:onStylusTouchFrame({}), false, "nothing to emit")
+    p:onStylusTouchFrame({})
     t:eq(p.n_contacts, 0, "no contacts invented")
     t:check(p.stroke ~= nil, "the in-flight stroke was neither closed nor dropped")
     t:eq(p.store:get(1), nil, "nothing was committed to the store")
@@ -620,7 +655,9 @@ t:case("one finger outside the bar produces neither ink nor gesture", function()
     local p = drawingPlugin()
     local bus = support.newSlotBus()
     bus:set(0, { id = 1, x = 100, y = 400 })
-    t:eq(p:onStylusTouchFrame(bus:frame(0)), false, "gestures suppressed")
+    p:onStylusTouchFrame(bus:frame(0))
+    t:eq(p.bar:suppresses{ ges = "tap", pos = { x = 100, y = 400 } }, true,
+        "its gesture is suppressed")
     t:eq(p.stroke, nil, "no ink")
 end)
 
@@ -629,7 +666,11 @@ t:case("two fingers outside the bar produce neither ink nor gesture", function()
     local bus = support.newSlotBus()
     bus:set(0, { id = 1, x = 100, y = 400 })
     bus:set(1, { id = 2, x = 200, y = 400 })
-    t:eq(p:onStylusTouchFrame(bus:frame(0, 1)), false, "still suppressed")
+    p:onStylusTouchFrame(bus:frame(0, 1))
+    t:eq(p.bar:suppresses{ ges = "tap", pos = { x = 100, y = 400 } }, true,
+        "the first is suppressed")
+    t:eq(p.bar:suppresses{ ges = "tap", pos = { x = 200, y = 400 } }, true,
+        "and so is the second")
     t:eq(p.n_contacts, 2, "both contacts tracked")
 end)
 
@@ -637,11 +678,16 @@ t:case("a touch starting on the toolbar completes its tap", function()
     local p = drawingPlugin()
     local bus = support.newSlotBus()
     local bar = p.bar.dimen
+    local on_bar = { ges = "tap", pos = { x = bar.x + 5, y = bar.y + 5 } }
     bus:set(0, { id = 1, x = bar.x + 5, y = bar.y + 5 })
-    t:eq(p:onStylusTouchFrame(bus:frame(0)), true, "down emitted")
-    t:eq(p:onStylusTouchFrame(bus:frame(0)), true, "move emitted")
+    p:onStylusTouchFrame(bus:frame(0))
+    t:eq(p.passthrough, true, "the contact latched passthrough")
+    t:eq(p.bar:suppresses(on_bar), false, "down reaches the toolbar")
+    p:onStylusTouchFrame(bus:frame(0))
+    t:eq(p.bar:suppresses(on_bar), false, "move too")
     bus:set(0, { id = -1 })
-    t:eq(p:onStylusTouchFrame(bus:frame(0)), true, "lift emitted so the button fires")
+    p:onStylusTouchFrame(bus:frame(0))
+    t:eq(p.bar:suppresses(on_bar), false, "and the lift, so the button fires")
     t:eq(p.passthrough, false, "latch released after the sequence")
 end)
 
@@ -653,7 +699,8 @@ t:case("a palm never aborts the pen stroke in flight", function()
     t:check(p.stroke ~= nil, "stroke in flight")
 
     bus:set(0, { id = 1, x = 300, y = 600 })
-    t:eq(p:onStylusTouchFrame(bus:frame(0)), false, "palm suppressed")
+    p:onStylusTouchFrame(bus:frame(0))
+    t:eq(p.bar:suppresses{ ges = "tap", pos = { x = 300, y = 600 } }, true, "palm suppressed")
     t:check(p.stroke ~= nil, "stroke survived the palm")
 
     p:onStylusEvent(bus:set(4, { x = 200, y = 100 }))
@@ -666,19 +713,29 @@ t:case("a dialog on top releases residual touch to the UI", function()
     local bus = support.newSlotBus()
     showDialog("some dialog")
     bus:set(0, { id = 1, x = 100, y = 400 })
-    t:eq(p:onStylusTouchFrame(bus:frame(0)), true, "touch reaches the UI")
+    p:onStylusTouchFrame(bus:frame(0))
+    t:eq(p.passthrough, true, "the dialog latched passthrough")
+    t:eq(p.bar:suppresses{ ges = "tap", pos = { x = 100, y = 400 } }, false,
+        "so touch is free to reach the dialog")
 end)
 
-t:case("known limitation: a passthrough pen frame also releases a simultaneous palm", function()
-    -- Gestures carry `pos` but not `slot`, so the emit decision is per frame.
-    -- This test pins the current behaviour so any future change is deliberate.
+t:case("a pen tap on the toolbar does not release a simultaneous palm", function()
+    -- This used to be a documented limitation: the emit decision was per frame
+    -- and gestures carry `pos` but not `slot`, so releasing the pen's tap
+    -- released the palm's gesture with it. Per gesture, position settles it.
     local p = drawingPlugin()
     local bus = support.newSlotBus()
     local bar = p.bar.dimen
     p:onStylusEvent(bus:set(4, { id = 4, x = bar.x + 5, y = bar.y + 5, tool = 1 }))
     t:eq(p.stylus_passthrough, true, "pen latched to passthrough")
+
     bus:set(0, { id = 1, x = 100, y = 400 })
-    t:eq(p:onStylusTouchFrame(bus:frame(0)), true, "whole frame emitted, palm included")
+    p:onStylusTouchFrame(bus:frame(0))
+
+    t:eq(p.bar:suppresses{ ges = "tap", pos = { x = bar.x + 5, y = bar.y + 5 } }, false,
+        "the pen's tap on the toolbar travels")
+    t:eq(p.bar:suppresses{ ges = "pan", pos = { x = 100, y = 400 } }, true,
+        "the palm's gesture in the same frame does not")
 end)
 
 -- =====================================================================
@@ -768,8 +825,7 @@ end)
 t:describe("main / finger backend regressions")
 
 local function fingerPlugin()
-    reset()   -- no wacom, not SDL => finger
-    local p = newPlugin()
+    local p = realBarPlugin()   -- no wacom, not SDL => finger
     p:setDrawing(true)
     return p
 end
@@ -786,7 +842,9 @@ t:case("one contact draws", function()
     local p = fingerPlugin()
     local bus = support.newSlotBus()
     bus:set(0, { id = 1, x = 100, y = 100 })
-    t:eq(p:onTouchFrame(bus:frame(0)), false, "gestures suppressed")
+    p:onTouchFrame(bus:frame(0))
+    t:eq(p.bar:suppresses{ ges = "tap", pos = { x = 100, y = 400 } }, true,
+        "gestures suppressed")
     bus:set(0, { x = 150, y = 100 })
     p:onTouchFrame(bus:frame(0))
     bus:set(0, { id = -1 })
@@ -900,7 +958,12 @@ end)
 
 t:describe("full input frame pipeline")
 
---- Returns: gestures emitted for this frame, and whether the pen was dominated.
+--- Drive one whole input frame and report how many gestures reached the reader.
+---
+--- Since ADR-13 counting feedEvent's return value proves nothing: the detector
+--- always produces its gestures and the toolbar decides which ones travel. So
+--- this dispatches them the way UIManager:handleInput does and counts what got
+--- through, which is the question every one of these tests is actually asking.
 local function pumpFrame(input, bus, slot_specs)
     local mtslots = {}
     for _, spec in ipairs(slot_specs) do
@@ -923,14 +986,18 @@ local function pumpFrame(input, bus, slot_specs)
 
     local gd = input.gesture_detector
     local evs = gd.feedEvent(gd, mtslots)
-    return #evs, #dominated > 0
+
+    local before = #env.reader_events
+    for i = 1, #evs do
+        env.UIManager:sendEvent(env.Event:new("Gesture", evs[i]))
+    end
+    return #env.reader_events - before, #dominated > 0
 end
 
 local function pipelinePlugin()
-    local input = reset{ wacom_protocol = true }
-    local p = newPlugin()
+    local p, _ = realBarPlugin{ wacom_protocol = true }
     p:setDrawing(true)
-    return p, input
+    return p, Device.input
 end
 
 t:case("the pen can press a toolbar button", function()
@@ -938,14 +1005,23 @@ t:case("the pen can press a toolbar button", function()
     local bus = support.newSlotBus()
     local bar = p.bar.dimen
 
-    local down_evs = pumpFrame(input, bus,
-        { { slot = 4, fields = { id = 4, x = bar.x + 5, y = bar.y + 5, tool = 1 } } })
-    local lift_evs = pumpFrame(input, bus, { { slot = 4, fields = { id = -1 } } })
+    local on_bar = { ges = "tap", pos = { x = bar.x + 5, y = bar.y + 5 } }
+    local seen_before = #p.bar.draw_btn.seen
 
-    t:check(down_evs > 0, "the contact-down frame reaches the detector")
+    local down_reader = pumpFrame(input, bus,
+        { { slot = 4, fields = { id = 4, x = bar.x + 5, y = bar.y + 5, tool = 1 } } })
+    t:eq(p.bar:suppresses(on_bar), false, "the contact-down frame is the toolbar's")
+
+    local lift_reader = pumpFrame(input, bus, { { slot = 4, fields = { id = -1 } } })
     -- Taps are emitted on the lift frame. Losing this one made Draw/Stop,
     -- Pen/Eraser, Undo and Hide all unreachable with the pen.
-    t:check(lift_evs > 0, "the lift frame carries the tap to the button")
+    t:eq(p.bar:suppresses(on_bar), false, "and so is the lift frame that carries the tap")
+
+    t:check(#p.bar.draw_btn.seen > seen_before, "the buttons were offered the gesture")
+    -- What the harness cannot prove is the button's hit rectangle; the stub has
+    -- no layout. Physical matrix item 8 is what covers that.
+    t:eq(down_reader, 0, "the reader never saw it")
+    t:eq(lift_reader, 0, "so nothing turned a page under the toolbar")
     t:eq(p.store:get(1), nil, "and no ink was left on the page")
 end)
 
@@ -974,16 +1050,25 @@ t:case("a palm during a pen stroke emits nothing and keeps the stroke", function
     t:check(p.stroke ~= nil, "the pen stroke survived")
 end)
 
-t:case("suppressing a frame drops the contacts, killing their hold timers", function()
-    -- Emptying feedEvent's return array is not enough: `hold` and the deferred
-    -- `tap` come from Input timer callbacks that never pass through feedEvent.
+t:case("a timer-born hold from a suppressed contact never reaches the reader", function()
+    -- `hold` and the deferred `tap` come from Input timer callbacks that never
+    -- pass through feedEvent, so no filter down there can see them. The old
+    -- answer was dropContact, which destroys the contact and could not be used
+    -- on the finger route at all. ADR-13 catches them where they are dispatched.
     local p, input = pipelinePlugin()
     local bus = support.newSlotBus()
     local gd = input.gesture_detector
 
     pumpFrame(input, bus, { { slot = 0, fields = { id = 1, x = 300, y = 600 } } })
-    t:eq(gd:getContact(0), nil, "the palm's contact was dropped")
-    t:check(#gd.dropped >= 1, "dropContact was called")
+
+    t:check(gd:getContact(0) ~= nil, "the contact is left intact")
+    t:eq(#gd.dropped, 0, "nothing was dropped")
+
+    -- The hold arrives later, out of band, exactly as Input:waitEvent emits it.
+    local before = #env.reader_events
+    env.UIManager:sendEvent(env.Event:new("Gesture",
+        { ges = "hold", pos = { x = 300, y = 600 } }))
+    t:eq(#env.reader_events, before, "and its hold never reached the reader")
 end)
 
 t:case("a released frame keeps its contact, so the tap can still form", function()
@@ -1099,18 +1184,16 @@ t:case("a dot placed where the last one lifted is not lost", function()
     t:eq(#p.store:get(p:currentPage()), 2, "both dots were stored")
 end)
 
-t:case("an error disarm does not leave the pen's frame flag set", function()
-    local input = reset{ wacom_protocol = true }
-    local p = newPlugin()
-    p:setDrawing(true)
+t:case("an error disarm leaves nothing released behind it", function()
+    -- Before ADR-13 a raise mid-frame skipped the bookkeeping that cleared the
+    -- pen's per-frame flag, and the first residual frame of the next session
+    -- was let through. There is no such flag any more; this pins the invariant
+    -- it existed to protect.
+    local p, input = pipelinePlugin()
 
-    -- A raise inside the stylus handler returns the guard's fail value without
-    -- ever reaching stylusFrameResult, so the flag keeps whatever it held.
-    p.stylus_frame_ui = true
     Capture:fail("boom")
     env.UIManager:flush()
-
-    t:eq(p.stylus_frame_ui, false, "the per-frame flag was cleared with the rest")
+    t:eq(p.drawing, false, "the error stopped drawing")
 
     p:setDrawing(true)
     local bus = support.newSlotBus()
@@ -1131,7 +1214,9 @@ t:case("a resting palm does not make the toolbar unreachable", function()
     local n = pumpFrame(input, bus,
         { { slot = 1, fields = { id = 2, x = bar.x + 5, y = bar.y + 5 } } })
 
-    t:check(n > 0, "the toolbar tap survives a resting palm")
+    t:eq(p.bar:suppresses{ ges = "tap", pos = { x = bar.x + 5, y = bar.y + 5 } }, false,
+        "the toolbar tap survives a resting palm")
+    t:eq(n, 0, "and it went to the toolbar, not the reader")
     t:eq(p.passthrough, true, "the bar contact latched passthrough on its own slot")
     t:eq(p.contacts[0], "page", "the palm is remembered as off-bar")
     t:eq(p.contacts[1], "bar", "the finger is remembered as on-bar")
@@ -1215,26 +1300,6 @@ end)
 
 t:describe("ink_bar (real widget)")
 
-local RealInkBar = dofile(plugin_dir .. "/ink_bar.lua")
-
-local function newRealBar(plugin, side)
-    return RealInkBar:new{ plugin = plugin, side = side or "right" }
-end
-
---- A plugin whose toolbar is the real widget, on the real window stack. The
---- fake bar newPlugin puts up is closed first: production only ever has one,
---- and a second one in the middle of the stack would be the thing `windowBelow`
---- finds instead of the reader.
-local function realBarPlugin()
-    reset()
-    local p = newPlugin()
-    p:setBarShown(false)
-    local bar = newRealBar(p)
-    p.bar = bar
-    env.UIManager:show(bar)
-    return p, bar
-end
-
 t:case("builds four buttons and a screen-relative geometry", function()
     reset()
     local p = newPlugin()
@@ -1267,8 +1332,11 @@ t:case("swallows gestures that hit the bar but miss every button", function()
     -- Without this the border and inter-button gaps would forward a tap to the
     -- reader underneath and turn a page.
     t:eq(bar:onGesture{ pos = { x = d.x + 1, y = d.y + 1 } }, true, "consumed inside the bar")
-    t:eq(bar:onGesture{ pos = { x = d.x - 20, y = d.y } }, nil, "not consumed outside")
-    t:eq(bar:onGesture{}, nil, "a gesture with no position is left alone")
+    -- Falsy, not nil: outside the bar the answer now comes from `suppresses`,
+    -- and with drawing off that is an explicit false. handleEvent treats both
+    -- the same, but the test should say which one it expects.
+    t:eq(bar:onGesture{ pos = { x = d.x - 20, y = d.y } }, false, "not consumed outside")
+    t:eq(bar:onGesture{}, false, "a gesture with no position is left alone while idle")
 
     -- And through the real dispatch path, the buttons get first refusal:
     -- KOReader offers an event to a container's children before the container
@@ -1361,6 +1429,67 @@ t:case("bar membership is decidable from ges.pos alone", function()
     local d = bar.dimen
     t:eq(bar:contains(d.x + 5, d.y + 5), true, "inside needs no transform")
     t:eq(bar:contains(d.x - 50, d.y + 5), false, "outside needs no transform")
+end)
+
+t:describe("widget-layer suppression")
+
+t:case("a timer-born hold is swallowed while drawing", function()
+    -- hold never passes through feedEvent: Input:waitEvent dispatches it
+    -- straight from a setTimeout callback. This layer is the only one that
+    -- sees it. c.f. gesturedetector.lua:675 and input.lua:1584 @ v2026.07.
+    local p = realBarPlugin()
+    p:setDrawing(true)
+
+    local consumed = env.UIManager:sendEvent(gestureEvent(300, 600, "hold"))
+
+    t:eq(consumed, true, "the hold was consumed by the bar")
+    t:eq(#env.reader_events, 0, "the reader never saw it")
+end)
+
+t:case("a gesture aimed at the toolbar is not swallowed", function()
+    local p, bar = realBarPlugin()
+    p:setDrawing(true)
+    local d = bar.dimen
+    t:eq(bar:suppresses{ ges = "tap", pos = { x = d.x + 5, y = d.y + 5 } }, false,
+        "the toolbar keeps its taps")
+end)
+
+t:case("a palm gesture is suppressed even when the pen taps the bar", function()
+    -- The old per-frame decision released both, because gestures carry a
+    -- position but not a slot. Position is per gesture; the frame is not.
+    local p, bar = realBarPlugin()
+    p:setDrawing(true)
+    local d = bar.dimen
+    t:eq(bar:suppresses{ ges = "tap", pos = { x = d.x + 5, y = d.y + 5 } }, false,
+        "the pen's tap on the bar survives")
+    t:eq(bar:suppresses{ ges = "pan", pos = { x = 300, y = 600 } }, true,
+        "the palm's pan in the same frame does not")
+end)
+
+t:case("a gesture with no position is suppressed while drawing", function()
+    local p, bar = realBarPlugin()
+    p:setDrawing(true)
+    t:eq(bar:suppresses{ ges = "multiswipe" }, true, "unattributable, so suppressed")
+end)
+
+t:case("nothing is suppressed once drawing is off", function()
+    local p, bar = realBarPlugin()
+    p:setDrawing(true)
+    p:setDrawing(false)
+    t:eq(bar:suppresses{ ges = "tap", pos = { x = 300, y = 600 } }, false,
+        "reading works again")
+    t:eq(env.UIManager:sendEvent(gestureEvent(300, 600)), true, "and the reader gets it")
+    t:eq(env.reader_events[1], "onGesture", "by name")
+end)
+
+t:case("passthrough releases gestures without turning drawing off", function()
+    -- The finger route's two-finger escape, and the residual filter's dialog
+    -- latch, both work by setting passthrough. Suppression has to honour it.
+    local p, bar = realBarPlugin()
+    p:setDrawing(true)
+    p.passthrough = true
+    t:eq(bar:suppresses{ ges = "tap", pos = { x = 300, y = 600 } }, false,
+        "a passthrough sequence reaches the reader")
 end)
 
 t:case("relabels Draw/Stop and Pen/Eraser from plugin state", function()

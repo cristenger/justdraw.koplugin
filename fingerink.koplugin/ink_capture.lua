@@ -7,9 +7,10 @@ is the legacy route and its semantics are unchanged. See ADR-2.
 
 `stylus` registers `Input:registerStylusCallback` for pen/eraser slots *and*
 wraps `feedEvent` as well. The callback alone is not palm rejection: it only
-removes the pen from gesture detection, so every palm contact would still
-reach the reader and turn pages. The residual wrapper is what suppresses them.
-See ADR-11.
+removes the pen from gesture detection, so every palm contact would still reach
+the reader. The wrapper is how the plugin keeps track of those contacts; what
+actually stops them reaching the reader is the widget-layer filter in
+`ink_bar.lua`. See ADR-11 and ADR-13.
 
 Both handlers run under pcall and disarm the whole capture on the first error.
 Nothing between here and KOReader's main event loop is protected: the callback
@@ -42,7 +43,6 @@ local Capture = {
     feed_was_own = false,     -- was feedEvent an instance field before us?
     feed_wrapper = nil,
     stylus_callback = nil,
-    drop_suppressed = false,
     on_error = nil,
     failing = false,
 
@@ -158,55 +158,31 @@ end
 -- ------------------------------------------------------------- install
 
 --[[--
-Drop GestureDetector's contacts for the slots in a suppressed frame.
+Build the feedEvent wrapper.
 
-Emptying feedEvent's return array is not enough. `hold` and the deferred single
-`tap` are produced by timer callbacks registered through `Input:setTimeout`
+Since ADR-13 this is an observer, not a filter: the handler gets to see the
+frame's contacts and the detector's own output is passed through untouched.
+Emptying that array could never suppress `hold` or the deferred single `tap`,
+which are produced by timer callbacks registered through `Input:setTimeout`
 (frontend/device/gesturedetector.lua:641 and :675) and dispatched straight from
-`Input:waitEvent` (frontend/device/input.lua:1570-1585) without ever going
-through feedEvent. A palm resting for the hold interval would raise a text
-selection popup mid-stroke. `dropContact` clears those pending timeouts.
+`Input:waitEvent` (frontend/device/input.lua:1584) without going through
+feedEvent at all. Suppression happens at the widget layer instead, where every
+gesture is visible. See InkBar:suppresses.
 
-Stylus backend only. On the finger backend the detector's contact state has to
-survive suppression, or the two-finger gesture stops firing. See ADR-2.
+The wrapper stays transparent once we are no longer the installed wrapper, which
+is what makes removal safe when another plugin has chained on top of us and we
+can no longer unhook cleanly.
 ]]
-local function dropSuppressedContacts(gd, slots)
-    if type(gd.getContact) ~= "function" or type(gd.dropContact) ~= "function" then
-        return
-    end
-    for i = 1, #slots do
-        local ev = slots[i]
-        local slot = ev and ev.slot
-        if slot ~= nil then
-            local contact = gd:getContact(slot)
-            if contact then gd:dropContact(contact) end
-        end
-    end
-end
-
---[[--
-Build the feedEvent wrapper. It stays transparent once we are no longer the
-installed wrapper, which is what makes removal safe when another plugin has
-chained on top of us and we can no longer unhook cleanly.
-]]
-function Capture:_installFeedWrapper(frame_handler, fail_value)
+function Capture:_installFeedWrapper(frame_handler)
     local original = self.original_feed
-    local handler = guard(self, frame_handler, fail_value)
+    local handler = guard(self, frame_handler, true)
     local wrapper
     wrapper = function(gd_self, slots)
         if not (self.active and self.feed_wrapper == wrapper) then
             return original(gd_self, slots)
         end
-        local emit = handler(slots)
-        local evs = original(gd_self, slots)
-        if emit then return evs end
-        if self.drop_suppressed then
-            dropSuppressedContacts(gd_self, slots)
-        end
-        for i = #evs, 1, -1 do
-            evs[i] = nil
-        end
-        return evs
+        handler(slots)
+        return original(gd_self, slots)
     end
     self.feed_wrapper = wrapper
     self.feed_was_own = rawget(self.gesture_detector, "feedEvent") ~= nil
@@ -228,10 +204,9 @@ function Capture:installFinger(frame_handler, on_error)
     self.gesture_detector = gd
     self.original_feed = gd.feedEvent
     self.on_error = on_error
-    self.drop_suppressed = false
     self.backend = "finger"
     self.active = true
-    self:_installFeedWrapper(frame_handler, true)
+    self:_installFeedWrapper(frame_handler)
 
     logger.info("FingerInk: capture installed, backend finger")
     return true, "finger"
@@ -270,7 +245,6 @@ function Capture:installStylus(stylus_handler, residual_frame_handler, on_error)
     self.gesture_detector = gd
     self.original_feed = gd.feedEvent
     self.on_error = on_error
-    self.drop_suppressed = true
     self.backend = "stylus"
     self.active = true
 
@@ -292,7 +266,7 @@ function Capture:installStylus(stylus_handler, residual_frame_handler, on_error)
         return false, "no_stylus_api"
     end
 
-    self:_installFeedWrapper(residual_frame_handler, true)
+    self:_installFeedWrapper(residual_frame_handler)
 
     logger.info("FingerInk: capture installed, backend stylus, pen_slot", input.pen_slot)
     return true, "stylus"
@@ -307,7 +281,6 @@ function Capture:_forget()
     self.feed_was_own = false
     self.feed_wrapper = nil
     self.stylus_callback = nil
-    self.drop_suppressed = false
     self.backend = nil
     self.on_error = nil
     self:resolveTools(nil)

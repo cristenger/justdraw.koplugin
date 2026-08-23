@@ -126,8 +126,27 @@ local function newGestureDetector(opts)
             end
         end
         local out = {}
-        for i = 1, (opts.gestures_per_frame or 1) do
-            out[i] = { ges = "tap", pos = { x = 1, y = 2 } }
+        if opts.gestures_per_frame then
+            for i = 1, opts.gestures_per_frame do
+                out[i] = { ges = "tap", pos = { x = 1, y = 2 } }
+            end
+            return out
+        end
+        -- One gesture per contact, at that contact's position. The real
+        -- detector does not emit one per slot per frame, but position is the
+        -- only property the suppression layer reads and it has to be the
+        -- contact's own -- a fixed position would make every position test
+        -- pass or fail for the wrong reason.
+        --
+        -- Rotation is identity in these tests, so raw slot coordinates and the
+        -- screen coordinates adjustGesCoordinate would produce are the same.
+        for i = 1, #slots do
+            local ev = slots[i]
+            out[#out + 1] = {
+                ges = "tap",
+                pos = { x = ev.x or 0, y = ev.y or 0 },
+                slot = ev.slot,
+            }
         end
         return out
     end
@@ -310,6 +329,9 @@ function support.install()
     function Notification:new(o)
         env.notifications[#env.notifications + 1] = o.text
         o.toast = true
+        -- Toasts are real widgets: sendEvent offers them every event on its way
+        -- down, they just never consume one.
+        o.handleEvent = function() end
         return o
     end
 

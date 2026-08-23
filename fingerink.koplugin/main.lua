@@ -86,7 +86,6 @@ function FingerInk:init()
     self.stylus_geom_latched = false
     self.stylus_suspended = false
     self.stylus_stale_xy = false
-    self.stylus_frame_ui = false
     self.stylus_inked = false
     self.stylus_tool = nil
     self.stylus_lift_x, self.stylus_lift_y = nil, nil
@@ -367,9 +366,7 @@ function FingerInk:resetContacts()
 end
 
 --- Per-sequence pen state. `stylus_lift_x/y` deliberately survives, because it
---- is how the next contact-down detects stale coordinates. `stylus_frame_ui`
---- does not: a raise mid-frame skips stylusFrameResult entirely and would
---- otherwise leave the flag set for the next session's first residual frame.
+--- is how the next contact-down detects stale coordinates.
 function FingerInk:resetStylusState()
     self.stylus_active = false
     self.stylus_passthrough = false
@@ -377,7 +374,6 @@ function FingerInk:resetStylusState()
     self.stylus_geom_latched = false
     self.stylus_suspended = false
     self.stylus_stale_xy = false
-    self.stylus_frame_ui = false
     self.stylus_inked = false
     self.stylus_tool = nil
 end
@@ -396,7 +392,9 @@ end
 
 --[[--
 Called on every touch frame while drawing mode is on, before GestureDetector
-sees it. Returns true if the frame's gesture events should reach the app.
+sees it. Capture only: it reads contacts to draw from and maintains the
+passthrough latch. Since ADR-13 what reaches the app is decided per gesture in
+InkBar:suppresses, so this always returns true.
 ]]
 function FingerInk:onTouchFrame(slots)
     if not self.passthrough and self:dialogOnTop() then
@@ -405,8 +403,6 @@ function FingerInk:onTouchFrame(slots)
         self.passthrough = true
         self:abortStroke()
     end
-
-    local was_passthrough = self.passthrough
 
     for i = 1, #slots do
         local ev = slots[i]
@@ -441,7 +437,7 @@ function FingerInk:onTouchFrame(slots)
         end
     end
 
-    return self.passthrough or was_passthrough
+    return true
 end
 
 --- Finger route. `tool` is always nil here and exists only so both backends
@@ -521,7 +517,7 @@ function FingerInk:onStylusEvent(slot)
     if self.diag_until then self:diag(slot, x, y) end
 
     -- Hover before this slot ever carried a tracking id. Consume, change nothing.
-    if id == nil then return self:stylusFrameResult(true) end
+    if id == nil then return true end
 
     if id >= 0 then
         if not self.stylus_active then
@@ -537,7 +533,7 @@ function FingerInk:onStylusEvent(slot)
             self.stylus_stale_xy = x ~= nil
                 and x == self.stylus_lift_x and y == self.stylus_lift_y
         end
-        if self.stylus_passthrough then return self:stylusFrameResult(false) end
+        if self.stylus_passthrough then return false end
 
         -- Remember the last tool that was not the TOOL_TYPE_FINGER a pen slot
         -- reports on its way out of proximity. The lift frame often carries
@@ -563,7 +559,7 @@ function FingerInk:onStylusEvent(slot)
                 -- decision can still go to passthrough without a flip.
                 if not self.stylus_dominated and self:inBar(sx, sy) then
                     self.stylus_passthrough = true
-                    return self:stylusFrameResult(false)
+                    return false
                 end
             end
             self:onStylusPoint(sx, sy, tool)
@@ -571,7 +567,7 @@ function FingerInk:onStylusEvent(slot)
         -- Only the contact-down frame can be carrying stale coordinates.
         self.stylus_stale_xy = false
         self.stylus_dominated = true
-        return self:stylusFrameResult(true)
+        return true
     end
 
     -- Contact lift. Remember where it happened, for the staleness check above.
@@ -579,7 +575,7 @@ function FingerInk:onStylusEvent(slot)
         self.stylus_lift_x, self.stylus_lift_y = x, y
     end
     if not self.stylus_active then
-        return self:stylusFrameResult(not self.stylus_passthrough)
+        return not self.stylus_passthrough
     end
     local was_passthrough = self.stylus_passthrough
     -- A contact-down frame judged stale is sometimes a false positive: the pen
@@ -595,21 +591,7 @@ function FingerInk:onStylusEvent(slot)
         self:endStroke()
     end
     self:resetStylusState()
-    return self:stylusFrameResult(not was_passthrough)
-end
-
---[[--
-Record this frame's pen decision and return it.
-
-The residual filter runs later in the same input frame and needs to know
-whether the pen handed its slot to the UI. It cannot read `stylus_passthrough`,
-because the lift frame — the one that carries the toolbar's tap — resets that
-state before the filter runs. Reading it there is what made every toolbar
-button unreachable with the pen.
-]]
-function FingerInk:stylusFrameResult(dominate)
-    if not dominate then self.stylus_frame_ui = true end
-    return dominate
+    return not was_passthrough
 end
 
 --[[--
@@ -657,7 +639,7 @@ function FingerInk:onStylusPoint(x, y, tool)
 end
 
 --[[--
-The residual touch filter: everything the pen callback did not take.
+Residual contact bookkeeping for the stylus backend.
 
 Runs after onStylusEvent within the same input frame, because
 Input:routeStylusEvents is called immediately before feedEvent in every
@@ -666,28 +648,16 @@ a dominated pen slot is already gone from `slots`. That ordering is what lets
 this function promise never to touch `self.stroke` — a palm landing mid-stroke
 is precisely what the stylus backend exists to ignore.
 
-While drawing is on, touch does not navigate. Finger and palm are not told
-apart; refusing to guess is what makes rejection predictable. The only touches
-that survive are the ones aimed at the toolbar or at a dialog above the reader.
+Since ADR-13 it does not decide what gets emitted. Suppression lives in
+InkBar:suppresses, per gesture and by position. What stays here is the state
+that decision reads: how many non-pen contacts are down, and whether any of them
+started on the toolbar. Always returns true.
 ]]
 function FingerInk:onStylusTouchFrame(slots)
-    -- The pen already ran in this frame. If it handed its slot to the UI, this
-    -- frame has to be emitted so the toolbar button or the dialog gets it.
-    -- Gestures carry `pos` but not `slot`, so the decision is necessarily per
-    -- frame: releasing the pen's gesture also releases a simultaneous palm's.
-    -- Known limitation, documented in the README.
-    local pen_wants_ui = self.stylus_frame_ui
-    self.stylus_frame_ui = false
-
     if not self.passthrough and self:dialogOnTop() then
         self.passthrough = true
     end
 
-    local was_passthrough = self.passthrough
-
-    -- Contact accounting runs unconditionally, even when the pen has already
-    -- decided this frame. Skipping it used to strand `n_contacts` and leave
-    -- `passthrough` latched, at which point a palm could turn pages.
     for i = 1, #slots do
         local ev = slots[i]
         -- A pen slot handed back to the UI is not residual touch.
@@ -726,7 +696,7 @@ function FingerInk:onStylusTouchFrame(slots)
         end
     end
 
-    return pen_wants_ui or self.passthrough or was_passthrough
+    return true
 end
 
 -- ------------------------------------------------------------------ stroke

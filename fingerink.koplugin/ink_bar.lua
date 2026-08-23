@@ -10,6 +10,11 @@ because the capture handler passes through any contact that starts inside
 Being the topmost window also means UIManager offers it *every* input event and
 nothing else gets a look in, so input that misses the bar is forwarded to the
 window underneath by hand. See ADR-10.
+
+That same position is why the plugin's input suppression lives here: every
+gesture passes through, already rotated and carrying a position, including the
+ones GestureDetector produces from timers rather than from an input frame. See
+`suppresses` and ADR-13.
 ]]
 
 local Blitbuffer = require("ffi/blitbuffer")
@@ -135,14 +140,41 @@ function InkBar:windowBelow()
 end
 
 --[[--
+Whether this gesture must not reach the application.
+
+This is the plugin's suppression point. It sits here rather than in the capture
+hook because UIManager offers *every* input event to the topmost non-toast
+widget first and stops when it returns true — including `hold` and the deferred
+single `tap`, which are produced by `Input:setTimeout` callbacks and dispatched
+straight from `Input:waitEvent` without ever passing through
+`GestureDetector:feedEvent`. A filter down there cannot see them at all.
+
+Gestures arrive rotation-adjusted, so `pos` is already in screen coordinates and
+no transform is needed here. The decision is per gesture, which is what lets a
+palm's pan be swallowed in the same frame that carries the pen's tap on a
+button. See ADR-13.
+
+A gesture with no position cannot be attributed to a contact, and letting one
+through mid-stroke is exactly the failure being closed, so it is suppressed too.
+]]
+function InkBar:suppresses(ges)
+    local p = self.plugin
+    if not (p.drawing and p.input_backend) then return false end
+    if p.passthrough then return false end
+    if ges.pos and self:contains(ges.pos.x, ges.pos.y) then return false end
+    return true
+end
+
+--[[--
 Swallow gestures that land on the bar but miss every button — the border, the
 padding, the gaps between buttons. Without this they would be forwarded and
-turn a page under the toolbar.
+turn a page under the toolbar. Everything else defers to `suppresses`.
 ]]
 function InkBar:onGesture(ges)
     if ges.pos and self:contains(ges.pos.x, ges.pos.y) then
         return true
     end
+    return self:suppresses(ges)
 end
 
 --[[--
