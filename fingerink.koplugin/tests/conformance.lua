@@ -15,6 +15,13 @@ this file.
 -- else; running from the build directory is what makes it resolvable.
 require("setupkoenv")
 
+-- The plugin's own modules, resolved from this file rather than from the
+-- working directory: this script is run from inside a KOReader build.
+local this = debug.getinfo(1, "S").source:sub(2)
+local tests_dir = this:match("^(.*)[/\\][^/\\]*$") or "."
+local plugin_dir = tests_dir:match("^(.*)[/\\][^/\\]*$") or "."
+package.path = plugin_dir .. "/?.lua;" .. package.path
+
 local DataStorage = require("datastorage")
 local LuaSettings = require("luasettings")
 -- Device pulls settings in on the way up, and nothing has created the global
@@ -86,6 +93,173 @@ probe:handleEvent(require("ui/event"):new("FingerInkProbe"))
 claim("WidgetContainer offers events to children before itself",
     true, order[1] == "child" and order[2] == "parent",
     table.concat(order, " then "))
+
+-- =====================================================================
+-- The canvas database, against real SQLite
+--
+-- tests/run.lua drives the repository through a recorder that executes
+-- nothing, so this is the only place the schema is ever parsed, a constraint
+-- ever fires, and a point blob makes a real round trip. A MISMATCH here means
+-- the repository's SQL is wrong, not that a stub is.
+-- =====================================================================
+
+local sq3_ok, SQ3 = pcall(require, "lua-ljsqlite3/init")
+
+if not sq3_ok then
+    claim("canvas database: SQLite driver is available", false, false,
+        "lua-ljsqlite3 did not load")
+else
+    local Repository = require("ink_canvas_repository")
+    local Codec = require("ink_canvas_codec")
+
+    local db_path = os.tmpname() .. ".fingerink-conformance.sqlite3"
+    os.remove(db_path)
+
+    local repo, open_err = Repository.open{
+        path = db_path,
+        driver = SQ3,
+        wal = false,   -- a temp file with no sidecars left behind
+        now = function() return 1000 end,
+    }
+
+    claim("canvas database: the v1 schema is accepted by SQLite",
+        true, repo ~= nil, tostring(open_err or db_path))
+
+    if repo then
+        local conn = repo.conn
+
+        claim("canvas database: user_version is stamped at the schema version",
+            true, tonumber(conn:rowexec("PRAGMA user_version;")) == Repository.SCHEMA_VERSION)
+
+        claim("canvas database: foreign keys are actually enforced",
+            true, tonumber(conn:rowexec("PRAGMA foreign_keys;")) == 1)
+
+        -- The hazard the repository's `num` exists for. If this ever comes
+        -- back as a Lua number the guard is merely harmless, not wrong.
+        local raw = conn:rowexec("SELECT 1;")
+        claim("canvas database: INTEGER columns arrive as int64 cdata, not numbers",
+            true, type(raw) == "cdata", "type(raw) = " .. type(raw))
+
+        local book_id = repo:bookId("conformance-md5", 4242, "/tmp/book.epub")
+        claim("canvas database: a book row is created and its id is a Lua number",
+            true, type(book_id) == "number", "book_id = " .. tostring(book_id))
+
+        claim("canvas database: the same book resolves to the same row",
+            true, repo:bookId("conformance-md5", 4242, "/tmp/moved.epub") == book_id)
+
+        local canvas = repo:createCanvas(book_id, {
+            anchor_kind = "xpointer",
+            anchor_key = "xp:/body/DocFragment[3]/body/p[7]/text().0",
+            anchor_raw = "/body/DocFragment[3]/body/p[7]/text().0",
+            anchor_normalized = "/body/DocFragment[3]/body/p[7]/text().0",
+            anchor_dom_version = 20240114,
+            logical_w = 1860,
+            logical_h = 2480,
+        })
+        claim("canvas database: a canvas row is created",
+            true, canvas ~= nil and type(canvas.id) == "number")
+
+        -- UNIQUE(book_id, anchor_key): the guard against a double tap making
+        -- two canvases at one position.
+        local dup = repo:createCanvas(book_id, {
+            anchor_key = "xp:/body/DocFragment[3]/body/p[7]/text().0",
+            logical_w = 1860, logical_h = 2480,
+        })
+        claim("canvas database: a duplicate anchor is rejected by the schema",
+            true, dup == nil)
+
+        claim("canvas database: anchor_kind is constrained",
+            true, repo:createCanvas(book_id, {
+                anchor_kind = "nonsense", anchor_key = "other",
+                logical_w = 10, logical_h = 10 }) == nil)
+
+        -- A stroke long enough to span chunks, with coordinates that exercise
+        -- the whole quantiser range.
+        local n = Codec.MAX_POINTS + 77
+        local points = {}
+        for i = 1, n do
+            points[#points + 1] = (i * 7) % 1861
+            points[#points + 1] = (i * 13) % 2481
+        end
+        local stroke_id = repo:addStroke(canvas,
+            { seq = 1, width = 4, tool = 1, points = points, n = n })
+        claim("canvas database: a multi-chunk stroke is written",
+            true, type(stroke_id) == "number", "stroke_id = " .. tostring(stroke_id))
+
+        local chunk_rows = tonumber(conn:rowexec(
+            "SELECT count(*) FROM stroke_chunks WHERE stroke_id = " .. tostring(stroke_id)))
+        claim("canvas database: it occupies the number of chunks the codec predicts",
+            true, chunk_rows == Codec.chunkCount(n),
+            tostring(chunk_rows) .. " vs " .. tostring(Codec.chunkCount(n)))
+
+        -- The blob story: a Lua string binds as TEXT even into a BLOB column,
+        -- and length() on a TEXT value stops at its first NUL. The CAST on the
+        -- way in is what makes this a real blob.
+        local kind = conn:rowexec(
+            "SELECT typeof(points) FROM stroke_chunks WHERE stroke_id = "
+            .. tostring(stroke_id) .. " AND chunk_no = 0")
+        claim("canvas database: point payloads are stored as blobs, not as text",
+            true, kind == "blob", "typeof = " .. tostring(kind))
+
+        local blob_len = tonumber(conn:rowexec(
+            "SELECT length(points) FROM stroke_chunks WHERE stroke_id = "
+            .. tostring(stroke_id) .. " AND chunk_no = 0"))
+        claim("canvas database: SQL sees the whole payload, not one byte of it",
+            true, blob_len == Codec.HEADER + 4 * Codec.MAX_POINTS,
+            "length = " .. tostring(blob_len))
+
+        local back, back_n = repo:readStroke(canvas, { id = stroke_id, point_count = n })
+        local worst = 0
+        if back then
+            for i = 1, n do
+                local dx = math.abs(back[i * 2 - 1] - points[i * 2 - 1])
+                local dy = math.abs(back[i * 2] - points[i * 2])
+                if dx > worst then worst = dx end
+                if dy > worst then worst = dy end
+            end
+        end
+        claim("canvas database: every point survives the round trip through SQLite",
+            true, back ~= nil and back_n == n and worst <= 2480 / 65535 / 2 + 1e-9,
+            "n = " .. tostring(back_n) .. ", worst error = " .. tostring(worst))
+
+        -- The layout cache, its composite foreign key, and the prune.
+        repo:saveLayoutPages(book_id, "layout-a", { [canvas.id] = 41 })
+        local pages = repo:layoutPages(book_id, "layout-a")
+        claim("canvas database: a resolved page comes back keyed by canvas id",
+            true, pages ~= nil and pages[canvas.id] == 41)
+
+        repo.now = function() return 1001 end
+        repo:saveLayoutPages(book_id, "layout-b", { [canvas.id] = 42 })
+        repo.now = function() return 1002 end
+        repo:saveLayoutPages(book_id, "layout-c", { [canvas.id] = 43 })
+        local hashes = tonumber(conn:rowexec(
+            "SELECT count(DISTINCT layout_hash) FROM canvas_layout_cache"))
+        claim("canvas database: only the two most recent layouts are kept",
+            true, hashes == 2, "distinct layouts = " .. tostring(hashes))
+
+        -- Cascades. Deleting the canvas has to take its strokes, its chunks
+        -- and its cached pages with it, through the composite key too.
+        repo:deleteCanvas(canvas.id)
+        local left = tonumber(conn:rowexec("SELECT count(*) FROM strokes"))
+            + tonumber(conn:rowexec("SELECT count(*) FROM stroke_chunks"))
+            + tonumber(conn:rowexec("SELECT count(*) FROM canvas_layout_cache"))
+        claim("canvas database: deleting a canvas cascades to everything it owns",
+            true, left == 0, "rows left behind = " .. tostring(left))
+
+        -- PRAGMA user_version has to be transactional, or a rolled-back
+        -- migration could leave a stamp claiming work that was undone.
+        conn:exec("BEGIN;")
+        conn:exec("PRAGMA user_version=999;")
+        conn:exec("ROLLBACK;")
+        claim("canvas database: a rolled-back version stamp does not stick",
+            true, tonumber(conn:rowexec("PRAGMA user_version;")) == Repository.SCHEMA_VERSION,
+            "user_version = " .. tostring(conn:rowexec("PRAGMA user_version;")))
+
+        repo:close()
+    end
+
+    os.remove(db_path)
+end
 
 local bad = 0
 for _, r in ipairs(rows) do

@@ -346,11 +346,73 @@ Rejected: clearing `contact.pending_hold_timer` on suppressed contacts. It works
 it reaches into another module's private state, it cannot fix the per-frame
 problem, and it would silently kill a legitimate two-finger hold.
 
+## ADR-14 — Canvas ink goes in its own SQLite database, not in the sidecar
+
+**Context.** The EPUB canvas stores freehand ink against a book position rather
+than a page. A reader who uses it seriously accumulates far more ink than the
+per-page PDF feature ever produces, and all of it belongs to one book.
+
+`fingerink_strokes` lives in the document sidecar, which is the obvious place
+to put canvases too. It does not survive the volume. `DocSettings:flush()`
+serialises the *entire* settings table with `dump()` and rewrites the file, so
+one new stroke re-serialises every point in the book. Measured against
+KOReader's own `dump.lua`, the current stroke format costs about 67 bytes per
+point; a thousand 600-point strokes is roughly 38 MiB of Lua source, rewritten
+on every flush, and duplicated again in whatever metadata backups the reader
+has enabled.
+
+**Decision.** Canvases and their strokes live in
+`DataStorage:getSettingsDir() .. "/fingerink.sqlite3"` — the same global
+location and the same `lua-ljsqlite3` pattern the Statistics plugin uses.
+Points are stored as chunked binary blobs, four bytes per point, and are read
+only for the canvas that is open. `fingerink_strokes` and `ink_store.lua` are
+untouched: the PDF feature keeps its format.
+
+A book is keyed by `(partial_md5_checksum, file_size)`, not by path, so
+renaming or moving a book keeps its notes. Without both values the repository
+refuses rather than falling back to the path.
+
+The file is not put inside `.sdr`. `DocSettings.updateLocation` only knows
+about `metadata.lua`, the custom cover and custom metadata, so a companion file
+there would not reliably follow a move, copy or delete.
+
+**Consequences.** A reader's backup has to include `fingerink.sqlite3`, not
+just the book's `.sdr` folder — and with WAL on, either with KOReader closed or
+including the `-wal`/`-shm` files. Copying a book to another device no longer
+carries its canvases; sync and export stay out of scope.
+
+Two properties of the driver had to be discovered by probing it rather than by
+reading the design, and both are load-bearing:
+
+- INTEGER columns come back as int64 cdata. `1LL == 1` is true, but `t[1LL]`
+  and `t[1]` are different table keys and `1LL .. ""` raises. Every integer is
+  converted at the repository boundary; a page index built from raw driver
+  output would silently miss every lookup.
+- A Lua string binds as TEXT even into a column declared BLOB, and SQL that
+  touches a TEXT value stops at its first NUL — `length()` on a point blob
+  answers 1. `CAST(?n AS BLOB)` going in and `CAST(points AS TEXT)` coming out
+  give a genuine blob with plain Lua strings on both sides.
+
+Rejected: a plain-Lua fake SQL engine for the test suite. The suite runs under
+a bare interpreter with no KOReader and cannot load the driver, so the
+repository's own tests drive a recorder that proves control flow — transaction
+order, backup before migration, that the listing query does not name `points` —
+and say so. Everything about SQL *semantics* is proven in `tests/conformance.lua`
+against real SQLite, alongside the existing runtime claims. A fake that answered
+questions about constraints would be answering them wrong.
+
+Rejected: `drawnotes.koplugin`'s approach of opening a second `DocSettings` for
+the same book and flushing whole snapshots. It can overwrite live metadata and
+keeps the monolithic cost. One source of truth, and no `DocSettings:flush()` of
+our own.
+
 ## Deferred
 
 - Scroll view mode (`paintTo` offset and page identity both change).
 - Segment-distance eraser (ADR-7).
-- Layout-change detection for EPUBs (ADR-5).
+- Layout-change detection for EPUBs (ADR-5). The canvas sidesteps it: an
+  anchored sheet keeps its own coordinates, so reflow moves the sheet, not the
+  ink (ADR-14).
 - Save-on-stroke instead of `onSaveSettings`, if crash loss turns out to matter.
 - Draggable toolbar (`MovableContainer`) if the fixed centred position gets in
   the way of a particular book's layout.

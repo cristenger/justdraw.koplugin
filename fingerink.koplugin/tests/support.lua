@@ -230,6 +230,234 @@ function support.newScreen(opts)
     return screen
 end
 
+-- ---------------------------------------------------------- fake sql driver
+
+--[[--
+A recording stand-in for `lua-ljsqlite3`.
+
+It is deliberately *not* an SQL engine. It executes nothing, parses nothing and
+knows nothing about tables; it records every statement and every binding in
+order, and hands back rows a test scripted in advance. What it can prove is
+control flow -- the order of BEGIN/COMMIT/ROLLBACK, that a backup happens
+before a migration, that a query does not select a column, that a connection is
+closed on the failure path.
+
+What it cannot prove is that the SQL is valid or that a constraint fires. That
+lives in tests/conformance.lua, which runs the real schema against real SQLite.
+Treating this fake as evidence about SQL semantics is how a suite ends up
+proving only what it already believed.
+
+Two behaviours are modelled from the real driver because the repository has to
+defend against them, and a naive stub would hide both:
+
+1. INTEGER columns come back as int64 cdata under LuaJIT, not as Lua numbers.
+   `1LL == 1` is true, but `t[1LL]` and `t[1]` are *different table keys*, and
+   `1LL .. ""` raises. Anything the repository hands out has to be a real
+   number. Set `opts.int64` to wrap integer answers in a stand-in with those
+   same edges.
+2. `stmt:step()` returns nil once the rows run out, and `reset()` is what
+   re-arms it.
+]]
+
+--[[--
+Stands in for the int64 cdata the real driver hands back for INTEGER columns.
+
+A string, deliberately. What has to be modelled is the property the repository
+defends against: a raw driver value is *not* the same table key as the number
+it represents, and `tonumber` is what fixes that. A string has exactly that
+shape and works under a stock Lua, where there is no ffi to make a real int64.
+
+It diverges from the real cdata in one way -- `1LL == 1` is true and `"1" == 1`
+is not -- which is why the assertions built on this check table keys and types
+rather than equality.
+]]
+function support.int64(v) return tostring(v) end
+
+local function scriptedRows(conn, sql)
+    for i = 1, #conn.answers do
+        local a = conn.answers[i]
+        if sql:find(a.pattern) then
+            local rows = a.rows
+            if type(rows) == "function" then rows = rows(sql) end
+            return rows
+        end
+    end
+    return nil
+end
+
+--- Wrap integers the way the real driver would, when asked to.
+local function maybeInt64(conn, rows)
+    if not conn.int64 or type(rows) ~= "table" then return rows end
+    local out = {}
+    for i = 1, #rows do
+        local row = rows[i]
+        if type(row) == "table" then
+            -- pairs, not 1..#row: a scripted row with a NULL column in the
+            -- middle has a hole, and `#` on a table with a hole may stop at
+            -- it, silently truncating every column after the NULL.
+            local copy = {}
+            for j, v in pairs(row) do
+                if type(v) == "number" and v == math.floor(v) then
+                    copy[j] = support.int64(v)
+                else
+                    copy[j] = v
+                end
+            end
+            out[i] = copy
+        else
+            out[i] = row
+        end
+    end
+    return out
+end
+
+local FakeStmt = {}
+FakeStmt.__index = FakeStmt
+
+function FakeStmt:bind(...)
+    self.binds = { ... }
+    self.conn.log[#self.conn.log + 1] = {
+        op = "bind", sql = self.sql, values = self.binds,
+    }
+    return self
+end
+
+function FakeStmt:clearbind() self.binds = {} ; return self end
+
+function FakeStmt:reset()
+    self.cursor = 0
+    return self
+end
+
+function FakeStmt:step(row)
+    self.conn.log[#self.conn.log + 1] = { op = "step", sql = self.sql, values = self.binds }
+    self.conn.steps = self.conn.steps + 1
+    if self.conn.fail_on and self.sql:find(self.conn.fail_on) then
+        error("fake sql failure: " .. self.sql, 0)
+    end
+    self.cursor = self.cursor + 1
+    local rows = self.rows
+    local out = rows and rows[self.cursor]
+    if out and row then
+        for i, v in pairs(out) do row[i] = v end
+        return row
+    end
+    return out
+end
+
+function FakeStmt:close() self.closed = true end
+
+local FakeConn = {}
+FakeConn.__index = FakeConn
+
+--- Script an answer. `pattern` is a Lua pattern matched against the statement
+--- text; `rows` is an array of rows, or a function returning one.
+function FakeConn:answer(pattern, rows)
+    self.answers[#self.answers + 1] = { pattern = pattern, rows = rows }
+    return self
+end
+
+function FakeConn:exec(sql)
+    self.log[#self.log + 1] = { op = "exec", sql = sql }
+    if self.fail_on and sql:find(self.fail_on) then
+        error("fake sql failure: " .. sql, 0)
+    end
+    return nil
+end
+
+function FakeConn:rowexec(sql)
+    self.log[#self.log + 1] = { op = "rowexec", sql = sql }
+    if self.fail_on and sql:find(self.fail_on) then
+        error("fake sql failure: " .. sql, 0)
+    end
+    local rows = maybeInt64(self, scriptedRows(self, sql))
+    local first = rows and rows[1]
+    if not first then return nil end
+    return unpack(first)
+end
+
+function FakeConn:prepare(sql)
+    self.log[#self.log + 1] = { op = "prepare", sql = sql }
+    if self.fail_on and sql:find(self.fail_on) then
+        error("fake sql failure: " .. sql, 0)
+    end
+    local stmt = setmetatable({
+        conn = self, sql = sql, cursor = 0, binds = {},
+        rows = maybeInt64(self, scriptedRows(self, sql)),
+    }, FakeStmt)
+    self.prepared[#self.prepared + 1] = stmt
+    return stmt
+end
+
+function FakeConn:close() self.closed = true end
+
+--- Every statement text seen, in order, for order assertions.
+function FakeConn:sqlLog()
+    local out = {}
+    for i = 1, #self.log do out[i] = self.log[i].sql end
+    return out
+end
+
+--- True when any recorded statement matches the pattern.
+function FakeConn:saw(pattern)
+    for i = 1, #self.log do
+        if self.log[i].sql:find(pattern) then return true end
+    end
+    return false
+end
+
+--- The text of the first statement matching the pattern, or nil. Use this
+--- rather than `saw` when the claim is about one query's own text: the schema
+--- DDL is in the log too, and it names every table and column there is.
+function FakeConn:statement(pattern)
+    for i = 1, #self.log do
+        if self.log[i].sql:find(pattern) then return self.log[i].sql end
+    end
+end
+
+--- Position of the first statement matching the pattern, or nil.
+function FakeConn:indexOf(pattern)
+    for i = 1, #self.log do
+        if self.log[i].sql:find(pattern) then return i end
+    end
+end
+
+--- The binding list of the first step matching the pattern.
+function FakeConn:bindsFor(pattern)
+    for i = 1, #self.log do
+        local e = self.log[i]
+        if e.op == "step" and e.sql:find(pattern) then return e.values end
+    end
+end
+
+--[[--
+opts.int64    - hand integers back as int64 stand-ins (default false)
+opts.fail_on  - Lua pattern; any statement matching it raises
+]]
+function support.newSqlDriver(opts)
+    opts = opts or {}
+    local driver = { opened = {}, conns = {} }
+    function driver.open(path)
+        local conn = setmetatable({
+            path = path,
+            log = {},
+            answers = {},
+            prepared = {},
+            steps = 0,
+            closed = false,
+            int64 = opts.int64 or false,
+            fail_on = opts.fail_on,
+        }, FakeConn)
+        driver.opened[#driver.opened + 1] = path
+        driver.conns[#driver.conns + 1] = conn
+        if opts.on_open then opts.on_open(conn) end
+        return conn
+    end
+    --- The connection most recently handed out.
+    function driver.last() return driver.conns[#driver.conns] end
+    return driver
+end
+
 -- --------------------------------------------------------- module preload
 
 --[[--

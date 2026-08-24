@@ -1,281 +1,900 @@
-# FingerInk: lienzo anclado a una posición del libro — diseño
+# FingerInk: lienzo EPUB anclado y escalable — diseño revisado
 
 Fecha: 2026-08-23
+
 Feature ID: `FI-CANVAS-001`
-Base: rama `codex/kindle-scribe-stylus`, tras la remediación `FI-SCRIBE-STYLUS-002`
+
+Base: rama `codex/kindle-scribe-stylus`, tras `FI-SCRIBE-STYLUS-002`
+
+Estado: arquitectura revisada; no hay código de esta funcionalidad
+
 Documentos previos: [`kindle-scribe-stylus-dev-plan-2026-08-23.md`](kindle-scribe-stylus-dev-plan-2026-08-23.md),
 [`kindle-scribe-stylus-remediation-plan-2026-08-23.md`](kindle-scribe-stylus-remediation-plan-2026-08-23.md)
 
-**Objetivo:** poder abrir una hoja en blanco anclada a una posición del libro,
-dibujar libremente en ella, y redimensionarla arrastrando — de modo que el texto
-siga visible mientras tomas notas a mano.
+## 0. Resultado de la revisión
 
----
+La idea de producto sigue siendo viable: una hoja superpuesta, anclada al libro
+por un xpointer, evita ligar cada punto manuscrito al texto reflowable. Lo que no
+escala es la primera arquitectura que la acompañaba. Este documento la sustituye.
 
-## 0. Decisiones ya tomadas
+Se mantienen estas decisiones:
 
-Las cuatro salieron de la conversación de diseño y están cerradas. Cambiar
-cualquiera invalida partes del resto del documento.
+- los trazos viven en coordenadas propias del lienzo;
+- la hoja aparece desde la parte inferior y puede ocupar 40, 70 o 100% de la
+  pantalla;
+- el texto queda visible por encima de la hoja;
+- con el lienzo abierto, el dedo puede navegar fuera de la hoja cuando no hay
+  un contacto de lápiz activo;
+- el dibujo directo actual sobre PDF y su clave `fingerink_strokes` no cambian.
 
-| Decisión | Elegido | Descartado, y por qué |
+Se reemplazan cinco piezas del diseño anterior:
+
+| Diseño anterior | Decisión revisada | Motivo |
 | --- | --- | --- |
-| Qué se dibuja en EPUB | **Un lienzo en blanco anclado a una posición** | Marcas sobre el texto: exige anclar cada trazo al texto de debajo y se rompe al recomponer (§1.1) |
-| Forma de la UI | **Hoja inferior redimensionable** | Pantalla completa (menos flexible); página enfrentada (choca con pasar página) |
-| Tamaño del lienzo | **Una pantalla fija; la hoja es una ventana** | Lienzo largo con scroll (gesto que compite con el lápiz); cuaderno multi-hoja (más estado, siguiente iteración) |
-| Barra vs. lienzo | **La barra flota encima del lienzo** | Reservar la columna: ~15% de ancho perdido siempre |
+| Todos los lienzos y puntos en `fingerink_canvases` dentro de `metadata.lua` | SQLite dedicada, BLOBs de puntos y carga perezosa | `DocSettings:flush()` serializa y reescribe toda la tabla; el coste crece con todas las notas del libro |
+| `ReaderUI < hoja < barra`, tres ventanas ordinarias | Una sola ventana compuesta `InkCanvasOverlay`, con hoja y barra como hijos | `UIManager` no propaga automáticamente un evento ordinario a ventanas inferiores; una sola ventana elimina una pila frágil |
+| Supresión según la posición de cada gesto | Destino fijado al comienzo de cada contacto/slot | Un contacto que cruza hoja, texto o barra no puede cambiar de dueño a mitad de secuencia |
+| Escalado sólo por el ancho | Transformación uniforme `aspect-fit`, con inversa única | La rotación y las pantallas con otra relación de aspecto deben conservar todo el lienzo sin deformarlo |
+| `paintTo` vuelve a recorrer todos los vectores | Caché raster acotada al lienzo activo, índice espacial y repintado por región | El coste de pintar o borrar deja de depender de todos los puntos del libro |
 
-## 1. Por qué un lienzo resuelve lo que el texto no
+Una corrección deliberada respecto de la versión anterior: vuelve a aparecer
+`getDocumentRenderingHash(true)`, pero sólo para identificar una **caché
+descartable de localización**. El xpointer sigue siendo la verdad del anclaje.
+Un reflow invalida páginas resueltas y marcas; no modifica el lienzo ni sus
+trazos.
 
-### 1.1 El problema que evitamos
+## 1. Objetivo, límites e invariantes
 
-EPUB es reflowable. Una "página" no es una entidad estable: cambia con el
-cuerpo de letra, los márgenes, el interlineado y la rotación. El formato actual
-guarda trazos en **coordenadas de pantalla contra un número de página**, así que
-en EPUB la tinta se queda donde estaba mientras el texto se va — es la
-limitación que el README ya documenta y que ADR-5 dejó aplazada.
+### 1.1 Objetivo funcional
 
-La vía "anclar la tinta al texto" es posible pero se degrada mal:
+El lector puede crear una hoja en blanco desde una posición de un EPUB, escribir
+con el lápiz del Kindle Scribe, cambiar la altura visible, cerrar la hoja y
+recuperarla desde su posición del libro. Cientos de lienzos cerrados no deben
+hacer más lenta cada página ni mantener sus trazos en memoria.
 
-- subrayar una línea funciona;
-- rodear una palabra funciona, pero el círculo no escala con la fuente;
-- una raya cruzando un párrafo que pasa de 4 a 6 líneas queda en el sitio
-  equivocado;
-- un esquema en un hueco en blanco se ancla a la palabra más cercana, que puede
-  estar lejos, y viaja con ella.
+La hoja es una superposición de frontend. No inserta espacio en CREngine, no
+forma parte del DOM y no altera el reflow del EPUB.
 
-Anclar punto a punto no es salida: `getNearestWordFromPosition` por muestra a
-frecuencia Wacom no es viable y además deformaría el trazo.
+### 1.2 Invariantes
 
-### 1.2 Lo que el lienzo cambia
+1. La identidad de un trazo es `(canvas_id, stroke_id)`; nunca una página EPUB.
+2. El xpointer ancla el lienzo. Una página resuelta es sólo una caché.
+3. Sólo el lienzo activo puede tener puntos decodificados o caché raster en
+   memoria.
+4. `paintTo` no consulta SQLite, no resuelve xpointers y no recorre la colección
+   completa de vectores.
+5. Ninguna muestra del lápiz escribe en disco.
+6. El destino de un contacto se fija una vez y no cambia hasta su lift.
+7. La barra se pinta y recibe entrada por encima de la hoja dentro de la misma
+   ventana.
+8. Una operación fallida de base de datos no crea una base vacía ni descarta la
+   cola pendiente en silencio.
+9. Un ancla que ya no se resuelve se conserva y aparece como recuperable.
+10. El formato actual de tinta directa en PDF no se migra ni se reutiliza para
+    los lienzos EPUB.
 
-Si los trazos viven en **coordenadas del lienzo**, el reflow no puede moverlos.
-Lo único que debe sobrevivir a una recomposición es *dónde cuelga el lienzo*, y
-eso es un solo xpointer — precisamente el caso para el que los xpointers
-existen.
+## 2. Comportamiento visible
 
-> 🗑️ **Pieza eliminada del diseño.** Una versión anterior de esta propuesta
-> guardaba `getDocumentRenderingHash(true)` junto a la tinta para detectar
-> cambios de layout y avisar de que la tinta era aproximada. Con el lienzo no
-> hace falta: nada puede desplazar los trazos. El hash desaparece del diseño.
+### 2.1 Abrir, mantener y cambiar de lienzo
 
-Y de paso el lienzo deja de ser una cosa de EPUB: anclado a una página, funciona
-igual en PDF.
+- `Abrir hoja` en una vista sin lienzos crea uno en el principio de la vista.
+- Si hay uno en la vista, lo abre.
+- Si hay varios, muestra un selector local; no elige el primero en silencio.
+- Pasar página con la hoja abierta **no cambia el lienzo activo**. La hoja queda
+  fijada hasta que el usuario la cierre o elija otra. Esto permite consultar
+  otras páginas mientras se escribe.
+- Antes de cambiar de lienzo se confirma la cola pendiente, se libera la caché
+  anterior y sólo entonces se carga el siguiente.
+- `Eliminar hoja` forma parte de v1, pide confirmación y borra en cascada sus
+  trazos.
 
-## 2. Anclaje
+La lista global de todos los lienzos sigue fuera de v1. Sí entra un acceso
+mínimo a los anclajes no encontrados: contador, fecha de modificación y acción
+para abrir o eliminar. Sin esto, conservar un xpointer inválido no sirve al
+usuario.
 
-**Reflowable** (`ui.rolling`): `ancla = ui.document:getXPointer()`, que devuelve
-el xpointer del principio de la vista actual. Es exactamente lo que
-`ReaderRolling` guarda y restaura como posición de lectura
-([readerrolling.lua:229](https://github.com/koreader/koreader/blob/v2026.07/frontend/apps/reader/modules/readerrolling.lua#L229)),
-así que es tan estable como el propio "por dónde iba".
+### 2.2 Altura de la hoja
 
-**Layout fijo** (`ui.paging`): no hay xpointers. El ancla es el número de
-página, que en PDF sí es estable.
+La altura es estado de interfaz, no del contenido. Se guarda como preferencia
+global de FingerInk y usa paradas de 40, 70 y 100%. Cerrar corresponde a 0%.
 
-Para reencontrarlo mientras se lee: `document:isXPointerInCurrentPage(xp)`, que
-está cacheada por render, dice si la marca debe aparecer en esta vista.
+El asa usa `hold_pan`, como `MovableContainer`. Durante el arrastre no se
+repinta la hoja; la altura se calcula y se aplica al soltar. KOReader sigue este
+patrón para evitar repintados continuos en e-ink. Si la prueba física demuestra
+que hace falta respuesta, sólo se añade una línea indicadora estrecha; no un
+repintado completo por movimiento.
 
-`getScreenPositionFromXPointer(xp)` está disponible si en el futuro se quiere
-colocar la marca a la altura exacta del ancla en vez de en un sitio fijo del
-margen. **No hace falta para v1.**
+## 3. Persistencia
 
-## 3. Datos
+### 3.1 Por qué el sidecar monolítico queda descartado
 
-Clave **nueva** en el sidecar. `fingerink_strokes` no se toca: el dibujo directo
-sobre página en PDF sigue funcionando exactamente igual, sin migración.
+`DocSettings:flush()` ejecuta `dump(data, nil, true)` y escribe el resultado
+completo. Guardar `fingerink_canvases` allí haría que una nueva raya serializara
+de nuevo todos los puntos acumulados. También duplicaría ese volumen en las
+copias de seguridad de metadatos que el usuario tenga activadas.
+
+Una sonda local con el `dump.lua` real de KOReader v2026.07 midió el formato
+actual de trazo:
+
+| Puntos en un trazo | Salida Lua |
+| ---: | ---: |
+| 25 | 1.896 bytes |
+| 100 | 6.749 bytes |
+| 600 | 40.151 bytes |
+| 2.000 | 136.651 bytes |
+
+Son aproximadamente 67 bytes por punto. Mil trazos de 600 puntos ocuparían
+unos 38,3 MiB sólo en la representación Lua. Un par `x/y` normalizado en dos
+enteros de 16 bits ocupa 4 bytes antes del overhead de SQLite. La diferencia es
+suficiente para no usar el sidecar como almacén nuevo.
+
+### 3.2 Ubicación e identidad del libro
+
+La base se crea en:
 
 ```lua
-fingerink_canvases = {
-    {
-        anchor  = "/body/DocFragment[3]/body/p[7]/text().0",  -- nil en layout fijo
-        page    = 41,      -- ancla en layout fijo; en EPUB, sólo informativo
-        w       = 1860,    -- geometría de pantalla al crear el lienzo
-        h       = 2480,
-        strokes = { ... },  -- mismo formato de trazo que ink_store hoy
-    },
-}
+DataStorage:getSettingsDir() .. "/fingerink.sqlite3"
 ```
 
-`w`/`h` existen porque las coordenadas de trazo no significan nada sin saber
-sobre qué geometría se dibujaron. Al renderizar en otra geometría (rotación,
-otro dispositivo), **escalado uniforme por el ancho, anclado arriba-izquierda**:
-uniforme para que la letra manuscrita no se deforme, por el ancho porque es la
-dimensión que el usuario percibe como "la hoja".
+Es la misma ubicación global que usa el plugin oficial Statistics para su base.
+No se coloca un archivo arbitrario dentro de `.sdr`: `DocSettings.updateLocation`
+sólo conoce `metadata.lua`, la portada personalizada y metadatos personalizados;
+un archivo adicional no seguiría de forma fiable un mover, copiar o borrar.
 
-## 4. Coordenadas y pintado
+El repositorio se abre en `onReaderReady(config)`, no en `init()`. `ReaderUI`
+calcula `partial_md5_checksum` antes de emitir `ReaderReady`. La clave de libro
+es `(partial_md5_checksum, file_size)`, donde el tamaño se obtiene con
+`lfs.attributes(document.file, "size")`; `last_path` sirve para diagnóstico, no
+como identidad. Dos copias byte a byte idénticas comparten los lienzos si
+comparten la misma base de FingerInk. Un libro copiado por sí solo a otro
+dispositivo no lleva las notas: sincronización y exportación siguen fuera de
+alcance. El backup del lector debe incluir `fingerink.sqlite3`, no sólo la
+carpeta `.sdr` del libro. Con WAL activo, el backup se hace con KOReader cerrado
+o incluye también los archivos `-wal`/`-shm`.
 
-El lienzo mide siempre una pantalla: origen arriba-izquierda, tamaño `w`×`h`.
+Si falta el checksum o el tamaño, no se usa la ruta como sustituto silencioso.
+La apertura del repositorio se aplaza o la función de lienzo queda en sólo
+lectura con un mensaje; una ruta rompería las notas al renombrar el libro.
 
-La hoja ocupa la franja inferior de la pantalla, de altura `sheet_h`, y muestra
-**los `sheet_h` píxeles superiores del lienzo**. Maximizar destapa lo de abajo;
-nada se mueve ni se escala al redimensionar.
+### 3.3 Esquema v1
 
-```
-lienzo (w × h)              hoja de altura sheet_h
-(0,0) ┌──────────┐          pantalla_y = sheet_top + lienzo_y
-      │  visible │ ┐
-      │          │ │ sheet_h  lienzo_y = pantalla_y - sheet_top
-      ├──────────┤ ┘
-      │ tapado   │
-      └──────────┘
-```
+El esquema exacto puede expresarse así. Los nombres son contrato para la
+implementación y para las pruebas de migración:
 
-La conversión es una traslación pura. No hay escalado en tiempo de dibujo, sólo
-al cargar un lienzo hecho en otra geometría.
+```sql
+CREATE TABLE books (
+    id           INTEGER PRIMARY KEY,
+    partial_md5  TEXT    NOT NULL,
+    file_size    INTEGER NOT NULL,
+    last_path    TEXT,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    UNIQUE(partial_md5, file_size)
+);
 
-**Tinta en vivo:** igual que hoy — `Render.segment` sobre `Screen.bb` y
-`refreshFast` sobre la caja del segmento — pero recortada al rectángulo de la
-hoja. `refreshBox` ya recorta a la pantalla; pasa a recortar a la hoja.
+CREATE TABLE canvases (
+    id                    INTEGER PRIMARY KEY,
+    book_id               INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    anchor_kind           TEXT    NOT NULL CHECK(anchor_kind IN ('xpointer', 'page')),
+    anchor_key            TEXT    NOT NULL,
+    anchor_raw            TEXT,
+    anchor_normalized     TEXT,
+    anchor_dom_version    INTEGER,
+    fixed_page            INTEGER,
+    logical_w             INTEGER NOT NULL,
+    logical_h             INTEGER NOT NULL,
+    created_at            INTEGER NOT NULL,
+    updated_at            INTEGER NOT NULL,
+    UNIQUE(book_id, anchor_key),
+    UNIQUE(id, book_id)
+);
 
-**Repintado:** la hoja es un widget con su propio `paintTo`: fondo blanco, luego
-los trazos trasladados y recortados.
+CREATE TABLE canvas_layout_cache (
+    canvas_id      INTEGER NOT NULL,
+    book_id        INTEGER NOT NULL,
+    layout_hash    TEXT    NOT NULL,
+    resolved_page  INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL,
+    PRIMARY KEY(canvas_id, layout_hash),
+    FOREIGN KEY(canvas_id, book_id)
+        REFERENCES canvases(id, book_id) ON DELETE CASCADE
+);
 
-## 5. Entrada
+CREATE TABLE strokes (
+    id           INTEGER PRIMARY KEY,
+    canvas_id    INTEGER NOT NULL REFERENCES canvases(id) ON DELETE CASCADE,
+    seq          INTEGER NOT NULL,
+    width        REAL    NOT NULL,
+    tool         INTEGER NOT NULL,
+    codec        INTEGER NOT NULL,
+    point_count  INTEGER NOT NULL,
+    min_x        REAL    NOT NULL,
+    min_y        REAL    NOT NULL,
+    max_x        REAL    NOT NULL,
+    max_y        REAL    NOT NULL,
+    created_at   INTEGER NOT NULL,
+    UNIQUE(canvas_id, seq)
+);
 
-Con la hoja abierta:
+CREATE TABLE stroke_chunks (
+    stroke_id    INTEGER NOT NULL REFERENCES strokes(id) ON DELETE CASCADE,
+    chunk_no     INTEGER NOT NULL,
+    point_count  INTEGER NOT NULL,
+    points       BLOB    NOT NULL,
+    PRIMARY KEY(stroke_id, chunk_no)
+);
 
-| Dónde | Lápiz | Dedo |
-| --- | --- | --- |
-| Dentro de la hoja | dibuja en el lienzo | nada (rechazo de palma) |
-| En el asa | arrastra para redimensionar | arrastra para redimensionar |
-| Sobre la barra | pulsa botones | pulsa botones |
-| Sobre el texto, arriba | nada | **lectura normal: pasar página, menú** |
-
-El lápiz sobre el texto no hace nada **por decisión**, no por omisión: la
-alternativa sería que siguiera entintando la página, y entonces habría dos
-superficies de dibujo vivas a la vez en la misma pantalla, con reglas de
-anclaje distintas y sin nada visible que las separe. Una superficie por vez.
-
-La última fila es una mejora sobre el estado actual y conviene decirlo
-explícitamente: hoy dibujar suprime **todo** el táctil y el único camino de
-vuelta es Stop. Como aquí la superficie de dibujo está confinada a la hoja, no
-hay motivo para suprimir nada fuera de ella.
-
-En términos de ADR-13, `InkBar:suppresses` pasa de *"todo salvo la barra"* a
-*"sólo dentro de la hoja, salvo el asa y la barra"*. Es la misma regla con otra
-región, así que la forma de la decisión no cambia — sólo el predicado
-geométrico.
-
-**Arrastre.** Se copia el patrón de `MovableContainer`, y conviene ser exacto
-sobre lo que ese patrón hace, porque no es lo que parece:
-
-- se activa con **`hold_pan`**, no con `pan` a secas, para no chocar con el
-  gesto de pasar página
-  ([movablecontainer.lua:359](https://github.com/koreader/koreader/blob/v2026.07/frontend/ui/widget/container/movablecontainer.lua#L359));
-- durante el arrastre **no repinta nada**. `onMovableHoldPan` sólo marca
-  `_moving = true` y consume el evento; el movimiento y su único repintado
-  ocurren en `onMovableHoldRelease`
-  ([:373](https://github.com/koreader/koreader/blob/v2026.07/frontend/ui/widget/container/movablecontainer.lua#L373)),
-  con un `setDirty("ui")` sobre la unión del rectángulo viejo y el nuevo
-  ([:293](https://github.com/koreader/koreader/blob/v2026.07/frontend/ui/widget/container/movablecontainer.lua#L293)).
-
-Es decir: KOReader **evita deliberadamente** el repintado continuo en e-ink.
-Arrastras a ciegas y la ventana salta al soltar.
-
-Para mover una ventana eso es aceptable. Para un asa de redimensionado es peor:
-no ves qué altura vas a obtener. De ahí que las alturas con imán de §10 no sean
-un adorno sino la compensación de esta limitación — con tres o cuatro paradas,
-arrastrar a ciegas es perdonable. Un indicador fino durante el arrastre (una
-línea de 2 px, región de refresco mínima) es la alternativa si en hardware
-resulta insuficiente; se decide midiendo, no antes.
-
-## 6. Pila de ventanas
-
-`UIManager:show` inserta la ventana nueva por encima de la más alta no modal, y
-`sendEvent` sólo ofrece la entrada a la más alta. Mostrar la hoja después de la
-barra dejaría **la barra inalcanzable**, y eso rompe el requisito de seguridad
-de ADR-13: "dibujar implica barra visible" dejó de ser una promesa de UX para
-ser la condición que hace que la supresión sea posible.
-
-Orden requerido, de abajo arriba:
-
-```
-ReaderUI  <  hoja del lienzo  <  barra
+CREATE INDEX canvases_by_book ON canvases(book_id, updated_at);
+CREATE INDEX layout_by_page
+    ON canvas_layout_cache(book_id, layout_hash, resolved_page, canvas_id);
+CREATE INDEX strokes_by_canvas ON strokes(canvas_id, seq);
 ```
 
-Es decir: al abrir la hoja hay que reinsertar la barra por encima. La barra
-flota sobre el lienzo; dibujar debajo de ella trunca el trazo en el borde,
-exactamente como ya ocurre hoy sobre la página — comportamiento conocido y ya
-cubierto por tests.
+`anchor_key` es `xp:<xpointer normalizado>` cuando existe; para layout fijo es
+`page:<n>`. La restricción evita duplicados creados por taps repetidos.
 
-**Invariante que debe quedar bajo test:** con la hoja abierta, la barra sigue
-siendo el widget más alto.
+El BLOB usa un codec versionado. En v1 cada punto se normaliza a `0...65535` en
+ambos ejes y se codifica como dos `uint16` little-endian. No se depende de
+`string.pack`, ausente en LuaJIT 5.1: `ink_canvas_codec.lua` usa `string.char` y
+`string.byte`, con tests de ida y vuelta, límites y payload truncado. Un chunk
+contiene como máximo 1.024 puntos y repite el punto de unión necesario para que
+un segmento no se corte entre chunks. `stroke_id` conserva la semántica de
+undo y borrado aunque un trazo tenga varios chunks.
 
-## 7. Descubrimiento
+Los puntos de lienzos cerrados nunca se convierten a tablas Lua. Para construir
+o reparar la caché activa se leen chunks por orden, se decodifica uno, se pinta
+y se libera antes del siguiente.
 
-Una marca discreta en el margen cuando el ancla de algún lienzo cae en la vista
-actual (`isXPointerInCurrentPage`). Sin la marca los lienzos son invisibles y se
-pierden.
+No existe una migración desde `fingerink_canvases`: esa clave pertenecía sólo
+al diseño y nunca llegó a producción. `fingerink_strokes` continúa en el
+sidecar con el formato actual.
 
-Abrir la hoja con un lienzo anclado en la vista → abre ese. Sin lienzo aquí →
-crea uno nuevo anclado al principio de la vista.
+### 3.4 Journal, migraciones y errores
 
-v1 asume **un lienzo por posición**: si hubiera varios anclados en la misma
-vista se abre el primero. Varios por posición exige la lista de navegación, que
-está fuera de alcance (§9).
+El repositorio sigue el precedente de Statistics:
 
-## 8. Archivos
+- `require("lua-ljsqlite3/init")`;
+- `PRAGMA foreign_keys=ON` en cada conexión;
+- `PRAGMA journal_mode=WAL` sólo si `Device:canUseWAL()`; en caso contrario,
+  `TRUNCATE`;
+- versión mediante `PRAGMA user_version`;
+- checkpoint, conexión cerrada y copia de seguridad antes de cualquier
+  migración;
+- migración completa dentro de una transacción;
+- si `user_version` es mayor que el conocido, abrir sin escritura y explicar
+  que el KOReader/plugin es más antiguo;
+- no usar `synchronous=OFF`, no ejecutar `VACUUM` al cerrar y no recrear
+  automáticamente una base que falle al abrir.
 
-| Archivo | Estado | Responsabilidad |
-| --- | --- | --- |
-| `fingerink.koplugin/ink_canvas.lua` | **Crear** | El widget de la hoja: geometría, asa, arrastre, `paintTo` del lienzo |
-| `fingerink.koplugin/ink_anchor.lua` | **Crear** | Ancla: crear desde la vista actual, comprobar si cae en la vista, reflowable vs. fijo |
-| `fingerink.koplugin/ink_store.lua` | Modificar | Guardar y cargar `fingerink_canvases` junto a los trazos de página |
-| `fingerink.koplugin/main.lua` | Modificar | Abrir/cerrar la hoja, enrutar el lápiz al lienzo, marca de margen, orden de pila |
-| `fingerink.koplugin/ink_bar.lua` | Modificar | `suppresses` consulta la región de la hoja; botón para abrir el lienzo |
-| `fingerink.koplugin/tests/` | Modificar | Cobertura de todo lo anterior |
-| `README.md`, `spec.md`, `decisions.md` | Modificar | ADR-14; documentar el lienzo y sus límites |
+Las páginas liberadas por borrados pueden reutilizarse dentro de SQLite. Reducir
+físicamente el archivo será una acción de mantenimiento posterior; no debe
+introducir una pausa impredecible durante lectura o suspensión.
 
-`ink_render.lua` no se toca: el lienzo usa el mismo rasterizador.
+## 4. Anclaje y descubrimiento
 
-## 9. Alcance de v1
+### 4.1 Crear un ancla EPUB
 
-**Dentro:** crear y abrir el lienzo de esta posición; arrastrar para
-redimensionar; marca de margen; persistencia en el sidecar; el lápiz dibuja en
-el lienzo y el dedo conserva la navegación fuera de la hoja.
+Al crear el lienzo:
 
-**Fuera, y por qué:**
+1. obtener `anchor_raw = document:getXPointer()`;
+2. obtener `anchor_normalized = document:getNormalizedXPointer(anchor_raw)`;
+3. guardar el `cre_dom_version` actual;
+4. si ambos valores faltan o son inválidos, no crear una hoja que luego no
+   pueda encontrarse;
+5. usar el normalizado para `anchor_key` cuando exista y conservar el raw como
+   fallback para libros que todavía usan un DOM antiguo.
 
-- **Lista de lienzos para navegar entre ellos.** Necesaria de verdad, pero no
-  bloquea nada de lo anterior y merece su propia iteración.
-- **Exportar.** Fuera de alcance igual que en el PR de entrada.
-- **Dibujar encima del texto en EPUB.** Es el problema de §1.1; el lienzo lo
-  esquiva deliberadamente.
-- **Escalar la tinta con el cuerpo de letra.** Sólo tendría sentido si la tinta
-  estuviera anclada al texto.
-- **Cuaderno multi-hoja.** Descartado para v1 en la decisión de §0.
+Al cargar, se prueba primero el xpointer adecuado a la versión DOM actual y
+luego el alternativo. `isXPointerInDocument` valida el resultado. Un fallo no
+borra la fila: marca el lienzo como huérfano recuperable.
 
-## 10. Riesgos
+Esto no puede delegarse a la migración interna de `ReaderRolling`: su lista de
+xpointers incluye sólo la última posición y `page/pos0/pos1` de anotaciones. No
+conoce las tablas de FingerInk. Guardar la forma normalizada desde el nacimiento
+evita depender de ese recorrido cerrado.
 
-| Riesgo | Mitigación |
+### 4.2 Índice por página
+
+No se llama `isXPointerInCurrentPage` para cada lienzo en cada repintado. Al
+abrir el libro se carga sólo la metadata de `canvases` y se construye:
+
+```text
+anchor_by_id[canvas_id] = metadata pequeña
+canvas_ids_by_page[resolved_page] = { id, ... }
+orphan_ids = { id, ... }
+```
+
+Para un hash de layout ya conocido, `canvas_layout_cache` llena el segundo mapa
+sin resolver xpointers. Cuando el hash cambia, las entradas antiguas se ignoran
+y la resolución se reparte en lotes mediante `UIManager:nextTick`: cada lote
+ejecuta `getPageFromXPointer` sobre pocas anclas y publica sus resultados. Al
+terminar, una sola transacción guarda la caché derivada.
+
+La tabla no crece con cada prueba de tipografía: después de completar un índice
+se conservan, como máximo, el layout actual y el anterior de ese libro. Las
+filas más antiguas se eliminan dentro de la misma transacción. Mientras el
+índice actual esté incompleto, la marca puede aparecer progresivamente y la
+acción de crear queda deshabilitada con `Indexando notas…`; así no se crea un
+duplicado sólo porque un ancla existente todavía no se resolvió.
+
+`DocumentRerendered`, cambios de tipografía, márgenes o rotación fuerzan una
+nueva lectura de `getDocumentRenderingHash(true)` y reconstruyen este índice.
+No tocan `strokes`. `PageUpdate` y `PosUpdate` obtienen del mapa sólo los
+candidatos de la página actual y las páginas visibles que informe
+`getVisiblePageNumberCount()`. Sobre ese conjunto acotado se confirma
+`isXPointerInCurrentPage`; nunca se recorre el libro completo. El `paintTo` de
+la marca sólo lee el resultado ya preparado para la vista y no ejecuta SQL ni
+una llamada CREngine.
+
+## 5. Coordenadas y renderizado
+
+### 5.1 Transformación única
+
+El lienzo conserva `logical_w × logical_h`, la geometría con la que nació. En
+cada pantalla se calcula un rectángulo virtual de una pantalla completa:
+
+```text
+scale    = min(screen_w / logical_w, screen_h / logical_h)
+draw_w   = logical_w * scale
+draw_h   = logical_h * scale
+offset_x = (screen_w - draw_w) / 2
+offset_y = 0
+
+screen_x = offset_x + canvas_x * scale
+screen_y = sheet_top + offset_y + canvas_y * scale
+
+canvas_x = (screen_x - offset_x) / scale
+canvas_y = (screen_y - sheet_top - offset_y) / scale
+```
+
+La alineación vertical es superior porque la hoja revela el lienzo de arriba
+hacia abajo. Los laterales que queden fuera de `draw_w` son margen, no lienzo.
+El grosor se multiplica por `scale`. Toda entrada, hit test, borrado, caché y
+pintado usa este objeto `CanvasTransform`; no se duplican fórmulas en `main.lua`
+y el widget.
+
+Al rotar o cambiar tamaño se aborta el trazo en curso, se descarta la caché
+raster, se reconstruye la transformación y se vuelve a rasterizar desde la
+base. Los datos vectoriales no se reescriben. A 100% debe quedar visible el
+lienzo completo, con letterboxing si la relación de aspecto cambió.
+
+### 5.2 Recorte real
+
+Recortar únicamente la caja de `refreshFast` no evita escribir píxeles fuera
+de la hoja. El destino de tinta en vivo es un `BlitBuffer:viewport()` limitado
+al rectángulo visible. Un viewport comparte la memoria del buffer original y
+acota la escritura sin reservar otro framebuffer.
+
+El flujo de un segmento es:
+
+```text
+punto de lápiz
+  -> coordenada lógica
+  -> actualizar stroke en curso
+  -> dibujar en la caché del lienzo activo
+  -> copiar sólo la caja sucia a Screen.bb:viewport(sheet_rect)
+  -> acumular caja de refresh
+```
+
+Las cajas se agrupan por tick, no se refresca una vez por muestra. El intervalo
+inicial será el ya previsto de 8–16 ms y se ajustará sólo con el Scribe físico.
+La acción programada se guarda como función y se cancela pasando esa misma
+referencia a `UIManager:unschedule`; no se trata el retorno de `scheduleIn`
+como un handle.
+
+### 5.3 Caché activa e índice espacial
+
+Hay una única caché raster BB8 del tamaño físico del lienzo transformado. En un
+Scribe de 1860 × 2480 su cota es aproximadamente 4,4 MiB. Se libera al cerrar o
+cambiar de lienzo.
+
+La apertura sigue estos pasos:
+
+1. leer sólo filas de `strokes` del lienzo activo, sin `points`;
+2. construir una cuadrícula espacial en memoria a partir de sus bounding boxes;
+3. rasterizar los chunks en lotes cooperativos;
+4. mostrar un estado `Cargando tinta…` y bloquear edición hasta terminar;
+5. una vez lista, `paintTo` blitea la caché y no recorre vectores.
+
+El tamaño de celda se elige una vez a partir de la geometría de pantalla y se
+mantiene constante durante la sesión. Un stroke se registra en todas las celdas
+que toca. El borrador obtiene candidatos de esas celdas, los examina de arriba
+hacia abajo y sólo decodifica sus chunks. Tras borrar o deshacer:
+
+- invalida la bounding box afectada, alineada a celdas;
+- limpia esa región de la caché;
+- consulta el índice por trazos que intersectan la región;
+- vuelve a pintar sólo esos trazos sobre un viewport de la región.
+
+El peor caso de muchos trazos totalmente superpuestos sigue siendo lineal en
+ese lienzo; no existe una estructura que lo elimine sin más complejidad. La
+arquitectura evita que el caso normal dependa de puntos de otros lienzos o de
+todo el libro.
+
+Durante captura se eliminan duplicados consecutivos y se conserva siempre el
+punto final. No se introduce simplificación geométrica agresiva en v1: cualquier
+umbral adicional debe compararse contra trazos reales del Scribe. El chunking
+ya pone una cota al tamaño de cada objeto temporal y de cada fila BLOB.
+
+## 6. Ventana y enrutado de entrada
+
+### 6.1 Una sola ventana compuesta
+
+`InkCanvasOverlay` es la única ventana que se entrega a `UIManager:show`. Ocupa
+la pantalla para recibir entrada, pero sólo pinta la hoja, el asa y la barra:
+
+```text
+UIManager
+└─ InkCanvasOverlay                 ventana ordinaria superior
+   ├─ sheet/background + cache      se pinta primero
+   ├─ resize handle
+   └─ InkBar                        se pinta y despacha al final
+
+ReaderUI                            ventana inferior
+```
+
+La barra deja de insertarse y retirarse para quedar por encima de otra ventana.
+Se convierte en hijo embebible. El orden de pintado y hit test `hoja -> asa ->
+barra` queda bajo test.
+
+`UIManager:sendEvent` no ofrece por sí solo el evento a `ReaderUI` si la ventana
+superior devuelve `false`. Para los eventos destinados al lector, el overlay
+usa el patrón ya probado por `InkBar:windowBelow()` y llama explícitamente al
+primer widget ordinario inferior. Si se abre un diálogo por encima, éste recibe
+la entrada normalmente y el callback del lápiz fija `dialog` como passthrough
+hasta el lift.
+
+### 6.2 ContactRouter y destinos fijados
+
+La clasificación se hace en el primer frame con coordenadas frescas y se guarda
+por slot. El orden es:
+
+```text
+dialog > bar > resize_handle > canvas > reader_text
+```
+
+Los destinos son:
+
+| Destino | Lápiz | Dedo en modo stylus | Dedo en modo finger |
+| --- | --- | --- | --- |
+| `dialog` | passthrough | passthrough | passthrough |
+| `bar` | GestureDetector/overlay | GestureDetector/overlay | GestureDetector/overlay |
+| `handle` | GestureDetector/overlay | GestureDetector/overlay | GestureDetector/overlay |
+| `canvas` | dominar y dibujar/borrar | suprimir como palma | dibujar con la ruta compatible |
+| `reader` | dominar sin dibujar | reenviar a ReaderUI | reenviar a ReaderUI |
+
+Cruzar un borde no cambia el destino. Un lápiz que empezó en el lienzo sigue
+dominado y su dibujo queda recortado; no pulsa un botón al cruzar la barra. Uno
+que empezó en la barra permanece en passthrough. Se preservan las guardas
+actuales para coordenadas pegajosas del slot y para no cambiar dominación a
+media secuencia.
+
+### 6.3 Palma y navegación
+
+En backend stylus, los slots táctiles destinados a `canvas` se quitan del array
+antes de `GestureDetector:feedEvent`. Así nunca crean `hold` ni el tap diferido.
+Si una clasificación tardía encuentra un contacto ya creado, se usa
+`getContact(slot)` seguido de `dropContact(contact)` para limpiar sus timers sin
+afectar otros slots.
+
+Mientras hay un contacto de lápiz dominado, todo dedo nuevo se fija como
+`palm`, incluso si cae sobre el texto. Un dedo que ya estaba abajo al comenzar
+el lápiz también se cancela. Su destino sigue suprimido hasta su propio lift.
+Esto evita que la mano pase página mientras se escribe. Sin lápiz activo, un
+dedo que empieza fuera de la hoja conserva navegación normal.
+
+La compatibilidad ADR-2 se mantiene sin cambios para el dibujo directo actual
+sobre PDF. Dentro del nuevo lienzo no se intenta promover un contacto de
+`canvas` a `reader` cuando aparece un segundo dedo: se aborta el trazo y ambos
+slots quedan suprimidos hasta sus lifts. Dos dedos que empiezan fuera de la hoja
+siguen perteneciendo al lector. Esta diferencia es necesaria para conservar el
+destino fijo por slot; entregar al GestureDetector un contacto que empezó
+oculto a media secuencia recrearía taps y holds espurios. Ambas superficies se
+prueban por separado, además del pipeline completo `routeStylusEvents ->
+feedEvent -> InkCanvasOverlay`.
+
+## 7. Guardado y ciclo de vida
+
+### 7.1 Cuándo se escribe
+
+Durante un trazo sólo se modifica memoria y caché. En el lift se codifica el
+trazo y se añade una operación a una cola pequeña. La cola se confirma en una
+transacción cuando ocurre cualquiera de estos límites:
+
+- han pasado como máximo 250 ms;
+- hay 8 operaciones pendientes;
+- hay 64 KiB pendientes;
+- se cambia o cierra el lienzo;
+- llega `SaveSettings`;
+- se cierra el documento.
+
+Los valores de tiempo y tamaño son constantes agrupadas, no preferencias de UI.
+Se pueden ajustar tras medir, pero la ventana de pérdida por cierre abrupto
+nunca puede crecer sin límite.
+
+Cada comando pendiente tiene claves deterministas. Un insert se identifica por
+`(canvas_id, seq)`; un retry que encuentre esa fila comprueba su metadata y lo
+trata como ya aplicado, en vez de duplicarlo. Delete y update son idempotentes.
+Si un trazo todavía pendiente se deshace o borra, se elimina su insert de la
+cola en vez de escribir primero y borrar después.
+
+`onSaveSettings()` es el gate obligatorio. En KOReader, `Device:_beforeSuspend`
+llama primero `UIManager:flushSettings()` y sólo después emite `Suspend`.
+Guardar exclusivamente en `onSuspend()` sería demasiado tarde. El orden de
+cierre normal también emite `SaveSettings` y vacía `doc_settings` antes de
+`CloseDocument`.
+
+### 7.2 Fallos
+
+Una transacción fallida conserva la cola en memoria, detiene nueva edición del
+lienzo y muestra `No se pudo guardar; Reintentar`. No se marca como confirmada
+ni se abre una base nueva. Si el usuario cierra aun con error, se registra de
+forma visible que las últimas operaciones no están durables; el plugin no puede
+prometer recuperación tras apagar el proceso.
+
+`onCloseDocument()` intenta un último flush defensivo, cancela por referencia
+las acciones programadas, libera caché y cierra la conexión. `onSuspend()` sigue
+deteniendo captura y sirve de defensa, pero no es el mecanismo de persistencia.
+
+## 8. Contratos de escala
+
+Estos contratos son más útiles que un tiempo medido en macOS, que no predice la
+flash ni el panel del Scribe:
+
+| Operación | Contrato |
 | --- | --- |
-| El arrastre se siente mal en e-ink | KOReader no da respuesta visual durante el arrastre (§5): alturas con imán en 0 / 40 / 70 / 100% para que arrastrar a ciegas sea perdonable. Indicador fino durante el arrastre sólo si el hardware demuestra que hace falta |
-| La barra queda debajo de la hoja y la supresión deja de tener salida | Orden de pila explícito (§6) con test de invariante |
-| El asa queda suprimida por el rechazo de palma y no se puede arrastrar | La región del asa entra en el predicado de `suppresses` junto con la barra; test |
-| La tinta en vivo se sale de la hoja | `refreshBox` recorta a la hoja, no a la pantalla |
-| Un lienzo hecho en otra rotación se ve mal | `w`/`h` guardados y escalado uniforme por el ancho |
-| El ancla apunta a contenido borrado o a otro libro | `isXPointerInDocument(xp)` antes de usarlo; si falla, el lienzo se conserva pero sin marca |
-| El sidecar crece | Mismo formato de trazo que hoy; medir antes de cambiar nada |
+| Abrir un libro | Carga identidad y metadata de anclas; no selecciona BLOBs de puntos |
+| Cambiar página con índice listo | Cero SQL y cero scan global; lookup por página más validación de candidatos visibles |
+| Pintar una vista | Blit de caché; cero SQL y cero recorrido vectorial |
+| Añadir una muestra | O(1), sin disco y sin asignar una tabla nueva por punto |
+| Terminar un trazo | O(puntos del trazo), nunca O(puntos del libro) |
+| Abrir un lienzo | O(puntos de ese lienzo), en lotes cooperativos |
+| Borrar | O(candidatos espaciales + puntos de esos candidatos), no O(libro) |
+| Memoria estable | O(anclas del libro + metadata del lienzo activo + caché raster + trazo actual) |
+| Guardar | Reescribe filas afectadas dentro de SQLite; no serializa el sidecar completo |
 
-## 11. Preguntas abiertas
+Instrumentación de depuración, apagada por defecto, debe registrar por operación:
+anclas cargadas, chunks leídos, candidatos de borrado, duración de rasterizado,
+duración de commit, bytes pendientes y tamaño de la base. Nunca se registra una
+línea por muestra del lápiz.
 
-- **¿Alturas con imán o arrastre continuo?** Propongo imán a 40 / 70 / 100% con
-  arrastre libre entre medias. Decidible al implementar, no antes.
-- **¿Un lienzo por posición, o varios?** v1 asume uno. Varios exige la lista de
-  navegación, que ya está fuera de alcance.
+Fixtures sintéticos obligatorios:
 
-## 12. Registro de verificación
+1. 200 lienzos × 200 trazos × 50 puntos: 2 millones de puntos cerrados. Abrir
+   el libro no puede decodificar ninguno.
+2. Un lienzo denso de 5.000 trazos × 100 puntos: la construcción debe ceder
+   entre lotes y `paintTo` posterior no debe recorrer 500.000 puntos.
+3. Un trazo continuo de más de 10.000 puntos: chunks acotados, unión visual
+   continua y una sola acción de undo/borrado.
+4. 500 anclas con un hash de layout nuevo: resolución incremental; pasar página
+   mientras se construye no ejecuta un scan síncrono de las 500.
+5. Borrado y undo repetidos: la base reutiliza espacio y no ejecuta `VACUUM`
+   automáticamente.
 
-Todo lo que este documento afirma sobre KOReader se comprobó leyendo el tag
-**v2026.07**, descargado, no de memoria.
+No se fijan milisegundos de aceptación para el dispositivo sin medirlo. El gate
+físico comparará página, apertura de hoja, latencia de tinta, commit, ghosting y
+uso de memoria contra el plugin sin lienzo.
 
-| Afirmación | Fuente |
+## 9. Archivos y responsabilidades
+
+| Archivo | Cambio | Responsabilidad |
+| --- | --- | --- |
+| `fingerink.koplugin/ink_canvas_repository.lua` | Crear | Conexión SQLite, esquema, migraciones, transacciones, consultas perezosas y fallos |
+| `fingerink.koplugin/ink_canvas_codec.lua` | Crear | Codec BLOB versionado y chunks; ninguna dependencia UI |
+| `fingerink.koplugin/ink_anchor.lua` | Crear | Crear/validar raw + normalized xpointer y ancla de página fija |
+| `fingerink.koplugin/ink_anchor_index.lua` | Crear | Metadata, hash de layout, resolución incremental, índice de página y huérfanos |
+| `fingerink.koplugin/ink_canvas_cache.lua` | Crear | Caché BB8, cuadrícula espacial, rasterizado por lotes e invalidación regional |
+| `fingerink.koplugin/ink_canvas_overlay.lua` | Crear | Ventana compuesta, hoja, asa, transformación, pintado y forwarding |
+| `fingerink.koplugin/ink_contact_router.lua` | Crear | Estado por slot y destinos latchados; sin persistencia ni widgets |
+| `fingerink.koplugin/ink_bar.lua` | Modificar | Convertir en hijo embebible y añadir acciones de lienzo; quitar propiedad de la pila |
+| `fingerink.koplugin/ink_capture.lua` | Modificar | Permitir filtrar slots táctiles dominados antes de `feedEvent`, manteniendo desregistro seguro |
+| `fingerink.koplugin/ink_render.lua` | Modificar mínimo | Pintar sobre viewport/caché con transformación explícita; sin conocer SQLite |
+| `fingerink.koplugin/main.lua` | Modificar | Coordinar repositorio, overlay, backend, eventos y lifecycle |
+| `fingerink.koplugin/ink_store.lua` | No modificar para esta función | Seguir siendo el store de tinta directa por página/PDF |
+| `fingerink.koplugin/tests/support.lua` | Modificar | Stubs fieles de SQLite, viewport, timers, pila y eventos |
+| `fingerink.koplugin/tests/run.lua` | Modificar | Tests unitarios, pipeline real y fixtures de escala |
+| `README.md`, `spec.md`, `decisions.md` | Modificar | UX, límites, formato y ADR de persistencia/overlay |
+
+No se copiará la arquitectura de `drawnotes.koplugin`. Ese plugin abre un
+segundo `DocSettings` del mismo libro y vacía snapshots completos; aquí sería
+posible sobrescribir metadata viva y conservar el mismo coste monolítico. La
+lección útil es negativa: una sola fuente de verdad y ningún `DocSettings:flush`
+propio para los lienzos.
+
+## 10. Orden de implementación
+
+Cada fase deja la suite verde y puede revisarse por separado.
+
+### Fase 1 — Codec y repositorio aislados
+
+1. Crear el codec con golden vectors y validación estricta.
+2. Crear una base temporal en tests, schema v1 e índices.
+3. Probar create/read/delete, orden `seq`, cascadas, rollback, schema futuro y
+   copia antes de migración.
+4. Probar que `listCanvases(book_id)` no selecciona `stroke_chunks.points`.
+
+Gate: ninguna integración UI; `fingerink_strokes` y `ink_store.lua` sin diff.
+
+### Fase 2 — Anclas e índice
+
+1. Crear raw + normalized xpointer en `ReaderReady`.
+2. Cargar metadata, no puntos.
+3. Reutilizar `resolved_page` sólo con el mismo layout hash.
+4. Resolver misses en lotes cancelables; invalidar en `DocumentRerendered`.
+5. Exponer `currentCanvasIds()` y `orphanCanvasIds()` sin CRE/SQL en `paintTo`.
+
+Gate: el fixture de 500 anclas permite pasar página mientras continúa la
+resolución.
+
+### Fase 3 — Transformación y caché
+
+1. Implementar `CanvasTransform` y sus tests de ida/vuelta en retrato,
+   paisaje y letterboxing.
+2. Implementar cache BB8 y rasterizado streaming por chunks.
+3. Construir índice espacial sólo con metadata.
+4. Reparar una región tras erase/undo y demostrar que no se repinta fuera.
+5. Hacer `paintTo` un blit comprobable por contador de llamadas al renderer.
+
+Gate: tras completar la carga densa, diez `paintTo` no decodifican ningún BLOB.
+
+### Fase 4 — Overlay compuesto
+
+1. Embebir hoja, asa y barra en una ventana.
+2. Pintar la barra al final y darle prioridad de hit test.
+3. Reenviar explícitamente eventos `reader` al widget inferior.
+4. Implementar alturas imantadas y reconstrucción por rotación.
+5. Añadir selector local, borrar y recuperación de huérfanos.
+
+Gate: nunca hay más de una ventana ordinaria de FingerInk y la barra sigue
+alcanzable en 40/70/100%.
+
+### Fase 5 — Router y lápiz
+
+1. Extraer del estado actual de `main.lua` las guardas de slot persistente,
+   coordenadas rancias y dominación estable.
+2. Añadir destinos por slot y tests de cruce en ambas direcciones.
+3. Filtrar palmas antes del GestureDetector y limpiar contactos tardíos por
+   slot, no globalmente.
+4. Probar el pipeline real `routeStylusEvents -> feedEvent -> overlay`, incluidos
+   `hold`, tap diferido, diálogo, barra, asa, pen + palm y goma.
+5. Mantener una suite separada para el backend finger y ADR-2.
+
+Gate: ninguna secuencia cambia de passthrough a dominada o viceversa antes de
+su lift.
+
+### Fase 6 — Guardado y lifecycle
+
+1. Añadir cola acotada, micro-batch y flush forzado.
+2. Integrar `onSaveSettings`, cambio de lienzo, cierre, error y retry.
+3. Cancelar todos los callbacks por referencia en teardown.
+4. Probar fallo de commit, suspensión inmediatamente tras lift y cierre con
+   operación pendiente.
+
+Gate: una transacción fallida conserva la operación; una confirmada no vuelve a
+aplicarse tras reabrir.
+
+### Fase 7 — Escala, documentación y Scribe
+
+1. Ejecutar los fixtures de §8 y guardar contadores, no sólo tiempo total.
+2. Ejecutar la suite desde raíz y con el QA de KOReader.
+3. Actualizar ADRs y límites de backup/sincronización.
+4. Instalar en Scribe y medir las variables físicas pendientes.
+
+Gate: no declarar terminada la función hasta completar la matriz física mínima.
+
+## 11. Verificación
+
+### 11.1 Comandos de repositorio
+
+```sh
+lua test.lua
+luajit test.lua
+cd fingerink.koplugin && luajit tests/run.lua
+```
+
+Con el runtime de KOReader:
+
+```sh
+koreader_qa.sh preflight
+koreader_qa.sh test
+koreader_qa.sh launch --book <epub-de-prueba>
+```
+
+La suite debe conservar el barrido sintáctico y la conformance del arnés. Los
+tests de SQLite usan una base temporal y la eliminan sólo después de cerrar la
+conexión.
+
+### 11.2 Matriz física mínima
+
+- EPUB pequeño y EPUB con cientos de anclas.
+- Retrato y paisaje; alturas 40/70/100%.
+- Lápiz, goma posterior, dedo fuera de hoja y palma dentro/fuera durante pen.
+- Cambio de fuente, margen, interlineado y modo de página/scroll.
+- Suspensión inmediatamente después de un trazo corto y de un erase.
+- Apertura de lienzo denso: memoria, tiempo hasta primer paint, latencia posterior.
+- Cincuenta trazos cortos seguidos: duración de commits y ausencia de pausas.
+- Reinicio de KOReader y reapertura tras cada caso de guardado.
+
+## 12. Alcance v1
+
+Dentro:
+
+- crear, abrir, cambiar y eliminar un lienzo;
+- selector de lienzos de la vista actual;
+- acceso mínimo a huérfanos;
+- xpointer raw + normalizado e índice por layout;
+- persistencia SQLite perezosa;
+- caché raster activa e índice espacial;
+- hoja 40/70/100%, retrato y paisaje;
+- lápiz, goma, rechazo de palma y navegación táctil fuera de la hoja;
+- guardado acotado y recuperación ante errores de base;
+- pruebas unitarias, pipeline, estrés y gate físico.
+
+Fuera:
+
+- lista global y búsqueda entre todos los lienzos válidos;
+- exportación o sincronización entre dispositivos;
+- cuaderno multi-hoja;
+- dibujar encima del texto EPUB;
+- presión, inclinación y hover;
+- simplificación geométrica avanzada;
+- habilitar la nueva hoja sobre PDF/layout fijo; el campo `anchor_kind='page'`
+  queda reservado para una fase posterior;
+- migrar el store existente de tinta PDF;
+- compactación manual de la base.
+
+## 13. Riesgos y condiciones de parada
+
+| Riesgo | Respuesta |
 | --- | --- |
-| `getXPointer()` devuelve la posición de lectura actual | `readerrolling.lua:229`, `:531`, `:666` — es lo que se guarda y restaura |
-| `isXPointerInCurrentPage` y `getScreenPositionFromXPointer` existen y están cacheadas por render | `credocument.lua:1406`, `:908`; lista de `cache_by_tag` en `:1926-1930` |
-| `getNearestWordAndBoxFromPosition` devuelve xpointers y funciona fuera de una palabra | `credocument.lua:719` |
-| Los view modules pintan los últimos, tras contenido, highlights y footer | `readerview.lua:257` |
-| `UIManager:sendEvent` sólo ofrece la entrada a la ventana no-toast más alta | `uimanager.lua:884-910` |
-| `MovableContainer` arrastra con `hold_pan` y **no repinta hasta soltar** | `movablecontainer.lua:359` (el pan sólo marca estado), `:373` (el movimiento ocurre al soltar), `:293` (refresco único de la unión). **Corregido:** una lectura anterior de este diseño afirmaba repintado en cada paso; es falso |
-| `ui.paging` / `ui.rolling` distinguen layout fijo de reflowable | `readerview.lua:194`, `:206` |
-| `getDocumentRenderingHash(true)` es la huella de layout que usa ReaderRolling | `readerrolling.lua:92`, `:1034` — verificada, y **descartada** por innecesaria (§1.2) |
+| SQLite no está disponible en un runtime | No caer al sidecar monolítico; desactivar lienzos con explicación |
+| Schema más nuevo | Sólo lectura; nunca bajar versión ni recrear |
+| Corrupción o I/O error | Conservar archivo y cola; parar edición, ofrecer retry y diagnóstico |
+| Libro renombrado o movido | Identidad por checksum + tamaño, no ruta |
+| Dos libros distintos colisionan en checksum parcial y tamaño | Mostrar `last_path`/metadatos en diagnóstico; si aparece en pruebas, ampliar clave antes de liberar, no después |
+| Xpointer desaparece | Conservar como huérfano accesible; nunca borrar automáticamente |
+| Cambio de DOM | Guardar raw + normalizado; no depender de la migración cerrada de ReaderRolling |
+| Resolución de muchas anclas bloquea | Lotes cancelables y caché por layout; ninguna resolución en page turn/paint |
+| Lienzo activo extremadamente denso | Streaming de chunks, caché acotada y edición bloqueada durante construcción |
+| Muchos trazos se superponen | Peor caso documentado; medir candidatos y considerar R-tree sólo con evidencia |
+| Commit introduce pausa | Micro-batch acotado; medir en Scribe antes de ampliar ventana |
+| Palma fuera de hoja pasa página | Todo dedo nuevo queda suprimido mientras pen está activo; navegación vuelve tras lift |
+| Overlay deja al lector sin eventos | Forwarding explícito y tests con la pila real del arnés |
+| Callback stylus ya ocupado | Mantener la negativa segura existente; no encadenar un singleton ajeno |
+
+Se detiene la implementación y se revisa arquitectura si ocurre cualquiera de
+estas condiciones:
+
+- el runtime incluido en el Scribe no carga `lua-ljsqlite3`;
+- no se puede obtener una identidad estable en `ReaderReady`;
+- filtrar un slot individual exige cambiar APIs globales de KOReader de forma
+  incompatible;
+- una migración no puede hacerse transaccionalmente con backup verificable;
+- la caché de un solo lienzo excede el presupuesto de memoria observado en el
+  dispositivo;
+- un diálogo o la barra obliga a reintroducir ventanas ordinarias que compiten
+  por ser la superior.
+
+## 14. Registro de validación documental
+
+Las fuentes de KOReader se revisaron en el tag **v2026.07**. El contenido clave
+se volvió a recuperar con Firecrawl el 2026-08-23; las líneas locales se usaron
+para completar los fragmentos que GitHub no renderizó en la extracción.
+
+### Tema: callback stylus y orden del pipeline
+
+- Por qué: el router depende de dominar sólo el slot de lápiz antes del
+  reconocimiento gestual.
+- Fuente: [`frontend/device/input.lua`](https://github.com/koreader/koreader/blob/v2026.07/frontend/device/input.lua).
+- Verificado: `registerStylusCallback` guarda un único callback;
+  `routeStylusEvents` se ejecuta antes de `feedEvent` y elimina los slots cuyo
+  callback devuelve `true`.
+- Restricción: KOReader v2026.07; callback singleton.
+- Impacto: conservar negativa si está ocupado y filtrar touch residual antes de
+  GestureDetector.
+- Confianza: alta.
+
+### Tema: timers y eliminación por slot
+
+- Por qué: un hold y un tap diferido no pueden quedar vivos tras suprimir una
+  palma.
+- Fuente: [`frontend/device/gesturedetector.lua`](https://github.com/koreader/koreader/blob/v2026.07/frontend/device/gesturedetector.lua) y
+  [`frontend/device/input.lua`](https://github.com/koreader/koreader/blob/v2026.07/frontend/device/input.lua).
+- Verificado: `dropContact(contact)` limpia timers `hold` y `double_tap` del
+  slot; los callbacks vencidos se despachan desde `Input:waitEvent`.
+- Restricción: API interna de frontend, no contrato de plugin estable.
+- Impacto: encapsular el uso en `ink_capture.lua`, cubrir con conformance y parar
+  si cambia.
+- Confianza: alta para v2026.07, media a futuro.
+
+### Tema: pila y propagación de UI
+
+- Por qué: la propuesta anterior dependía de tres ventanas y de que un evento
+  bajara por la pila.
+- Fuente: [`frontend/ui/uimanager.lua`](https://github.com/koreader/koreader/blob/v2026.07/frontend/ui/uimanager.lua).
+- Verificado: `show` apila widgets; `sendEvent` entrega entrada al widget
+  ordinario superior y no llama automáticamente al siguiente si devuelve
+  `false`.
+- Impacto: una sola ventana compuesta y forwarding explícito.
+- Confianza: alta.
+
+### Tema: anclas y migración DOM
+
+- Por qué: un xpointer propio no entra por arte de magia en las migraciones de
+  KOReader.
+- Fuente: [`frontend/document/credocument.lua`](https://github.com/koreader/koreader/blob/v2026.07/frontend/document/credocument.lua) y
+  [`frontend/apps/reader/modules/readerrolling.lua`](https://github.com/koreader/koreader/blob/v2026.07/frontend/apps/reader/modules/readerrolling.lua).
+- Verificado: existen `getNormalizedXPointer`, `isXPointerInDocument`,
+  `getPageFromXPointer`, `isXPointerInCurrentPage`,
+  `getVisiblePageNumberCount` y el hash de render. La migración de
+  `ReaderRolling` enumera sólo posición y anotaciones.
+- Impacto: raw + normalizado propios; página resuelta tratada como caché por
+  layout.
+- Confianza: alta.
+
+### Tema: identidad disponible en ReaderReady
+
+- Por qué: la base global necesita una clave que sobreviva al renombrado.
+- Fuente: [`frontend/apps/reader/readerui.lua`](https://github.com/koreader/koreader/blob/v2026.07/frontend/apps/reader/readerui.lua) y
+  [`plugins/statistics.koplugin/main.lua`](https://github.com/koreader/koreader/blob/v2026.07/plugins/statistics.koplugin/main.lua).
+- Verificado: `ReaderUI` crea `partial_md5_checksum` antes de `ReaderReady` y
+  Statistics lo lee en `onReaderReady`.
+- Impacto: abrir `CanvasRepository` en ese evento, no en `init`.
+- Confianza: alta.
+
+### Tema: coste y movilidad de DocSettings
+
+- Por qué: el volumen esperado convierte el formato de persistencia en una
+  decisión de rendimiento y de integridad.
+- Fuente: [`frontend/docsettings.lua`](https://github.com/koreader/koreader/blob/v2026.07/frontend/docsettings.lua),
+  [`frontend/luasettings.lua`](https://github.com/koreader/koreader/blob/v2026.07/frontend/luasettings.lua),
+  [`frontend/dump.lua`](https://github.com/koreader/koreader/blob/v2026.07/frontend/dump.lua) y
+  [`frontend/util.lua`](https://github.com/koreader/koreader/blob/v2026.07/frontend/util.lua).
+- Verificado: flush serializa la tabla completa; `updateLocation` sólo trata los
+  artefactos conocidos; la escritura normal no es una transacción de base de
+  datos.
+- Impacto: SQLite global, no tabla grande ni archivo compañero arbitrario en
+  `.sdr`.
+- Confianza: alta.
+
+### Tema: patrón SQLite soportado por KOReader
+
+- Por qué: no conviene inventar journal ni migraciones para el dispositivo.
+- Fuente: [`plugins/statistics.koplugin/main.lua`](https://github.com/koreader/koreader/blob/v2026.07/plugins/statistics.koplugin/main.lua).
+- Verificado: uso de `lua-ljsqlite3`, base bajo `getSettingsDir`,
+  `user_version`, migraciones y selección `WAL`/`TRUNCATE` mediante
+  `Device:canUseWAL()`.
+- Impacto: el repositorio copia ese patrón y añade claves foráneas/backup propio.
+- Confianza: alta.
+
+### Tema: guardado antes de suspensión y cierre
+
+- Por qué: guardar en `onSuspend` perdería el último micro-batch.
+- Fuente: [`frontend/device/generic/device.lua`](https://github.com/koreader/koreader/blob/v2026.07/frontend/device/generic/device.lua) y
+  [`frontend/apps/reader/readerui.lua`](https://github.com/koreader/koreader/blob/v2026.07/frontend/apps/reader/readerui.lua).
+- Verificado: `_beforeSuspend` hace `flushSettings` antes de emitir `Suspend`;
+  `ReaderUI:saveSettings` emite `SaveSettings` antes de vaciar DocSettings.
+- Impacto: `onSaveSettings` es el flush durable obligatorio.
+- Confianza: alta.
+
+### Tema: viewport y coste de memoria
+
+- Por qué: el refresh recortado no basta para impedir escritura fuera de la
+  hoja.
+- Fuente: [`ffi/blitbuffer.lua`](https://github.com/koreader/koreader-base/blob/master/ffi/blitbuffer.lua).
+- Verificado: `viewport` crea un objeto acotado sobre la misma memoria; no
+  reserva otro buffer.
+- Restricción: fuente de koreader-base revisada el 2026-08-23; confirmar el SHA
+  del submódulo al ejecutar la fase 3.
+- Impacto: clipping real en render live y en reparación regional.
+- Confianza: alta para la implementación revisada, pendiente de fijar SHA.
+
+### Tema: arrastre en e-ink
+
+- Por qué: la altura de la hoja no debe forzar refresco completo continuo.
+- Fuente: [`frontend/ui/widget/container/movablecontainer.lua`](https://github.com/koreader/koreader/blob/v2026.07/frontend/ui/widget/container/movablecontainer.lua).
+- Verificado: `hold_pan` sólo marca movimiento; posición y refresco se aplican
+  en `hold_release`.
+- Impacto: alturas imantadas y repaint al soltar; indicador fino sólo tras gate
+  físico.
+- Confianza: alta.
