@@ -1673,6 +1673,7 @@ for _, spec in ipairs({
     "canvas_anchor_spec",
     "canvas_geometry_spec",
     "canvas_cache_spec",
+    "canvas_overlay_spec",
 }) do
     dofile(tests_dir .. "/" .. spec .. ".lua")(ctx)
 end

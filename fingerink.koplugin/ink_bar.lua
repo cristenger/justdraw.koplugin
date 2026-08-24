@@ -29,20 +29,17 @@ local VerticalGroup = require("ui/widget/verticalgroup")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local _ = require("gettext")
 
-local Screen = Device.screen
+local Stack = require("ink_stack")
 
--- Handlers for events that arrive through UIManager:sendEvent, which offers
--- them to one window only. Everything else reaches every window already.
-local INPUT_HANDLERS = {
-    onGesture = true,
-    onKeyPress = true,
-    onKeyRepeat = true,
-    onKeyRelease = true,
-}
+local Screen = Device.screen
 
 local InkBar = WidgetContainer:extend{
     plugin = nil,   -- the FingerInk instance
     side = "right",
+    --- True when this bar is a child of InkCanvasOverlay rather than a window
+    --- of its own. An embedded bar answers for its buttons and nothing else:
+    --- the overlay owns the stack, the forwarding and the suppression rule.
+    embedded = false,
 }
 
 function InkBar:mkButton(text, width, cb)
@@ -125,18 +122,9 @@ end
 
 -- --------------------------------------------------------------- forwarding
 
---[[--
-The window that would be taking input if the bar were not up: the reader
-normally, a menu or dialog when one is open on top of it.
-
-Toasts are skipped because UIManager never lets them consume input either.
-]]
+--- The window that would be taking input if the bar were not up. See ink_stack.
 function InkBar:windowBelow()
-    local stack = UIManager._window_stack
-    for i = #stack, 1, -1 do
-        local widget = stack[i].widget
-        if widget ~= self and not widget.toast then return widget end
-    end
+    return Stack.below(self)
 end
 
 --[[--
@@ -174,6 +162,9 @@ function InkBar:onGesture(ges)
     if ges.pos and self:contains(ges.pos.x, ges.pos.y) then
         return true
     end
+    -- Embedded, the bar is not the topmost window and has no business
+    -- answering for gestures that missed it: the overlay decides.
+    if self.embedded then return false end
     return self:suppresses(ges)
 end
 
@@ -189,10 +180,8 @@ follow-up pass over `is_always_active` and `active_widgets` windows intact.
 ]]
 function InkBar:handleEvent(event)
     if WidgetContainer.handleEvent(self, event) then return true end
-    if INPUT_HANDLERS[event.handler] then
-        local below = self:windowBelow()
-        if below then return below:handleEvent(event) end
-    end
+    if self.embedded then return end
+    return Stack.forward(self, event)
 end
 
 return InkBar
