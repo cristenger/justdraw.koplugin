@@ -5,6 +5,16 @@ https://github.com/user-attachments/assets/66a1f825-9707-4755-bf09-310789dac2b5
 Draw on book pages in KOReader with your **finger** on e-readers that have no
 stylus (Kindle Paperwhite included), or with the **pen** on a Kindle Scribe.
 
+Two ways to draw:
+
+- **On the page.** Ink goes straight onto whatever is there. Works in any
+  document. Anchored to a page number, so in an EPUB it stays put while the
+  text moves.
+- **On a sheet.** A blank page anchored to a *position* in a reflowable book.
+  Change the font and the sheet follows the paragraph — the drawing itself
+  never moves, because it is not on the page at all. And with a sheet open you
+  can still turn pages with a finger.
+
 No core files are patched; it is a plain drop-in plugin folder.
 
 ## Compatibility
@@ -45,8 +55,8 @@ tappable, including while drawing is on — that is the whole point of it.
 | --- | --- |
 | **Draw** / **Stop** | start and stop drawing |
 | **Pen** / **Eraser** | switch tool (also starts drawing if it is off) |
-| **Undo** | remove the last stroke on this page |
-| **Hide** | stop drawing and hide the toolbar |
+| **Undo** | remove the last stroke on this page, or on the open sheet |
+| **Hide** | stop drawing and hide the toolbar, or put the sheet away |
 
 ### Input modes
 
@@ -85,6 +95,59 @@ You can never end up drawing with no toolbar on screen: starting to draw shows
 it, and hiding it stops drawing.
 
 Ink is saved into the book's sidecar, per page, when KOReader flushes settings.
+
+## Drawing sheets (EPUB and other reflowable books)
+
+Top menu → More tools → Finger Ink → **Drawing sheet** → *Open sheet here*.
+
+A blank sheet slides up from the bottom and is anchored to wherever you are in
+the book. **Tap the strip along its top edge** to cycle through 40%, 70% and
+full screen, or drag that strip and let go — it snaps to the nearest of the
+three. There is no live preview while you drag; e-ink cannot repaint fast
+enough for one to be worth having, which is why there are three stops rather
+than a continuous height.
+
+While a sheet is open:
+
+- the **pen** draws on the sheet, and does nothing over the book's text;
+- a **finger above the sheet still turns pages**, so you can read around it;
+- a **palm resting on the sheet** does nothing at all — no ink, no page turn,
+  and it cannot interrupt what the pen is drawing;
+- the toolbar floats on top and stays tappable, always. **Hide** puts the sheet
+  away.
+
+A book with sheets in it shows a small flag in the margin on every page that
+has one. Reopening is *Open sheet here* on that page; if a position has more
+than one sheet you are asked which.
+
+Sheets are anchored by position, not by page, so changing font, margins or line
+spacing moves the sheet with its paragraph and leaves the drawing untouched.
+Rotating the device rescales the sheet to fit, letterboxed if the shape
+changed, with everything still on it.
+
+If the book is replaced by a different edition, an anchor can stop resolving.
+Those sheets are **never deleted** — they appear under *Lost sheets*, where you
+can open or remove them.
+
+### Where sheets are stored
+
+In `settings/fingerink.sqlite3`, one database beside KOReader's own, not in the
+book's `.sdr` folder. Two consequences worth knowing:
+
+- **Back up that file**, not only the `.sdr` folders. With WAL active, back it
+  up with KOReader closed, or include the `-wal` and `-shm` files.
+- Copying a book to another device does **not** take its sheets along. Sync and
+  export are not implemented.
+
+A book is identified by its checksum and size, so renaming or moving it keeps
+its sheets. If KOReader has not computed a checksum yet, sheets are unavailable
+for that book and the plugin says so rather than falling back to the file path,
+which would lose them at the first rename.
+
+Ink on a sheet is written within a quarter of a second of lifting the pen, and
+always before KOReader suspends or closes the book. If a write fails you are
+told, drawing stops, and the strokes stay in memory so you can retry — nothing
+is silently reported as saved.
 
 ## Menu and gestures
 
@@ -134,10 +197,19 @@ since two-finger gestures keep working while drawing.
 
 ## Known limits
 
-- **Set your layout before you write.** Strokes are stored in screen
-  coordinates against a page number, so changing font size, margins or rotation
-  in an EPUB moves the text and leaves the ink behind. Same caveat
-  `pencil.koplugin` carries.
+- **Drawing on the page: set your layout before you write.** Strokes are stored
+  in screen coordinates against a page number, so changing font size, margins
+  or rotation in an EPUB moves the text and leaves the ink behind. Same caveat
+  `pencil.koplugin` carries. Drawing sheets exist precisely to avoid this and
+  do not have it.
+- **Sheets are for reflowable books only.** In a PDF or another fixed layout
+  the menu entry is greyed out; draw on the page instead.
+- **You cannot draw over the text on a sheet.** The sheet is blank paper: the
+  pen inks on it and does nothing over the book itself.
+- **Opening a sheet is refused while a book is still being indexed.** On a book
+  with hundreds of sheets that takes a moment after opening; the menu entry is
+  greyed out until it finishes, so you cannot accidentally make a second sheet
+  on a paragraph that already has one.
 - Single-page view only. Scroll mode is not handled.
 - Fast refresh uses the DU waveform: grainy, and ghosting builds up until the
   next page turn. Turn it off in the menu if you would rather have clean strokes
@@ -185,7 +257,8 @@ cd /path/to/koreader-emulator-*/koreader
 ```
 
 It prints one line per assumption: `OK`, `MISMATCH`, or `UNCHECKABLE` when the
-runtime is older than the API in question. **`UNCHECKABLE` is not a pass** — on
+runtime is older than the API in question — or, for the anchor claims, when no
+book was passed. **`UNCHECKABLE` is not a pass** — on
 a KOReader without the stylus API, the pen claims come back unchecked and the
 stylus route is still only covered by fakes. A `MISMATCH` means a fake lies;
 fix the fake.
@@ -209,6 +282,26 @@ and `y` surviving a lift.
 
 **Not covered:** real Wacom hardware, e-ink ghosting and latency, and Kindle
 firmware. Those need a physical Kindle Scribe.
+
+The canvas suites lean on counters rather than pixels, because what they are
+claiming is about work that must not happen: ten repaints of a sheet decode no
+points, an erase reads only what the spatial index puts near it, turning a page
+while a book is being indexed resolves no xpointers, and painting a margin flag
+issues no query and makes no CREngine call.
+
+The database is the one thing `tests/run.lua` cannot honestly test. The suite
+runs under a bare interpreter with no KOReader and cannot load the SQLite
+driver, so the repository is driven there by a recorder that executes nothing
+and pins only control flow — transaction and rollback order, backup strictly
+before migration, that the listing query never names `points`. Everything about
+SQL *semantics* lives in `conformance.lua` instead, against real SQLite:
+schema, constraints, cascades, the blob round trip, the layout prune. Pass a
+book to that script and it also checks the xpointer API against a real rendered
+document:
+
+```sh
+./luajit /path/to/fingerink.koplugin/tests/conformance.lua /path/to/book.epub
+```
 
 ## Docs
 

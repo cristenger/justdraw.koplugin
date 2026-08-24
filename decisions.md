@@ -346,6 +346,12 @@ Rejected: clearing `contact.pending_hold_timer` on suppressed contacts. It works
 it reaches into another module's private state, it cannot fix the per-frame
 problem, and it would silently kill a legitimate two-finger hold.
 
+*Refined by ADR-17.* The reasoning above holds for a contact that already
+exists. Withholding a slot from its *very first* frame is a different thing: no
+Contact is opened, so there is no timer to suppress. The canvas needs that,
+because it hands gestures above the sheet to the book on purpose and a gesture
+carries no slot number.
+
 ## ADR-14 — Canvas ink goes in its own SQLite database, not in the sidecar
 
 **Context.** The EPUB canvas stores freehand ink against a book position rather
@@ -406,13 +412,137 @@ the same book and flushing whole snapshots. It can overwrite live metadata and
 keeps the monolithic cost. One source of truth, and no `DocSettings:flush()` of
 our own.
 
+## ADR-15 — Anchor the sheet, not the ink
+
+**Context.** Direct ink is stored in screen coordinates against a page number,
+which is fine in a PDF and wrong in an EPUB: change the font size and the text
+moves while the ink stays. Making ink follow reflowing text means tying every
+point to a position in the DOM, recovering those positions after every
+recomposition, and deciding what a stroke that spanned a line break now means.
+There is no answer to that last question that a reader would recognise as
+theirs.
+
+**Decision.** The ink does not follow the text. A canvas is a blank sheet
+anchored to one position in the book, and the strokes live in the canvas's own
+coordinate space. Reflow moves the sheet; it cannot move what is on it.
+
+**Consequences.** The hard problem disappears. The only thing that has to
+survive a recomposition is a single xpointer, and the layout-detection
+machinery an earlier sketch of this needed — comparing rendering hashes to
+decide whether stored ink is still valid — is gone. What remains of
+`getDocumentRenderingHash` is a key for a discardable cache of resolved pages;
+a stale entry costs one redundant confirmation, never a misplaced canvas.
+
+The second consequence was not the goal and may matter more day to day: the
+drawing surface is now a bounded rectangle, so there is somewhere for touch to
+still mean "turn the page". Under the old rule drawing suppressed every gesture
+on the screen and Stop was the only way back into the book.
+
+The price is that a canvas cannot be drawn *over* the text. v1 does not try;
+the pen over the book does nothing.
+
+Both xpointer forms are stored, raw and normalised, with the `cre_dom_version`
+the canvas was born under. `getNormalizedXPointer` is canonical only for DOMs
+at or above `getDomVersionWithNormalizedXPointers`, and `ReaderRolling`'s own
+xpointer migration walks the last position and the annotations — it has never
+heard of this plugin's tables. Storing both from birth is what makes a canvas
+findable after a DOM upgrade without depending on a closed loop.
+
+An anchor that resolves to neither form is kept and listed, never deleted. The
+text may come back, and a reader's notes are not the plugin's to discard.
+
+## ADR-16 — One composite window, not a stack of them
+
+**Context.** The sheet, its resize handle and the toolbar all need input. The
+obvious arrangement is three ordinary windows in the order
+`ReaderUI < sheet < toolbar`.
+
+`UIManager:sendEvent` makes that unworkable. It offers an input event to the
+topmost non-toast widget and stops as soon as one returns true; it does *not*
+carry on down the stack when that widget returns false. Two of our windows
+would therefore be two things competing to be topmost, with whichever lost deaf
+to everything.
+
+**Decision.** `InkCanvasOverlay` is the only window. The sheet, the handle and
+the toolbar are its children. `InkBar` gained an `embedded` mode: as a child it
+answers for its buttons and leaves the forwarding and the suppression decision
+to the overlay; standalone over a PDF it is unchanged.
+
+Paint order and hit-test order are opposite on purpose. `WidgetContainer`
+offers an event to numeric children before its own handler, so the toolbar is
+`self[1]` and gets first refusal; `paintTo` draws it last so it sits on top.
+
+**Consequences.** There is exactly one place that decides where a gesture goes,
+and it decides by geometry. The overlay declines one region — the screen above
+the sheet — and hands it to the window below through `ink_stack`, which is the
+same explicit forwarding ADR-10 established for the standalone toolbar and now
+lives in one file instead of two.
+
+The invariant from ADR-8 survives in a new shape: *Hide* with a sheet open puts
+the sheet away rather than hiding a toolbar that is not a window.
+
+Rejected: keeping three windows and marking the sheet `is_always_active`. That
+flag gets a widget a second pass over input, not first refusal, and the
+ordering between two such windows is exactly as fragile as the problem it would
+be papering over.
+
+## ADR-17 — Latch a contact's destination, and withhold a palm's slot
+
+**Context.** With a sheet open the screen has four owners — the toolbar, the
+handle, the sheet, and the book above it — and a contact can cross between them
+mid-sequence.
+
+Changing a contact's owner part-way through corrupts GestureDetector either
+way. Giving a slot back makes it open a fresh contact and emit a spurious tap
+on lift; taking one away strands a contact that never sees its lift, leaving a
+hold timer that blocks the slot until the next `dropContacts()`.
+
+**Decision.** A contact is classified once, on the first frame that carries
+real coordinates, and never reclassified. Order: dialog, toolbar, handle,
+canvas, book. A stroke dragged onto the toolbar presses no button; a tap that
+began on a button never becomes a stroke.
+
+The toolbar's position in that order is the safety invariant. A new finger
+while the pen is down becomes a palm anywhere on the page — but never on the
+toolbar, because pressing Stop with a pen resting on the sheet has to work.
+
+A palm's slot is withheld from `GestureDetector` entirely, the down frame and
+the lift alike.
+
+**Consequences.** This is not belt-and-braces over ADR-13's widget-layer
+filter; it is the only mechanism available. An emitted gesture carries `ges`,
+`pos` and `time` and no slot number (gesturedetector.lua:540, :606, :1262), and
+the overlay deliberately forwards gestures above the sheet to the book. So once
+a palm's `hold` has been produced there is nothing left to distinguish it from
+the reader's own. Keeping the Contact from existing is where the two can still
+be told apart.
+
+Withholding the lift as well as the down matters: handing the detector a lift
+for a contact it never opened is the other half of the same bookkeeping bug.
+
+One case a filter cannot reach: a contact-down frame with no coordinates has
+already gone through by the time the next frame places it. `Capture:dropContact`
+retires that one — per slot, through GestureDetector's own method, so a finger
+on the toolbar is not caught up in it. That is the same API ADR-13 declined to
+reach past, used the way it is meant to be.
+
+A finger already resting when the pen lands is cancelled: the single deliberate
+exception to the latch, because a hand turning the page mid-stroke is the
+failure the stylus route exists to prevent.
+
 ## Deferred
 
 - Scroll view mode (`paintTo` offset and page identity both change).
 - Segment-distance eraser (ADR-7).
 - Layout-change detection for EPUBs (ADR-5). The canvas sidesteps it: an
   anchored sheet keeps its own coordinates, so reflow moves the sheet, not the
-  ink (ADR-14).
+  ink (ADR-15).
+- Drawing on a sheet over a PDF. The `anchor_kind = 'page'` column is reserved
+  and `ink_anchor.forPage` exists; nothing uses either yet.
+- A global list of every canvas in every book, and search across them.
+- Export and cross-device sync of canvases.
+- A live indicator while the sheet's resize handle is dragged. Only worth
+  adding if the physical gate shows the magnetic stops are not enough.
 - Save-on-stroke instead of `onSaveSettings`, if crash loss turns out to matter.
 - Draggable toolbar (`MovableContainer`) if the fixed centred position gets in
   the way of a particular book's layout.

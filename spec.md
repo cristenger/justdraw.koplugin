@@ -6,17 +6,48 @@
 fingerink.koplugin/
   _meta.lua        plugin manifest
   main.lua         plugin object: state machine, menu, persistence, paintTo
-  ink_bar.lua      always-reachable side toolbar widget
+  ink_bar.lua      the toolbar: a window of its own, or the overlay's child
   ink_capture.lua  dual capture backend (feedEvent wrapper + stylus callback),
                    ownership-safe install/removal, guarded handlers,
-                   rotation transform
-  tests/           LuaJIT regression suite (support.lua + run.lua)
+                   rotation transform, slot filtering, per-slot dropContact
+  ink_stack.lua    being the topmost window, and forwarding what you refuse
   ink_render.lua   allocation-free segment/stroke rasterisation
-  ink_store.lua    per-page stroke list, hit test
+  ink_store.lua    per-page stroke list, hit test  (direct ink only)
+  tests/           regression suite (support.lua + run.lua + *_spec.lua)
+
+  -- the EPUB canvas
+  ink_canvas_session.lua      one book's canvases: repository, index, open sheet
+  ink_canvas_repository.lua   SQLite: schema, migrations, transactions, queries
+  ink_canvas_codec.lua        the stored point format, chunked
+  ink_canvas_queue.lua        bounded write batching and its failure state
+  ink_anchor.lua              raw + normalised xpointer, page anchors
+  ink_anchor_index.lua        canvas-to-page map, built in batches per layout
+  ink_canvas_transform.lua    canvas <-> cache <-> screen, one copy of it
+  ink_spatial_grid.lua        which strokes are near a place
+  ink_canvas_cache.lua        the BB8 raster, built in batches, repaired locally
+  ink_canvas_overlay.lua      the one window: sheet, handle, embedded toolbar
+  ink_contact_router.lua      per-slot destinations, latched at contact down
 ```
 
 Module names are prefixed `ink_` so plugin-local `require` cannot shadow a core
 module (`require("input")` would collide with `device/input`).
+
+There are two drawing features and they share only the toolbar, the renderer
+and the capture layer:
+
+| | Direct ink | Canvas sheet |
+| --- | --- | --- |
+| Where | on the page itself | on a blank sheet over it |
+| Documents | any | reflowable only (EPUB and friends) |
+| Anchored to | page number | an xpointer |
+| Survives reflow | no | yes -- reflow moves the sheet, not the ink |
+| Stored in | the sidecar, `fingerink_strokes` | `fingerink.sqlite3` |
+| Coordinates | screen pixels | canvas units, 0..logical_w/h |
+| While drawing | all touch swallowed | only touch on the sheet |
+
+Nothing about direct ink changed. Every canvas path is behind `canvas_open`,
+and with no sheet open the plugin behaves exactly as it did before the canvas
+existed.
 
 ## Input capture
 
@@ -387,6 +418,192 @@ the pen lift is never delivered and any cached slot reference is dead. Stopping
 on suspend and requiring an explicit Draw after resume is the only state that
 is knowably clean.
 
+## The EPUB canvas
+
+A sheet of blank paper anchored to a position in a reflowable book. It is a
+frontend overlay: it inserts no space into CREngine, is not part of the DOM,
+and does not affect reflow.
+
+### Why it exists
+
+Direct ink is stored in screen coordinates against a page number, so changing
+font size, margins or rotation in an EPUB moves the text and leaves the ink
+behind. A canvas moves the whole problem: the strokes live in the canvas's own
+coordinates, and the only thing that has to survive a recomposition is *where
+the sheet hangs* — one xpointer.
+
+### Lifecycle
+
+`ReaderReady` opens the session, and only for `ui.rolling` documents.
+`partial_md5_checksum` lives in the document's settings, where ReaderUI
+computes it on its way to that event; with it and the file size the book has an
+identity that survives a rename. Without both, canvases are unavailable for
+that book and the reader is told once — a path is not used as a substitute.
+
+`onSaveSettings` is the durable-save gate. `Device:_beforeSuspend` calls
+`UIManager:flushSettings()` and only then emits `Suspend`, so saving on suspend
+would already be too late. `onCloseDocument` flushes again, cancels scheduled
+work by reference, frees the raster and closes the connection.
+
+### Anchors and the page index
+
+A canvas stores the raw *and* the normalised xpointer, plus the
+`cre_dom_version` it was born under. `getNormalizedXPointer` is canonical only
+for DOMs at or above `getDomVersionWithNormalizedXPointers`, and KOReader's own
+xpointer migration walks the last position and the annotations — it has never
+heard of this plugin's tables. On load the form matching the current DOM is
+tried first and the other is the fallback. An anchor that resolves to neither
+is an **orphan**: kept, listed in the menu, never deleted.
+
+Resolving every anchor on every repaint would be a CREngine call per canvas per
+page turn. Instead the canvas-to-page map is built once per layout, keyed by
+`getDocumentRenderingHash(true)`, cached in `canvas_layout_cache` and pruned to
+the two most recent layouts of that book. Building is spread over
+`UIManager:nextTick` in batches of eight; a generation counter keeps a rerender
+from mixing two layouts, and a half-built index is never cached.
+
+Three properties of the read path are enforced by counting calls:
+
+- turning a page during a build resolves no xpointers;
+- painting a view issues no query and makes no CREngine call;
+- the document is asked to confirm only the candidates the map produced.
+
+Creating a canvas is **refused while the index is still building**, because the
+index is the only thing that knows whether this paragraph already has one.
+
+### Coordinates
+
+One transform, shared by input, hit testing, erasing, the raster and painting.
+The canvas keeps the geometry it was born with and gets an aspect-fit rectangle
+on every screen — never distorted, letterboxed at the sides when the shape no
+longer matches, and aligned to the **top** of the sheet because the sheet
+reveals the page downwards.
+
+```
+scale    = min(screen_w / logical_w, screen_h / logical_h)
+offset_x = (screen_w - logical_w * scale) / 2
+screen_x = offset_x + canvas_x * scale
+screen_y = sheet_top + canvas_y * scale
+```
+
+The letterbox margins are *sheet*, not canvas: a contact there belongs to the
+sheet and swallows, but ink is refused.
+
+### The raster
+
+One BB8 buffer per open canvas, the size of the whole transformed canvas —
+about 4.4 MiB on a Scribe. Painting a view is one `blitFrom`. Building it is
+batched over `nextTick` with one stroke decoded and released at a time, so
+opening a dense canvas costs its longest stroke rather than its contents.
+
+Because the buffer holds the whole canvas and not the visible part, dragging
+the sheet to another height re-rasterises nothing — only the blit's source
+rectangle moves. A rotation changes the scale and rebuilds from the vectors,
+which are never rewritten.
+
+Erasing and undo stay local through a grid over the stroke bounding boxes:
+clear the region, ask the grid what overlaps it, redraw those into a
+`BlitBuffer:viewport` of the region. A viewport bounds the write, so the repair
+physically cannot paint outside it; clipping the refresh rectangle alone would
+not stop the pixels.
+
+### The window
+
+`InkCanvasOverlay` is the only window. `UIManager:sendEvent` offers an input
+event to the topmost non-toast widget and stops when one returns true — it does
+not walk down the stack when that widget declines. Two ordinary windows would
+be two things competing to be topmost with the loser deaf, so the sheet, the
+handle and the toolbar are children of one widget.
+
+Paint order and hit-test order are opposite on purpose. The toolbar is `self[1]`
+so `WidgetContainer` offers it every gesture first; `paintTo` draws it last.
+
+The overlay declines exactly one region — the screen above the sheet — and
+`ink_stack` hands that to the window below. **That is what keeps touch
+navigation alive with a sheet open.**
+
+Height is 40, 70 or 100 per cent of the screen. Tap the handle to cycle, or
+drag it and it snaps to the nearest on release. Nothing is repainted mid-drag,
+the way `MovableContainer` does not repaint mid-move: continuous refreshes on
+e-ink cost more than the feedback is worth, and three magnetic stops are the
+compensation for a height the reader cannot watch themselves choosing.
+
+### Contact routing
+
+Destinations are latched at the first frame with real coordinates and never
+revisited. The order is:
+
+```
+dialog > bar > handle > canvas > reader
+```
+
+| Destination | Pen | Finger, stylus route | Finger, finger route |
+| --- | --- | --- | --- |
+| `dialog` | passthrough | passthrough | passthrough |
+| `bar` | passthrough | to the toolbar | to the toolbar |
+| `handle` | passthrough | to the overlay | to the overlay |
+| `canvas` | draw or erase | suppressed as a palm | draws |
+| `reader` | dominated, no ink | to the book | to the book |
+
+The toolbar's place in that order is the safety invariant: a new finger while
+the pen is down becomes a palm anywhere on the page, but never on the toolbar.
+
+A palm's slot is **withheld from `GestureDetector` entirely** — the down frame
+and the lift alike — so no Contact and no hold timer ever exist for it. That is
+necessary rather than belt-and-braces: an emitted gesture carries `ges`, `pos`
+and `time` and no slot number, and the overlay deliberately hands gestures
+above the sheet to the book, so once a palm's `hold` exists nothing can tell it
+from the reader's own. A contact whose first frame carried no coordinates has
+already gone through by the time the next one places it; `Capture:dropContact`
+retires that one, per slot.
+
+A finger already resting when the pen lands is cancelled — the single
+deliberate exception to the latch — and its slot is reported so its contact and
+timers go with it.
+
+### Persistence
+
+`DataStorage:getSettingsDir() .. "/fingerink.sqlite3"`, one database for every
+book, following the pattern Statistics established. Tables: `books`,
+`canvases`, `canvas_layout_cache`, `strokes`, `stroke_chunks`. Version in
+`PRAGMA user_version`, foreign keys on, WAL only where `Device:canUseWAL()`.
+
+Points are two little-endian `uint16` each, normalised to the canvas geometry,
+chunked at 1024 points with the seam point repeated so a segment across a chunk
+boundary is drawable from one chunk. `join` refuses a seam that does not line
+up rather than drawing the jump.
+
+Two driver behaviours are load-bearing and were settled by probing the real
+thing:
+
+- INTEGER columns arrive as int64 cdata. `1LL == 1` is true, but `t[1LL]` and
+  `t[1]` are different table keys — a page index built from raw driver output
+  would miss every lookup. Every integer is converted at the boundary.
+- a Lua string binds as TEXT even into a BLOB column, and SQL stops at its
+  first NUL, so `length()` on a point blob answers 1. `CAST(?n AS BLOB)` going
+  in and `CAST(points AS TEXT)` coming out give a real blob with plain strings
+  on both sides.
+
+Writes are queued and flushed at the first of: 250 ms, 8 operations, 64 KiB, a
+canvas change, `SaveSettings`, or close. Strokes carry a **local** id from the
+moment they are drawn, because the row id does not exist until the insert runs;
+that is what lets an undo of a pending stroke delete its queued insert instead
+of writing the stroke and deleting it again. A failed flush keeps the queue
+exactly as it was, refuses further editing and says so — nothing is marked
+written and no fresh database is reached for.
+
+Failure policy: a database that will not open is never recreated; a schema
+newer than this one opens read-only rather than being downgraded; a migration
+checkpoints, closes and copies the file before it writes a single statement,
+and refuses outright on a gap in the ladder.
+
+### Not in v1
+
+Drawing over the text itself; a global list of every canvas; export or sync;
+multi-sheet notebooks; pressure, tilt and hover; canvases on PDFs (the
+`anchor_kind = 'page'` column is reserved); migrating the direct-ink store;
+manual compaction of the database.
+
 ## Menu
 
 Top menu → Finger Ink:
@@ -399,6 +616,10 @@ Top menu → Finger Ink:
   drawing**)
 - Pen width: thin (2) / medium (4) / thick (7)
 - Fast refresh while drawing (toggle, default on)
+- Drawing sheet (reflowable documents only; disabled otherwise)
+  - Open sheet here / Close sheet, Delete this sheet
+  - Sheets on this page (when the position has more than one)
+  - Lost sheets (n) — orphaned anchors, openable and deletable
 - Clear this page
 - Clear whole document
 
