@@ -6,7 +6,8 @@ Feature ID: `FI-CANVAS-001`
 
 Base: rama `codex/kindle-scribe-stylus`, tras `FI-SCRIBE-STYLUS-002`
 
-Estado: arquitectura revisada; no hay código de esta funcionalidad
+Estado: **implementado**. Ver §15 para el registro de ejecución y las
+desviaciones deliberadas respecto de este documento.
 
 Documentos previos: [`kindle-scribe-stylus-dev-plan-2026-08-23.md`](kindle-scribe-stylus-dev-plan-2026-08-23.md),
 [`kindle-scribe-stylus-remediation-plan-2026-08-23.md`](kindle-scribe-stylus-remediation-plan-2026-08-23.md)
@@ -898,3 +899,90 @@ para completar los fragmentos que GitHub no renderizó en la extracción.
 - Impacto: alturas imantadas y repaint al soltar; indicador fino sólo tras gate
   físico.
 - Confianza: alta.
+
+## 15. Registro de ejecución
+
+Fecha de implementación: 2026-08-23. Suite: 1.044 comprobaciones, 0 fallos, bajo
+`lua` y bajo el LuaJIT de KOReader. Conformance: 42 afirmaciones, 0 discrepancias
+contra el build local con `test/juliet.epub`. Humo: el plugin carga en ReaderUI,
+abre la base y registra el libro con checksum y tamaño.
+
+### 15.1 Fases
+
+| Fase | Estado |
+| --- | --- |
+| 1 — Codec y repositorio | Completa |
+| 2 — Anclas e índice | Completa |
+| 3 — Transformación y caché | Completa |
+| 4 — Overlay compuesto | Completa |
+| 5 — Router y lápiz | Completa |
+| 6 — Guardado y lifecycle | Completa |
+| 7 — Escala y documentación | Completa salvo el gate físico |
+
+El gate físico de §11.2 sigue **sin ejecutar**: requiere un Kindle Scribe.
+
+### 15.2 Correcciones a este documento
+
+Tres cosas de §3 resultaron falsas al probarlas contra el runtime real, y las
+tres son de consecuencia:
+
+1. **Los BLOB no son BLOB.** `lua-ljsqlite3` liga una cadena Lua como TEXT
+   aunque la columna se declare `BLOB`, y SQL se detiene en el primer NUL:
+   `length()` sobre un blob de puntos responde 1. La implementación usa
+   `CAST(?n AS BLOB)` al entrar y `CAST(points AS TEXT)` al salir, con lo que
+   el valor almacenado es un blob real y ambos lados siguen siendo cadenas Lua.
+   Verificado en `conformance.lua`.
+
+2. **Los enteros vuelven como cdata int64.** `1LL == 1` es cierto, pero
+   `t[1LL]` y `t[1]` son claves distintas y `1LL .. ""` lanza. Un índice de
+   páginas construido con la salida cruda del driver perdería todas las
+   búsquedas en silencio. Todo entero se convierte en el límite del
+   repositorio.
+
+3. **`partial_md5_checksum` no es un campo de `ReaderUI`.** Vive en los ajustes
+   del documento, donde `ReaderUI` lo calcula camino a `ReaderReady`. La
+   primera versión lo leía de `self.ui` y desactivaba la función en todos los
+   EPUB con un mensaje diciéndolo. Lo encontró la prueba de humo, no la
+   revisión.
+
+### 15.3 Desviaciones deliberadas
+
+- **Archivos.** §9 preveía la transformación dentro de `ink_canvas_overlay.lua`
+  y la rejilla espacial dentro de `ink_canvas_cache.lua`. Ambas se extrajeron a
+  `ink_canvas_transform.lua` e `ink_spatial_grid.lua`: son lógica pura,
+  compartida por varios módulos, y se prueban mejor solas. Se añadieron
+  `ink_stack.lua` (una sola copia de la regla de reenvío, que existía duplicada
+  en la barra y habría vuelto a duplicarse en el overlay) y
+  `ink_canvas_session.lua` (main.lua ya tenía 1.100 líneas antes de esto).
+
+- **Refresco por segmento, no agrupado por tick.** §5.2 pedía agrupar las cajas
+  sucias cada 8–16 ms. La implementación refresca por segmento, que es
+  exactamente lo que hace la tinta directa hoy y lo único que está probado en el
+  hardware del usuario. Agrupar es una optimización que debe medirse en el
+  Scribe antes de introducirla; hacerlo a ciegas arriesga que la tinta en vivo
+  se sienta peor que la ruta ya probada. **Pendiente para el gate físico.**
+
+- **La palma se retira antes del GestureDetector.** §6.3 lo pedía y ADR-13
+  parecía contradecirlo. No hay contradicción: ADR-13 habla de un contacto que
+  ya existe, y retirar un slot en su *primer* frame significa que el Contact
+  nunca se abre. Es además obligatorio, no defensa adicional: un gesto emitido
+  no lleva número de slot, y el overlay entrega a propósito los gestos por
+  encima de la hoja al libro. Ver ADR-17.
+
+- **La barra nunca se degrada a palma.** §6.3 dice que todo dedo nuevo se fija
+  como `palm` mientras el lápiz está apoyado. Se aplica al lienzo y al texto,
+  no a la barra ni al asa: el orden de clasificación de §6.2 pone `bar` antes,
+  y poder pulsar Stop con el lápiz apoyado es la única salida de una sesión de
+  dibujo.
+
+- **Un dedo ya apoyado se cancela sólo si era del lienzo o del lector.** Misma
+  razón.
+
+### 15.4 Lo que sigue sin cubrir
+
+- El gate físico completo de §11.2.
+- El intervalo de agrupación de refresco (§5.2), a medir en el dispositivo.
+- Instrumentación: hay contadores por operación en nivel `dbg` (rasterizado,
+  commit, reparación, apertura de sesión). No se registra el tamaño de la base
+  ni la duración en milisegundos; eso pide un reloj y una medida real, no una
+  estimación de escritorio.

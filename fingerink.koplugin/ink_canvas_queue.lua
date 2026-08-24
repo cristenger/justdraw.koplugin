@@ -215,6 +215,7 @@ function Queue:flush()
         return nil, err
     end
 
+    logger.dbg("FingerInk: canvas commit,", #ops, "operations,", self.bytes, "bytes")
     for i = 1, #assigned do
         self.real[assigned[i][1]] = assigned[i][2]
     end

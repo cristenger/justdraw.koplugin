@@ -213,7 +213,9 @@ since two-finger gestures keep working while drawing.
 - Single-page view only. Scroll mode is not handled.
 - Fast refresh uses the DU waveform: grainy, and ghosting builds up until the
   next page turn. Turn it off in the menu if you would rather have clean strokes
-  slowly.
+  slowly. On a sheet, each segment is refreshed as it is drawn, the same as on
+  the page; whether coalescing several segments per refresh feels better is a
+  question for real hardware and has not been answered.
 - **Finger route: no palm rejection.** There is no tool-type data on that
   hardware to do it with, so a palm landing as a second contact cancels the
   stroke in progress. The stylus route does reject palms, by suppressing all

@@ -178,6 +178,7 @@ function Cache:repair(m)
     if not self.bb then return nil end
     local box = self:_regionFor(m)
     if box.w <= 0 or box.h <= 0 then return box end
+    logger.dbg("FingerInk: repairing", box.w, "x", box.h, "of canvas", self.canvas.id)
     self.bb:paintRect(box.x, box.y, box.w, box.h, self.background)
 
     local scale = self.transform.scale
@@ -338,6 +339,11 @@ end
 
 function Cache:_finish()
     self.ready = true
+    -- Per operation, at dbg level: off unless someone is looking, and never
+    -- one line per pen sample.
+    logger.dbg("FingerInk: canvas", self.canvas.id, "rasterised",
+        #self.meta, "strokes into", self.bb and self.bb.w or 0,
+        "x", self.bb and self.bb.h or 0)
     if self.on_ready then self.on_ready() end
 end
 

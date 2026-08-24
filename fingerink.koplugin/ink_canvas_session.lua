@@ -126,6 +126,7 @@ function Session:open()
         schedule = self.schedule,
     }
     self.index:open()
+    logger.dbg("FingerInk: canvas session open for book", book_id)
     return true
 end
 
