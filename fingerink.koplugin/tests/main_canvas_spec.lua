@@ -91,6 +91,26 @@ return function(ctx)
         t:eq(ctx.menuItem(p, "Drawing sheet").enabled_func(), true, "reachable")
     end)
 
+    t:case("the checksum is read from the document's settings", function()
+        -- It lives there, not on ReaderUI, and reading the wrong place gives
+        -- nil -- which turns the feature off on every book with a message
+        -- saying so.
+        local p, store = canvasPlugin()
+        t:eq(store.identity[1], "test-md5", "the checksum ReaderUI computed")
+        t:check(store.identity[2] ~= nil, "and a file size beside it")
+    end)
+
+    t:case("a book with no checksum yet leaves canvases off rather than keyed on a path", function()
+        ctx.reset{ wacom_protocol = true }
+        local doc = support.newDocument{ here = "/p", pages = { ["/p"] = 1 } }
+        local p = support.newPlugin(ctx.FingerInk, env, { document = doc })
+        p.ui.doc_settings.data.partial_md5_checksum = nil
+        p.canvas_repository = support.newCanvasStore({})
+        env.UIManager:flush()
+        p:onReaderReady()
+        t:eq(p.session, nil, "no session")
+    end)
+
     t:case("opening a book twice does not build a second session", function()
         local p = canvasPlugin()
         local first = p.session

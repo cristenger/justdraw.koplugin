@@ -24,8 +24,11 @@ package.path = plugin_dir .. "/?.lua;" .. package.path
 
 local DataStorage = require("datastorage")
 local LuaSettings = require("luasettings")
--- Device pulls settings in on the way up, and nothing has created the global
--- yet because there is no session here.
+-- The two globals reader.lua creates before anything else. Nothing has made
+-- them here because there is no session; document/doccache.lua indexes
+-- G_defaults at load time and would fail with a bare "attempt to index a nil
+-- value" a long way from the cause.
+_G.G_defaults = _G.G_defaults or require("luadefaults"):open()
 _G.G_reader_settings = _G.G_reader_settings
     or LuaSettings:open(DataStorage:getDataDir() .. "/settings.reader.lua")
 
@@ -201,6 +204,13 @@ else
         claim("canvas database: a canvas row is created",
             true, canvas ~= nil and type(canvas.id) == "number")
 
+        -- The next two constraints fire on purpose, and the repository logs
+        -- an error with a traceback for each. That is correct behaviour and it
+        -- buries the report, so it is muted for exactly these two calls.
+        local logger = require("logger")
+        local real_err = logger.err
+        logger.err = function() end
+
         -- UNIQUE(book_id, anchor_key): the guard against a double tap making
         -- two canvases at one position.
         local dup = repo:createCanvas(book_id, {
@@ -214,6 +224,8 @@ else
             true, repo:createCanvas(book_id, {
                 anchor_kind = "nonsense", anchor_key = "other",
                 logical_w = 10, logical_h = 10 }) == nil)
+
+        logger.err = real_err
 
         -- A stroke long enough to span chunks, with coordinates that exercise
         -- the whole quantiser range.
@@ -301,6 +313,100 @@ else
     end
 
     os.remove(db_path)
+end
+
+-- =====================================================================
+-- Anchors, against a real CreDocument
+--
+-- Needs a book, so pass one:
+--
+--     ./luajit .../conformance.lua /path/to/some.epub
+--
+-- Without it these come back UNCHECKABLE and the anchor code is covered only
+-- by a fake document -- which is exactly the situation this file exists to
+-- flag rather than to paper over.
+-- =====================================================================
+
+local book = arg and arg[1]
+
+if not book then
+    claim("anchors: a real EPUB was supplied", false, false,
+        "pass a book path to check the xpointer API")
+else
+    -- reader.lua does this before it touches a document; without it
+    -- doccache.lua asks an uninitialised CanvasContext for the screen width.
+    require("document/canvascontext"):init(Device)
+
+    local DocumentRegistry = require("document/documentregistry")
+    local Anchor = require("ink_anchor")
+
+    local opened, document = pcall(function()
+        local doc = DocumentRegistry:openDocument(book)
+        if doc then doc:render() end
+        return doc
+    end)
+
+    if not opened or not document then
+        claim("anchors: the book opens as a CreDocument", true, false,
+            tostring(document))
+    else
+        claim("anchors: the book opens and renders", true, document.been_rendered == true)
+
+        local xp = document:getXPointer()
+        claim("anchors: getXPointer returns a pointer to the current position",
+            true, type(xp) == "string" and xp ~= "", tostring(xp))
+
+        -- The one that is easy to get wrong: not found is `false`, not nil.
+        local normalized = document:getNormalizedXPointer(xp)
+        claim("anchors: getNormalizedXPointer answers a string or false",
+            true, type(normalized) == "string" or normalized == false,
+            "type = " .. type(normalized) .. ", value = " .. tostring(normalized))
+
+        claim("anchors: the document vouches for its own pointer",
+            true, document:isXPointerInDocument(xp) == true)
+
+        local page = document:getPageFromXPointer(xp)
+        claim("anchors: a pointer resolves to a page number",
+            true, type(page) == "number", "page = " .. tostring(page))
+
+        claim("anchors: the current position is on the current page",
+            true, document:isXPointerInCurrentPage(xp) == true)
+
+        -- y first, x second. Getting these the wrong way round puts every
+        -- margin mark at the left edge and every one of them at the same
+        -- height, which looks plausible enough to ship.
+        local y, x = document:getScreenPositionFromXPointer(xp)
+        claim("anchors: getScreenPositionFromXPointer returns y then x",
+            true, type(y) == "number" and type(x) == "number",
+            "y = " .. tostring(y) .. ", x = " .. tostring(x))
+
+        claim("anchors: getVisiblePageNumberCount is a number",
+            true, type(document:getVisiblePageNumberCount()) == "number",
+            tostring(document:getVisiblePageNumberCount()))
+
+        local hash = document:getDocumentRenderingHash(true)
+        claim("anchors: the rendering hash is a value and is stable across reads",
+            true, hash ~= nil and hash == document:getDocumentRenderingHash(true),
+            "hash = " .. tostring(hash))
+
+        -- And the plugin's own use of all of it.
+        local spec, err = Anchor.forCurrentPosition(document, 20240114)
+        claim("anchors: an anchor can be made at the reader's position",
+            true, spec ~= nil and type(spec.anchor_key) == "string",
+            spec and spec.anchor_key or tostring(err))
+
+        if spec then
+            claim("anchors: the anchor resolves back to a pointer the document knows",
+                true, Anchor.resolve(document, {
+                    anchor_kind = "xpointer",
+                    anchor_raw = spec.anchor_raw,
+                    anchor_normalized = spec.anchor_normalized,
+                    anchor_dom_version = spec.anchor_dom_version,
+                }) ~= nil)
+        end
+
+        document:close()
+    end
 end
 
 local bad = 0

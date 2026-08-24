@@ -1138,7 +1138,8 @@ function support.newPlugin(FingerInk, env, opts)
     if opts.document then
         ui.document = opts.document
         ui.rolling = opts.rolling ~= false and {} or nil
-        ui.partial_md5_checksum = opts.partial_md5 or "test-md5"
+        -- In the document's settings, where ReaderUI puts it, not on ReaderUI.
+        doc_settings.data.partial_md5_checksum = opts.partial_md5 or "test-md5"
         ui.document.file = opts.file or "/books/test.epub"
         env.file_sizes[ui.document.file] = opts.file_size or 90210
         doc_settings.data.cre_dom_version = opts.dom_version or 20240114

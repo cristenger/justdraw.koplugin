@@ -157,17 +157,22 @@ ReaderUI computes on its way to emitting this event. Only reflowable documents
 get one -- a canvas anchored by xpointer means nothing in a fixed layout, and
 `anchor_kind = 'page'` is reserved for when it does.
 ]]
-function FingerInk:onReaderReady()
+function FingerInk:onReaderReady(config)
     if self.session or not self.ui.rolling or not self.ui.document then return end
+
+    -- The checksum lives in the document's settings, not on ReaderUI, which
+    -- computes it there on its way to emitting this event
+    -- (readerui.lua:473 @ v2026.07). Statistics reads it the same way.
+    local settings = config or self.ui.doc_settings
 
     self.session = CanvasSession.new{
         document = self.ui.document,
         identity = {
-            partial_md5 = self.ui.partial_md5_checksum,
+            partial_md5 = settings:readSetting("partial_md5_checksum"),
             file_size = self:documentSize(),
         },
         file = self.ui.document.file,
-        dom_version = self.ui.doc_settings:readSetting("cre_dom_version"),
+        dom_version = settings:readSetting("cre_dom_version"),
         repository = self.canvas_repository,
         plugin = self,
         ui = self.ui,
