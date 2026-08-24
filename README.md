@@ -149,6 +149,22 @@ always before KOReader suspends or closes the book. If a write fails you are
 told, drawing stops, and the strokes stay in memory so you can retry — nothing
 is silently reported as saved.
 
+Opening a populated sheet streams its strokes a chunk at a time and yields
+between bounded point budgets. Drawing stays off until every chunk has passed
+its codec, order, seam and count checks. A read error leaves the database
+unchanged and keeps the sheet open with **Retry loading sheet**; pending edits
+are committed before a retry rebuilds the raster, so a reload cannot resurrect
+a pending erase or lose a pending insert.
+
+Books with many sheets also build and persist their page index in small
+per-tick batches. No final O(number of sheets) SQLite burst runs on the UI
+thread; only the last small batch prunes stale layout caches.
+
+If the database was created by a newer FingerInk schema, this version reopens
+it read-only. Existing sheets can still be viewed and hidden, but create,
+delete, pen, eraser and undo stay disabled; no journal setting or note row is
+written by that compatibility path.
+
 ## Menu and gestures
 
 Top menu → More tools → Finger Ink: start drawing, show/hide the toolbar, put
@@ -220,8 +236,9 @@ since two-finger gestures keep working while drawing.
   hardware to do it with, so a palm landing as a second contact cancels the
   stroke in progress. The stylus route does reject palms, by suppressing all
   touch.
-- **Stylus route: touch navigation is off while drawing.** Not a bug — see
-  above.
+- **Stylus route on the book page: touch navigation is off while drawing.** On
+  a bounded drawing sheet, a finger above the sheet can still navigate; touch
+  on the sheet remains suppressed.
 - **Both routes: touch gestures are filtered by position while drawing.** A
   gesture that lands on the toolbar goes to the toolbar; everything else is
   swallowed until you press Stop. That includes long-presses, which used to slip
@@ -287,7 +304,8 @@ firmware. Those need a physical Kindle Scribe.
 
 The canvas suites lean on counters rather than pixels, because what they are
 claiming is about work that must not happen: ten repaints of a sheet decode no
-points, an erase reads only what the spatial index puts near it, turning a page
+points, a 100,000-point stroke yields at the point budget, an erase reads only
+nearby chunks and reuses an eight-chunk LRU for one contact, turning a page
 while a book is being indexed resolves no xpointers, and painting a margin flag
 issues no query and makes no CREngine call.
 
@@ -297,9 +315,10 @@ driver, so the repository is driven there by a recorder that executes nothing
 and pins only control flow — transaction and rollback order, backup strictly
 before migration, that the listing query never names `points`. Everything about
 SQL *semantics* lives in `conformance.lua` instead, against real SQLite:
-schema, constraints, cascades, the blob round trip, the layout prune. Pass a
-book to that script and it also checks the xpointer API against a real rendered
-document:
+transactional schema creation, constraints, cascades, the blob round trip,
+streaming cursors, the layout prune and a blocked WAL checkpoint that must stop
+a migration before backup. Pass a book to that script and it also checks the
+xpointer API against a real rendered document:
 
 ```sh
 ./luajit /path/to/fingerink.koplugin/tests/conformance.lua /path/to/book.epub

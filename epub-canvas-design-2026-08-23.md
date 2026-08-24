@@ -309,7 +309,10 @@ Para un hash de layout ya conocido, `canvas_layout_cache` llena el segundo mapa
 sin resolver xpointers. Cuando el hash cambia, las entradas antiguas se ignoran
 y la resolución se reparte en lotes mediante `UIManager:nextTick`: cada lote
 ejecuta `getPageFromXPointer` sobre pocas anclas y publica sus resultados. Al
-terminar, una sola transacción guarda la caché derivada.
+terminar cada lote, una transacción del mismo tamaño guarda sólo esas filas y
+reutiliza un único statement preparado. Las filas parciales son caché derivada
+segura: si falta una se resuelve de nuevo. Sólo el lote final poda layouts
+antiguos, evitando una ráfaga SQLite O(número de lienzos) en el último tick.
 
 La tabla no crece con cada prueba de tipografía: después de completar un índice
 se conservan, como máximo, el layout actual y el anterior de ese libro. Las
@@ -545,6 +548,7 @@ flash ni el panel del Scribe:
 | Operación | Contrato |
 | --- | --- |
 | Abrir un libro | Carga identidad y metadata de anclas; no selecciona BLOBs de puntos |
+| Construir índice nuevo | Resolución y persistencia SQLite acotadas al mismo lote por tick; prune sólo al finalizar |
 | Cambiar página con índice listo | Cero SQL y cero scan global; lookup por página más validación de candidatos visibles |
 | Pintar una vista | Blit de caché; cero SQL y cero recorrido vectorial |
 | Añadir una muestra | O(1), sin disco y sin asignar una tabla nueva por punto |
@@ -902,10 +906,13 @@ para completar los fragmentos que GitHub no renderizó en la extracción.
 
 ## 15. Registro de ejecución
 
-Fecha de implementación: 2026-08-23. Suite: 1.044 comprobaciones, 0 fallos, bajo
-`lua` y bajo el LuaJIT de KOReader. Conformance: 42 afirmaciones, 0 discrepancias
-contra el build local con `test/juliet.epub`. Humo: el plugin carga en ReaderUI,
-abre la base y registra el libro con checksum y tamaño.
+Fecha de implementación: 2026-08-24. Tras la revisión cruzada y su remediación:
+1.391 comprobaciones, 0 fallos, bajo `lua` y bajo el LuaJIT de KOReader; conformance:
+44 afirmaciones, 0 discrepancias con `test/leaves.epub`. El smoke aislado carga
+el plugin en ReaderUI, abre la base y registra el libro por checksum+tamaño.
+El runtime local es `v2025.08-100-g1d66e440b_2025-10-05`, por lo que este
+resultado no sustituye la repetición contra v2026.07 exacto y deja la API de
+stylus como `UNCHECKABLE`. La línea base anterior era 1.044/42.
 
 ### 15.1 Fases
 
@@ -983,6 +990,40 @@ tres son de consecuencia:
 - El gate físico completo de §11.2.
 - El intervalo de agrupación de refresco (§5.2), a medir en el dispositivo.
 - Instrumentación: hay contadores por operación en nivel `dbg` (rasterizado,
-  commit, reparación, apertura de sesión). No se registra el tamaño de la base
-  ni la duración en milisegundos; eso pide un reloj y una medida real, no una
-  estimación de escritorio.
+  commit, reparación, apertura de sesión y contacto de goma: candidatos,
+  chunks consultados/decodificados y hits de LRU). No se registra el tamaño de
+  la base ni la duración en milisegundos; eso pide un reloj y una medida real,
+  no una estimación de escritorio.
+
+### 15.5 Endurecimiento de escala e integridad (remediación 2026-08-23)
+
+La implementación posterior conserva el modelo de lienzo/xpointer, pero cambia
+los límites internos que no escalaban con trazos o bases grandes:
+
+- La identidad negativa sólo existe mientras un INSERT está pendiente. Después
+  de COMMIT, Queue publica el id SQLite y Cache cambia sus claves y su entrada
+  de grid antes de liberar los puntos vivos. `seq` es monotónico por sesión y
+  no retrocede al deshacer.
+- La carga ya no materializa un stroke completo. Repository entrega un cursor
+  de una fila/chunk, Codec valida incrementalmente versión, orden, recuentos y
+  seams, y Cache trabaja con un presupuesto inicial de 8192 puntos y 32 chunks
+  por tick. El pico transitorio es un chunk, además del raster BB8, metadata y
+  el LRU acotado.
+- La goma usa distancia a segmentos y grosor visible, primero filtra por stroke
+  y luego por cajas de chunk. Un contexto por contacto reutiliza como máximo
+  ocho chunks y se destruye en lift/abort/cierre.
+- Errores de lectura dejan `load_failed`, no una hoja vacía. Retry hace durable
+  la cola antes de releer SQLite, evitando que un INSERT pendiente desaparezca
+  o que un DELETE pendiente reaparezca en el raster.
+- La caché de páginas se persiste por lotes del mismo tamaño que la resolución
+  de xpointers. Cada lote reutiliza un statement y sólo el último ejecuta el
+  prune, por lo que miles de hojas no terminan en una escritura monolítica.
+- Un cierre interactivo que no logra guardar conserva hoja, barra, cache y
+  operaciones. Delete sólo cambia estado visible después del DELETE durable.
+- La creación de schema v1 es transaccional. Un schema futuro se reabre `ro` y
+  sólo se consulta con `findBookId`; una migración WAL exige las tres columnas
+  de `wal_checkpoint(TRUNCATE)` completas antes de copiar el archivo principal.
+
+Estas correcciones no cambian `SCHEMA_VERSION = 1`, la ruta de tinta directa
+PDF, el refresh por segmento ni ADR-2. El gate físico y la verificación contra
+el runtime exacto KOReader v2026.07 continúan siendo requisitos de distribución.
