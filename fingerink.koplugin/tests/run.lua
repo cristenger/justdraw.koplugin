@@ -1643,4 +1643,34 @@ t:case("relabels Draw/Stop and Pen/Eraser from plugin state", function()
     t:eq(bar.tool_btn.text, "Eraser", "eraser label")
 end)
 
+-- =====================================================================
+-- Canvas suites
+--
+-- The canvas is a separate story from input capture and the toolbar, and
+-- those two already make this the longest file in the plugin. Each canvas
+-- module gets its own spec file; they are handed the same runner and the
+-- same fakes, so a failure reads identically wherever it comes from.
+-- =====================================================================
+
+local ctx = {
+    t = t,
+    env = env,
+    support = support,
+    Device = Device,
+    plugin_dir = plugin_dir,
+    tests_dir = tests_dir,
+    reset = reset,
+    newPlugin = newPlugin,
+    newRealBar = newRealBar,
+    realBar = realBar,
+    realBarPlugin = realBarPlugin,
+    showDialog = showDialog,
+}
+
+for _, spec in ipairs({
+    "canvas_codec_spec",
+}) do
+    dofile(tests_dir .. "/" .. spec .. ".lua")(ctx)
+end
+
 os.exit(t:report() and 0 or 1)
