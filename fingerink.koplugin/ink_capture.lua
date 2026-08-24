@@ -160,14 +160,26 @@ end
 --[[--
 Build the feedEvent wrapper.
 
-Since ADR-13 this is an observer, not a filter: the handler gets to see the
-frame's contacts and the detector's own output is passed through untouched.
-Emptying that array could never suppress `hold` or the deferred single `tap`,
-which are produced by timer callbacks registered through `Input:setTimeout`
-(frontend/device/gesturedetector.lua:641 and :675) and dispatched straight from
-`Input:waitEvent` (frontend/device/input.lua:1584) without going through
-feedEvent at all. Suppression happens at the widget layer instead, where every
-gesture is visible. See InkBar:suppresses.
+The handler sees the frame's contacts and may return a *replacement* array;
+returning nothing passes the frame through untouched, which is what the legacy
+finger route does.
+
+Filtering here is not a way to suppress gestures in general. `hold` and the
+deferred single `tap` come from timer callbacks registered through
+`Input:setTimeout` (gesturedetector.lua:641 and :675) and are dispatched
+straight from `Input:waitEvent` (input.lua:1584) without passing through
+feedEvent at all, so emptying the array cannot stop a gesture from a contact
+that already exists. That is why the widget layer decides what reaches the
+application. See ADR-13.
+
+What removing a slot from its *very first* frame does achieve is different and
+worth having: GestureDetector never opens a Contact for it, so no hold timer is
+ever armed and no gesture is ever produced. Emitted gestures carry `ges`, `pos`
+and `time` and no slot number (gesturedetector.lua:540, :606, :1262), so a
+palm's `hold` over the book text is indistinguishable at the widget layer from
+the reader's own -- and the overlay hands gestures above the sheet to the book
+on purpose. Keeping that contact from existing is the only place the two can
+still be told apart.
 
 The wrapper stays transparent once we are no longer the installed wrapper, which
 is what makes removal safe when another plugin has chained on top of us and we
@@ -175,18 +187,48 @@ can no longer unhook cleanly.
 ]]
 function Capture:_installFeedWrapper(frame_handler)
     local original = self.original_feed
-    local handler = guard(self, frame_handler, true)
+    -- nil on failure, so a raising handler degrades to "pass the whole frame
+    -- through" rather than handing the detector something that is not a frame.
+    local handler = guard(self, frame_handler, nil)
     local wrapper
     wrapper = function(gd_self, slots)
         if not (self.active and self.feed_wrapper == wrapper) then
             return original(gd_self, slots)
         end
-        handler(slots)
-        return original(gd_self, slots)
+        local kept = handler(slots)
+        return original(gd_self, type(kept) == "table" and kept or slots)
     end
     self.feed_wrapper = wrapper
     self.feed_was_own = rawget(self.gesture_detector, "feedEvent") ~= nil
     self.gesture_detector.feedEvent = wrapper
+end
+
+--[[--
+Drop one slot's contact, and with it the hold and double-tap timers it armed.
+
+For the case a filter cannot catch: a contact-down frame that arrived without
+coordinates has already reached the detector by the time the next frame says
+where it was, and by then a Contact exists. `dropContact` is GestureDetector's
+own way to retire one, and doing it per slot rather than through
+`dropContacts()` is what leaves a finger on the toolbar alone.
+
+Returns whether anything was dropped. A runtime without the pair -- or a slot
+with no contact -- is a no-op, not an error.
+]]
+function Capture:dropContact(slot)
+    local gd = self.gesture_detector
+    if not gd or type(gd.getContact) ~= "function"
+        or type(gd.dropContact) ~= "function" then
+        return false
+    end
+    local ok, contact = pcall(gd.getContact, gd, slot)
+    if not ok or not contact then return false end
+    local dropped, err = pcall(gd.dropContact, gd, contact)
+    if not dropped then
+        logger.warn("FingerInk: could not drop contact for slot", slot, err)
+        return false
+    end
+    return true
 end
 
 --- Legacy touch capture. handler(slots) returns true to let gestures through.
