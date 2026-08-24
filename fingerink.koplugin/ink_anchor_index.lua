@@ -105,6 +105,48 @@ function Index:pageOf(canvas_id)
     return self.page_of[canvas_id]
 end
 
+--[[--
+Take in a canvas that has just been created.
+
+Placed straight away rather than left for the next rebuild, so the reader's new
+sheet is on the page it was made on immediately. It is deliberately not written
+into the layout cache: that map is saved as a whole when a build finishes, and
+a single extra row would only be a miss saved on the next open.
+]]
+function Index:add(canvas, page)
+    if self.by_id[canvas.id] then return end
+    self.canvases[#self.canvases + 1] = canvas
+    self.by_id[canvas.id] = canvas
+    if not page then
+        local xp = Anchor.resolve(self.document, canvas)
+        page = xp and self.document:getPageFromXPointer(xp)
+    end
+    if page then self:_place(canvas.id, page) end
+end
+
+--- Forget a canvas that has been deleted. Every index it appears in, so a
+--- stale id cannot come back out of a page lookup.
+function Index:forget(canvas_id)
+    local page = self.page_of[canvas_id]
+    self.page_of[canvas_id] = nil
+    self.by_id[canvas_id] = nil
+    self.derived[canvas_id] = nil
+
+    local ids = page and self.ids_by_page[page]
+    if ids then
+        for i = #ids, 1, -1 do
+            if ids[i] == canvas_id then table.remove(ids, i) end
+        end
+        if #ids == 0 then self.ids_by_page[page] = nil end
+    end
+    for i = #self.canvases, 1, -1 do
+        if self.canvases[i].id == canvas_id then table.remove(self.canvases, i) end
+    end
+    for i = #self.orphans, 1, -1 do
+        if self.orphans[i] == canvas_id then table.remove(self.orphans, i) end
+    end
+end
+
 --- Canvases whose anchor no longer resolves. Kept, never deleted: the text may
 --- come back, and a reader's notes are not ours to discard.
 function Index:orphanIds()

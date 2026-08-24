@@ -1677,6 +1677,7 @@ for _, spec in ipairs({
     "canvas_router_spec",
     "capture_filter_spec",
     "canvas_queue_spec",
+    "canvas_session_spec",
 }) do
     dofile(tests_dir .. "/" .. spec .. ".lua")(ctx)
 end

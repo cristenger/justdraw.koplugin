@@ -284,6 +284,63 @@ return function(ctx)
     end)
 
     -- =================================================================
+    t:describe("ink_anchor_index / adding and forgetting")
+
+    t:case("a new canvas is placed straight away", function()
+        local index, doc, _, sched = fixture(3)
+        index:open()
+        sched:drain()
+        doc.pages["/p9"] = 9
+        index:add({ id = 9, anchor_kind = "xpointer",
+                    anchor_raw = "/p9", anchor_normalized = "/p9" }, 9)
+        t:eq(index:pageOf(9), 9, "on the page it was made on")
+        doc.current_page = 9
+        t:eq(#index:visibleCanvases(9), 1, "and it shows up there")
+    end)
+
+    t:case("a new canvas with no page given is resolved once", function()
+        local index, doc, _, sched = fixture(3)
+        index:open()
+        sched:drain()
+        doc.pages["/p9"] = 9
+        local before = doc.resolutions
+        index:add({ id = 9, anchor_kind = "xpointer",
+                    anchor_raw = "/p9", anchor_normalized = "/p9" })
+        t:eq(doc.resolutions, before + 1, "exactly one resolution, not a rebuild")
+        t:eq(index:pageOf(9), 9, "and it lands in the right place")
+    end)
+
+    t:case("adding the same canvas twice does not duplicate it", function()
+        local index, _, _, sched = fixture(3)
+        index:open()
+        sched:drain()
+        local canvas = { id = 1, anchor_raw = "/p1", anchor_normalized = "/p1" }
+        index:add(canvas, 1)
+        t:eq(#index:visibleCanvases(1), 1, "still one")
+    end)
+
+    t:case("a deleted canvas is gone from every index", function()
+        local index, doc, _, sched = fixture(3)
+        index:open()
+        sched:drain()
+        index:forget(2)
+        t:eq(index:pageOf(2), nil, "no page")
+        t:eq(index:get(2), nil, "no metadata")
+        doc.current_page = 2
+        t:eq(#index:visibleCanvases(2), 0, "and it cannot come back out of a lookup")
+    end)
+
+    t:case("forgetting an orphan takes it off the orphan list too", function()
+        local index, doc, _, sched = fixture(3)
+        doc.pages["/p2"] = nil
+        index:open()
+        sched:drain()
+        t:eq(#index:orphanIds(), 1, "one orphan to start with")
+        index:forget(2)
+        t:eq(#index:orphanIds(), 0, "and none after it is deleted")
+    end)
+
+    -- =================================================================
     t:describe("ink_anchor_index / relayout")
 
     t:case("a rerender rebuilds the index against the new layout", function()

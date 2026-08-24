@@ -229,6 +229,20 @@ function Queue:flush()
     return true
 end
 
+--[[--
+Throw away everything pending, without writing it.
+
+For one case only: the canvas these operations belong to is being deleted.
+Writing strokes into a row that is about to disappear is work for nothing, and
+the deletes among them would then target rows that never existed.
+]]
+function Queue:discard()
+    self:_cancelTimer()
+    self.ops = {}
+    self.bytes = 0
+    self.failed = false
+end
+
 --- Try the same operations again after a failure.
 function Queue:retry()
     if #self.ops == 0 then

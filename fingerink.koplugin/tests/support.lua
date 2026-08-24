@@ -624,6 +624,14 @@ function support.newDocument(opts)
             and page < self.current_page + self.visible
     end
     function doc:getVisiblePageNumberCount() return self.visible end
+    --- y first, x second -- the same order the real one returns, which is easy
+    --- to get backwards and would put every mark at the left edge.
+    function doc:getScreenPositionFromXPointer(xp)
+        self.screen_positions = (self.screen_positions or 0) + 1
+        local page = self.pages[xp]
+        if page == nil then return nil end
+        return (page - self.current_page) * 40 + 20, 5
+    end
     function doc:getDocumentRenderingHash() return self.hash end
     function doc:getDomVersionWithNormalizedXPointers()
         return self.normalized_dom_version
@@ -743,6 +751,50 @@ function support.newCanvasStore(canvases)
     transaction, and pretending to model more than that would be a fake
     answering a question it cannot.
     ]]
+    --- The rest of the repository interface the session drives.
+    store.calls.book = 0
+    store.next_canvas_id = 100
+    store.closed = false
+    store.identity = nil
+
+    function store:bookId(partial_md5, file_size, last_path)
+        self.calls.book = self.calls.book + 1
+        if not partial_md5 or not file_size then return nil, "no_identity" end
+        self.identity = { partial_md5, file_size, last_path }
+        return 12
+    end
+
+    function store:createCanvas(book_id, spec)
+        if self.fail_create then return nil, self.fail_create end
+        for _, c in ipairs(self.canvases) do
+            if c.anchor_key == spec.anchor_key then return nil, "duplicate" end
+        end
+        self.next_canvas_id = self.next_canvas_id + 1
+        local canvas = {
+            id = self.next_canvas_id,
+            book_id = book_id,
+            anchor_kind = spec.anchor_kind,
+            anchor_key = spec.anchor_key,
+            anchor_raw = spec.anchor_raw,
+            anchor_normalized = spec.anchor_normalized,
+            anchor_dom_version = spec.anchor_dom_version,
+            logical_w = spec.logical_w,
+            logical_h = spec.logical_h,
+        }
+        self.canvases[#self.canvases + 1] = canvas
+        return canvas
+    end
+
+    function store:deleteCanvas(canvas_id)
+        for i = #self.canvases, 1, -1 do
+            if self.canvases[i].id == canvas_id then table.remove(self.canvases, i) end
+        end
+        self.strokes[canvas_id] = nil
+        return true
+    end
+
+    function store:close() self.closed = true end
+
     store.calls.transaction = 0
     store.fail_transaction = nil
     function store:transaction(fn)
