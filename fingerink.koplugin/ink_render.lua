@@ -48,4 +48,31 @@ function Render.stroke(bb, s, ox, oy, color)
     end
 end
 
+--[[--
+Replay a stroke held as a flat point array, scaled and offset.
+
+The canvas keeps its points in its own coordinates and renders them into a
+raster cache whose scale depends on the screen, so unlike `Render.stroke` the
+transform cannot be folded into the stored numbers. `ox`/`oy` are what let the
+same call paint into a viewport over a repaired region: pass the negated origin
+of the region and everything outside it is clipped by the buffer itself.
+
+Still no tables allocated, on any path.
+]]
+function Render.points(bb, points, n, scale, ox, oy, w, color)
+    if n < 1 then return end
+    if n == 1 then
+        local half = floor(w / 2)
+        bb:paintRect(floor(ox + points[1] * scale) - half,
+                     floor(oy + points[2] * scale) - half, w, w, color)
+        return
+    end
+    for i = 1, (n - 1) * 2, 2 do
+        Render.segment(bb,
+            ox + points[i] * scale,     oy + points[i + 1] * scale,
+            ox + points[i + 2] * scale, oy + points[i + 3] * scale,
+            w, color)
+    end
+end
+
 return Render

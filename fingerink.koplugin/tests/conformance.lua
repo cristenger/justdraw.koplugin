@@ -95,6 +95,48 @@ claim("WidgetContainer offers events to children before itself",
     table.concat(order, " then "))
 
 -- =====================================================================
+-- Viewport clipping, against a real BlitBuffer
+--
+-- The canvas paints live ink and repairs erased regions through
+-- `BlitBuffer:viewport`, and the whole reason that is safe is that the buffer
+-- bounds a write rather than trusting the caller's arithmetic. Clipping the
+-- refresh rectangle alone would not stop the pixels. If this ever came back as
+-- a MISMATCH, the canvas would be scribbling over the reader's text.
+-- =====================================================================
+
+do
+    local BB = require("ffi/blitbuffer")
+    local WHITE, BLACK = BB.COLOR_WHITE, BB.COLOR_BLACK
+    local canvas = BB.new(100, 100, BB.TYPE_BB8)
+    canvas:fill(WHITE)
+
+    local view = canvas:viewport(20, 20, 30, 30)
+
+    claim("BlitBuffer:viewport reports the size it was asked for",
+        true, view:getWidth() == 30 and view:getHeight() == 30,
+        view:getWidth() .. "x" .. view:getHeight())
+
+    -- A write inside the viewport lands in the parent, offset.
+    view:paintRect(0, 0, 5, 5, BLACK)
+    claim("a write inside a viewport lands in the parent at the offset",
+        true, canvas:getPixel(20, 20) == BLACK and canvas:getPixel(19, 19) == WHITE,
+        "no separate buffer is allocated")
+
+    -- A write that starts outside is clipped to the part that is inside.
+    view:paintRect(-10, -10, 12, 12, BLACK)
+    claim("a viewport clips a write that starts before its origin",
+        true, canvas:getPixel(10, 10) == WHITE,
+        "the part outside is dropped, not wrapped")
+
+    -- A write wholly past the far edge is dropped entirely.
+    view:paintRect(40, 40, 10, 10, BLACK)
+    claim("a viewport drops a write wholly past its far edge",
+        true, canvas:getPixel(60, 60) == WHITE and canvas:getPixel(99, 99) == WHITE)
+
+    canvas:free()
+end
+
+-- =====================================================================
 -- The canvas database, against real SQLite
 --
 -- tests/run.lua drives the repository through a recorder that executes

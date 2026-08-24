@@ -36,7 +36,7 @@ local function reset(input_opts)
     Device.screen.rotation = 0
     Device.screen.touch_rotation = nil
     Device.screen.refreshes = {}
-    Device.screen.bb.rects = {}
+    Device.screen.bb:clear()
     env.notifications = {}
     env.shown_messages = {}
     env.reader_events = {}
@@ -1671,6 +1671,8 @@ for _, spec in ipairs({
     "canvas_codec_spec",
     "canvas_repository_spec",
     "canvas_anchor_spec",
+    "canvas_geometry_spec",
+    "canvas_cache_spec",
 }) do
     dofile(tests_dir .. "/" .. spec .. ".lua")(ctx)
 end

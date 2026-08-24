@@ -194,6 +194,122 @@ function support.newInput(opts)
     return input
 end
 
+-- -------------------------------------------------------- fake blitbuffer
+
+--[[--
+A recording BlitBuffer.
+
+Two behaviours are modelled because the canvas depends on them, and a stub
+without them would make the clipping tests pass for the wrong reason:
+
+1. `paintRect` bounds its rectangle to the buffer and returns early when
+   nothing is left (`getBoundedRect`, blitbuffer.lua:1673 @ koreader-base).
+   That is what makes a viewport *clip* rather than merely describe a region.
+2. `viewport` is a buffer over the same memory at an offset, so a write inside
+   one lands in the parent at parent coordinates -- and a write outside one
+   lands nowhere at all.
+
+Every write is recorded twice: in `rects`, in the buffer's own coordinates, and
+in the root buffer's `writes`, in root coordinates. The second is how a test
+asks "did anything at all get painted outside the sheet".
+]]
+local FakeBB = {}
+FakeBB.__index = FakeBB
+
+local function newFakeBB(w, h, bbtype, root, ox, oy)
+    local bb = setmetatable({
+        w = w, h = h, bbtype = bbtype or 1,
+        ox = ox or 0, oy = oy or 0,
+        rects = {}, fills = {}, blits = {}, viewports = {},
+        freed = false,
+    }, FakeBB)
+    bb.root = root or bb
+    if bb.root == bb then bb.writes = {} end
+    return bb
+end
+
+function FakeBB:getWidth() return self.w end
+function FakeBB:getHeight() return self.h end
+
+--- Exactly getBoundedRect: clip to this buffer, and report nothing left over.
+function FakeBB:_bound(x, y, w, h)
+    if x < 0 then w = w + x; x = 0 end
+    if y < 0 then h = h + y; y = 0 end
+    if x + w > self.w then w = self.w - x end
+    if y + h > self.h then h = self.h - y end
+    return x, y, w, h
+end
+
+function FakeBB:paintRect(x, y, w, h, c)
+    x, y, w, h = self:_bound(x, y, w, h)
+    if w <= 0 or h <= 0 then return end
+    self.rects[#self.rects + 1] = { x = x, y = y, w = w, h = h, c = c }
+    local root = self.root
+    root.writes[#root.writes + 1] =
+        { x = x + self.ox, y = y + self.oy, w = w, h = h, c = c }
+end
+
+function FakeBB:fill(c)
+    self.fills[#self.fills + 1] = c
+    self:paintRect(0, 0, self.w, self.h, c)
+end
+
+function FakeBB:viewport(x, y, w, h)
+    local v = newFakeBB(w, h, self.bbtype, self.root, self.ox + x, self.oy + y)
+    self.viewports[#self.viewports + 1] = v
+    return v
+end
+
+function FakeBB:blitFrom(src, dest_x, dest_y, offs_x, offs_y, w, h)
+    dest_x, dest_y = dest_x or 0, dest_y or 0
+    offs_x, offs_y = offs_x or 0, offs_y or 0
+    w = w or src.w
+    h = h or src.h
+    if dest_x < 0 then w = w + dest_x; offs_x = offs_x - dest_x; dest_x = 0 end
+    if dest_y < 0 then h = h + dest_y; offs_y = offs_y - dest_y; dest_y = 0 end
+    if dest_x + w > self.w then w = self.w - dest_x end
+    if dest_y + h > self.h then h = self.h - dest_y end
+    if offs_x + w > src.w then w = src.w - offs_x end
+    if offs_y + h > src.h then h = src.h - offs_y end
+    if w <= 0 or h <= 0 then return end
+    self.blits[#self.blits + 1] = {
+        src = src, dest_x = dest_x, dest_y = dest_y,
+        offs_x = offs_x, offs_y = offs_y, w = w, h = h,
+    }
+end
+
+function FakeBB:free() self.freed = true end
+
+function FakeBB:clear()
+    self.rects, self.fills, self.blits, self.viewports = {}, {}, {}, {}
+    if self.root == self then self.writes = {} end
+end
+
+--- How many recorded writes fall wholly or partly outside a rectangle. The
+--- direct form of "nothing was painted outside the sheet".
+function FakeBB:writesOutside(x, y, w, h)
+    local n = 0
+    for _, r in ipairs(self.root.writes) do
+        if r.x < x or r.y < y or r.x + r.w > x + w or r.y + r.h > y + h then
+            n = n + 1
+        end
+    end
+    return n
+end
+
+function support.newBlitbuffer(w, h, bbtype)
+    return newFakeBB(w, h, bbtype)
+end
+
+function support.newBlitbufferModule()
+    return {
+        COLOR_BLACK = "black",
+        COLOR_WHITE = "white",
+        TYPE_BB8 = 1,
+        new = function(w, h, bbtype) return newFakeBB(w, h, bbtype or 1) end,
+    }
+end
+
 -- ------------------------------------------------------------ fake screen
 
 function support.newScreen(opts)
@@ -209,10 +325,7 @@ function support.newScreen(opts)
         w = opts.w or 600,
         h = opts.h or 800,
     }
-    screen.bb = { rects = {} }
-    function screen.bb:paintRect(x, y, w, h, c)
-        self.rects[#self.rects + 1] = { x = x, y = y, w = w, h = h, c = c }
-    end
+    screen.bb = support.newBlitbuffer(screen.w, screen.h)
     function screen:getWidth() return self.w end
     function screen:getHeight() return self.h end
     function screen:getRotationMode() return self.rotation end
@@ -552,6 +665,74 @@ function support.newCanvasStore(canvases)
         self.saves[#self.saves + 1] = { hash = hash, pages = copy }
         return true
     end
+
+    --- Strokes are held with their points attached, but `listStrokes` hands
+    --- back metadata only and `readStroke` is counted. The cache's central
+    --- promise -- that a repaint decodes nothing -- is that counter staying
+    --- still.
+    store.strokes = {}          -- [canvas_id] = { { meta..., points = {}, n = } }
+    store.next_stroke_id = 1
+    store.calls.stroke_list = 0
+    store.calls.stroke_read = 0
+
+    function store:putStroke(canvas_id, stroke)
+        local list = self.strokes[canvas_id]
+        if not list then
+            list = {}
+            self.strokes[canvas_id] = list
+        end
+        stroke.id = stroke.id or self.next_stroke_id
+        self.next_stroke_id = math.max(self.next_stroke_id, stroke.id) + 1
+        stroke.seq = stroke.seq or (#list + 1)
+        local min_x, min_y = stroke.points[1], stroke.points[2]
+        local max_x, max_y = min_x, min_y
+        for i = 2, stroke.n do
+            local x, y = stroke.points[i * 2 - 1], stroke.points[i * 2]
+            if x < min_x then min_x = x elseif x > max_x then max_x = x end
+            if y < min_y then min_y = y elseif y > max_y then max_y = y end
+        end
+        stroke.min_x, stroke.min_y = min_x, min_y
+        stroke.max_x, stroke.max_y = max_x, max_y
+        stroke.point_count = stroke.n
+        list[#list + 1] = stroke
+        return stroke.id
+    end
+
+    function store:listStrokes(canvas_id)
+        self.calls.stroke_list = self.calls.stroke_list + 1
+        local out = {}
+        for _, s in ipairs(self.strokes[canvas_id] or {}) do
+            out[#out + 1] = {
+                id = s.id, seq = s.seq, width = s.width, tool = s.tool,
+                codec = 1, point_count = s.point_count,
+                min_x = s.min_x, min_y = s.min_y, max_x = s.max_x, max_y = s.max_y,
+            }
+        end
+        table.sort(out, function(a, b) return a.seq < b.seq end)
+        return out
+    end
+
+    function store:readStroke(canvas, meta)
+        self.calls.stroke_read = self.calls.stroke_read + 1
+        for _, s in ipairs(self.strokes[canvas.id] or {}) do
+            if s.id == meta.id then return s.points, s.n end
+        end
+        return nil, "empty"
+    end
+
+    function store:addStroke(canvas, stroke)
+        return self:putStroke(canvas.id, stroke)
+    end
+
+    function store:deleteStroke(stroke_id)
+        for _, list in pairs(self.strokes) do
+            for i = #list, 1, -1 do
+                if list[i].id == stroke_id then table.remove(list, i) end
+            end
+        end
+        return true
+    end
+
     return store
 end
 
@@ -701,9 +882,8 @@ function support.install()
     package.preload["ui/uimanager"] = function() return UIManager end
     package.preload["logger"] = function() return logger end
     package.preload["gettext"] = function() return function(s) return s end end
-    package.preload["ffi/blitbuffer"] = function()
-        return { COLOR_BLACK = "black", COLOR_WHITE = "white" }
-    end
+    env.Blitbuffer = support.newBlitbufferModule()
+    package.preload["ffi/blitbuffer"] = function() return env.Blitbuffer end
     env.WidgetContainer = WidgetContainer
     package.preload["ui/widget/container/widgetcontainer"] = function() return WidgetContainer end
     package.preload["ui/widget/notification"] = function() return Notification end
