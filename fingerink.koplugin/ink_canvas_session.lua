@@ -43,7 +43,8 @@ Session.__index = Session
 local MESSAGES = {
     no_identity = _("Drawing sheets are unavailable for this book"),
     no_repository = _("Drawing sheets need a database this KOReader cannot open"),
-    save_failed = _("Could not save ink. It is still here -- try again."),
+    save_failed = _("Could not save ink. It is still here: use Retry saving."),
+    save_retried = _("Ink saved"),
     indexing = _("Still indexing this book's sheets"),
 }
 
@@ -437,6 +438,21 @@ end
 function Session:flush()
     if not self.queue then return true end
     return self.queue:flush()
+end
+
+--- True while a write has failed and the work is still in memory. Editing is
+--- refused until a retry succeeds, so this has to be reachable from the menu.
+function Session:saveFailed()
+    return self.queue ~= nil and self.queue:isFailed()
+end
+
+--- Try the failed write again. The operations are unchanged, so this is simply
+--- the same transaction a second time.
+function Session:retrySave()
+    if not self.queue then return true end
+    local ok, err = self.queue:retry()
+    if ok then self.notify(MESSAGES.save_retried) end
+    return ok, err
 end
 
 function Session:_transform(canvas, sheet_top)

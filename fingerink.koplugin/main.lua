@@ -1536,6 +1536,18 @@ function FingerInk:canvasMenu()
         }
     end
 
+    if self.session:saveFailed() then
+        -- Editing is refused until this succeeds, so it has to be the first
+        -- thing here and it has to say what state the ink is in.
+        items[#items + 1] = {
+            text = _("Retry saving ink"),
+            keep_menu_open = true,
+            separator = true,
+            help_text = _([[A write to the sheet database failed. Nothing has been lost -- the strokes are still in memory -- but they are not durable until this succeeds, and no more can be drawn until it does.]]),
+            callback = function() self.session:retrySave() end,
+        }
+    end
+
     local here = self.session:canvasesHere(self:currentPage())
     if #here > 1 then
         local sub = {}

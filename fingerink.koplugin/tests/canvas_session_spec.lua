@@ -434,6 +434,51 @@ return function(ctx)
         t:eq(session:pendingWrites(), 1, "and the work is still in hand")
     end)
 
+    t:case("a failed save can be retried, and says so when it works", function()
+        local session, store, sched, _, notes = openedSession{
+            canvases = { canvasAt(1, "/p1") }, pages = { ["/p1"] = 3 },
+        }
+        session:openCanvas(session:canvasById(1))
+        sched:drain()
+        session:addStroke({ 10, 10, 20, 20 }, 2, 4, 1)
+        store.fail_transaction = "begin"
+        session:flush()
+        t:eq(session:saveFailed(), true, "stuck, and it knows")
+
+        store.fail_transaction = nil
+        local before = #notes
+        t:eq(session:retrySave(), true, "the retry works")
+        t:eq(session:saveFailed(), false, "and it is unstuck")
+        t:eq(#store.strokes[1], 1, "the stroke is durable now")
+        t:check(#notes > before, "and the reader is told it worked")
+    end)
+
+    t:case("a retry that fails again leaves the ink in hand", function()
+        local session, store, sched = openedSession{
+            canvases = { canvasAt(1, "/p1") }, pages = { ["/p1"] = 3 },
+        }
+        session:openCanvas(session:canvasById(1))
+        sched:drain()
+        session:addStroke({ 10, 10, 20, 20 }, 2, 4, 1)
+        store.fail_transaction = "begin"
+        session:flush()
+        session:retrySave()
+        t:eq(session:saveFailed(), true, "still stuck")
+        t:eq(session:pendingWrites(), 1, "and still holding the work")
+    end)
+
+    t:case("turning a page does not change which sheet is open", function()
+        -- Reading elsewhere while writing is the point of pinning the sheet.
+        local session, _, sched = openedSession{
+            canvases = { canvasAt(1, "/p1"), canvasAt(2, "/p2") },
+            pages = { ["/p1"] = 3, ["/p2"] = 9 },
+        }
+        session:openCanvas(session:canvasById(1))
+        sched:drain()
+        session:setPage(9)
+        t:eq(session:activeCanvas().id, 1, "the sheet stays put")
+    end)
+
     t:case("closing twice is harmless", function()
         local session = openedSession()
         session:close()
