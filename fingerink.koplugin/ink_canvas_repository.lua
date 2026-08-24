@@ -135,6 +135,11 @@ local function str(v)
     return tostring(v)
 end
 
+local function finite(v)
+    return type(v) == "number" and v == v
+        and v ~= math.huge and v ~= -math.huge
+end
+
 --- Byte-for-byte copy, used before a migration. Deliberately not a rename: the
 --- point is that the original is still there if the migration goes wrong.
 local function copyFile(src, dest)
@@ -205,7 +210,7 @@ function Repository.open(opts)
         depth = 0,
     }, Repository)
 
-    local conn, err = self:_connect()
+    local conn, err = self:_connect("rwc")
     if not conn then return nil, err end
 
     local ok, version = pcall(function()
@@ -218,6 +223,8 @@ function Repository.open(opts)
     end
 
     if version == 0 then
+        local configured, config_err = self:_configureWritable()
+        if not configured then self:_disconnect(); return nil, config_err end
         local created, cerr = self:_createSchema()
         if not created then
             self:_disconnect()
@@ -226,26 +233,33 @@ function Repository.open(opts)
     elseif version > self.target then
         -- A newer FingerInk wrote this. Reading it is fine; writing to it with
         -- an older understanding of the schema is how notes get lost.
+        self:_disconnect()
+        local readonly, ro_err = self:_connect("ro")
+        if not readonly then return nil, ro_err end
         self.read_only = true
         self.read_only_reason = "canvas database is newer than this plugin"
         self.version = version
         logger.warn("FingerInk: canvas database is version", version,
             "but this plugin knows", self.target, "- opening read-only")
     elseif version < self.target then
+        local configured, config_err = self:_configureWritable()
+        if not configured then self:_disconnect(); return nil, config_err end
         local migrated, merr = self:_migrate(version)
         if not migrated then
             self:_disconnect()
             return nil, merr
         end
     else
+        local configured, config_err = self:_configureWritable()
+        if not configured then self:_disconnect(); return nil, config_err end
         self.version = version
     end
 
     return self
 end
 
-function Repository:_connect()
-    local ok, conn = pcall(self.driver.open, self.path)
+function Repository:_connect(mode)
+    local ok, conn = pcall(self.driver.open, self.path, mode or "rwc")
     if not ok or not conn then
         logger.err("FingerInk: cannot open the canvas database:", conn)
         return nil, "open_failed"
@@ -254,10 +268,6 @@ function Repository:_connect()
 
     local pragmas_ok, perr = pcall(function()
         conn:exec("PRAGMA foreign_keys=ON;")
-        -- Never synchronous=OFF: the whole point of leaving the sidecar was
-        -- durability, and a corrupt database loses more than a slow one.
-        conn:exec(self.wal and "PRAGMA journal_mode=WAL;"
-                            or "PRAGMA journal_mode=TRUNCATE;")
     end)
     if not pragmas_ok then
         logger.err("FingerInk: cannot configure the canvas database:", perr)
@@ -267,6 +277,20 @@ function Repository:_connect()
     return conn
 end
 
+function Repository:_configureWritable()
+    local ok, err = pcall(function()
+        -- Never synchronous=OFF: the whole point of leaving the sidecar was
+        -- durability, and a corrupt database loses more than a slow one.
+        self.conn:exec(self.wal and "PRAGMA journal_mode=WAL;"
+                                or "PRAGMA journal_mode=TRUNCATE;")
+    end)
+    if not ok then
+        logger.err("FingerInk: cannot configure the canvas database:", err)
+        return nil, "open_failed"
+    end
+    return true
+end
+
 --- Drop the connection without marking the repository permanently closed.
 function Repository:_disconnect()
     if self.conn then pcall(self.conn.close, self.conn) end
@@ -274,11 +298,26 @@ function Repository:_disconnect()
 end
 
 function Repository:_createSchema()
+    local partial, partial_err = self:_select([[
+        SELECT name FROM sqlite_master
+         WHERE type = 'table' AND name NOT LIKE 'sqlite_%';]], nil,
+        function(row) return str(row[1]) end)
+    if not partial then return nil, partial_err end
+    if #partial > 0 then
+        logger.err("FingerInk: schema version is zero but tables already exist")
+        return nil, "schema_failed"
+    end
+
+    local began = false
     local ok, err = pcall(function()
+        self.conn:exec("BEGIN;")
+        began = true
         self.conn:exec(Repository.SCHEMA)
         self.conn:exec(string.format("PRAGMA user_version=%d;", self.target))
+        self.conn:exec("COMMIT;")
     end)
     if not ok then
+        if began then pcall(self.conn.exec, self.conn, "ROLLBACK;") end
         logger.err("FingerInk: cannot create the canvas schema:", err)
         return nil, "schema_failed"
     end
@@ -304,7 +343,18 @@ function Repository:_migrate(from)
     end
 
     if self.wal then
-        pcall(self.conn.exec, self.conn, "PRAGMA wal_checkpoint(TRUNCATE);")
+        local checkpointed, busy, log_frames, done_frames = pcall(
+            self.conn.rowexec, self.conn, "PRAGMA wal_checkpoint(TRUNCATE);")
+        local busy_n = tonumber(busy)
+        local log_n = tonumber(log_frames)
+        local done_n = tonumber(done_frames)
+        if not checkpointed or busy_n == nil or log_n == nil or done_n == nil
+            or busy_n ~= 0
+            or not ((log_n == -1 and done_n == -1) or log_n == done_n) then
+            logger.err("FingerInk: canvas WAL checkpoint did not complete:",
+                checkpointed and busy or log_frames)
+            return nil, "migration_checkpoint_failed"
+        end
     end
     self:_disconnect()
 
@@ -316,8 +366,10 @@ function Repository:_migrate(from)
     end
     logger.info("FingerInk: canvas database backed up to", dest)
 
-    local conn, oerr = self:_connect()
+    local conn, oerr = self:_connect("rwc")
     if not conn then return nil, oerr end
+    local configured, config_err = self:_configureWritable()
+    if not configured then return nil, config_err end
 
     local ok, err = pcall(function()
         conn:exec("BEGIN;")
@@ -458,6 +510,20 @@ end
 
 -- ------------------------------------------------------------------- books
 
+--- Find a book without updating last_path or creating a row. This is the only
+--- identity operation allowed when a newer schema is open read-only.
+function Repository:findBookId(partial_md5, file_size)
+    local ready, reason = self:_ready(false)
+    if not ready then return nil, reason end
+    if not partial_md5 or not file_size then return nil, "no_identity" end
+    local found, err = self:_select(
+        "SELECT id FROM books WHERE partial_md5 = ?1 AND file_size = ?2;",
+        { partial_md5, file_size }, function(row) return num(row[1]) end)
+    if not found then return nil, err end
+    if not found[1] then return nil, "not_found" end
+    return found[1]
+end
+
 --[[--
 The row id for a book, creating it if this is the first time.
 
@@ -543,7 +609,9 @@ function Repository:createCanvas(book_id, spec)
         return nil, "no_anchor"
     end
     local w, h = tonumber(spec.logical_w), tonumber(spec.logical_h)
-    if not w or not h or w <= 0 or h <= 0 then return nil, "bad_geometry" end
+    if not finite(w) or not finite(h) or w <= 0 or h <= 0 then
+        return nil, "bad_geometry"
+    end
 
     local kind = spec.anchor_kind or "xpointer"
     local now = self.now()
@@ -613,9 +681,9 @@ function Repository:addStroke(canvas, stroke)
     if not ready then return nil, reason end
 
     local n = tonumber(stroke.n) or 0
-    local chunks, cerr = Codec.encode(stroke.points, n, canvas.logical_w, canvas.logical_h)
-    if not chunks then return nil, cerr end
-
+    local valid, validation_err = Codec.validate(stroke.points, n,
+        canvas.logical_w, canvas.logical_h)
+    if not valid then return nil, validation_err end
     local min_x, min_y = stroke.points[1], stroke.points[2]
     local max_x, max_y = min_x, min_y
     for i = 2, n do
@@ -642,15 +710,19 @@ function Repository:addStroke(canvas, stroke)
         local id, ierr = self:_lastId()
         if not id then return nil, ierr end
 
-        for i = 1, #chunks do
-            -- The cast is what makes this a blob rather than a TEXT value that
-            -- SQL would read as one byte long.
-            local cok, cerr2 = self:_run([[
+        local encoded, eerr = Codec.eachEncodedChunk(stroke.points, n,
+            canvas.logical_w, canvas.logical_h,
+            function(chunk_no, point_count, blob)
+                -- The cast is what makes this a blob rather than a TEXT value
+                -- that SQL would read as one byte long.
+                local cok, cerr2 = self:_run([[
                 INSERT INTO stroke_chunks (stroke_id, chunk_no, point_count, points)
                 VALUES (?1, ?2, ?3, CAST(?4 AS BLOB));]],
-                { id, i - 1, chunks[i].point_count, chunks[i].points })
-            if not cok then return nil, cerr2 end
-        end
+                    { id, chunk_no, point_count, blob })
+                if not cok then return nil, cerr2 end
+                return true
+            end)
+        if not encoded then return nil, eerr end
         return id
     end)
 end
@@ -680,23 +752,83 @@ function Repository:listStrokes(canvas_id)
 end
 
 --[[--
-Decode one stroke's points. The only call in this file that reads a blob.
+Stream one stroke's chunk rows without materialising the complete payload.
 
 `CAST(points AS TEXT)` is the other half of the blob story: it hands the driver
 a value it returns as a Lua string, rather than a pointer the caller would have
 to reach into with FFI.
 ]]
-function Repository:readStroke(canvas, meta)
+function Repository:openStrokeCursor(stroke_id)
     local ready, reason = self:_ready(false)
     if not ready then return nil, reason end
-    local chunks, err = self:_select([[
+    local stmt
+    local ok, err = pcall(function()
+        stmt = self.conn:prepare([[
         SELECT chunk_no, point_count, CAST(points AS TEXT)
-          FROM stroke_chunks WHERE stroke_id = ?1 ORDER BY chunk_no;]],
-        { meta.id },
+          FROM stroke_chunks WHERE stroke_id = ?1 ORDER BY chunk_no;]])
+        stmt:bind(stroke_id)
+    end)
+    if not ok then
+        if stmt then pcall(stmt.close, stmt) end
+        logger.err("FingerInk: cannot open canvas stroke cursor:", err)
+        return nil, tostring(err)
+    end
+
+    local cursor = { stmt = stmt, closed = false }
+    function cursor:close()
+        if self.closed then return true end
+        self.closed = true
+        local closed, cerr = pcall(self.stmt.close, self.stmt)
+        self.stmt = nil
+        if not closed then return nil, tostring(cerr) end
+        return true
+    end
+    function cursor:next()
+        if self.closed then return nil, "closed" end
+        local stepped, row = pcall(self.stmt.step, self.stmt)
+        if not stepped then
+            self:close()
+            return nil, tostring(row)
+        end
+        if not row then
+            local closed, close_err = self:close()
+            if not closed then return nil, close_err end
+            return nil, nil, true
+        end
+        return {
+            chunk_no = num(row[1]),
+            point_count = num(row[2]),
+            points = row[3],
+        }
+    end
+    return cursor
+end
+
+function Repository:readStrokeChunk(stroke_id, chunk_no)
+    local ready, reason = self:_ready(false)
+    if not ready then return nil, reason end
+    local rows, err = self:_select([[
+        SELECT chunk_no, point_count, CAST(points AS TEXT)
+          FROM stroke_chunks WHERE stroke_id = ?1 AND chunk_no = ?2;]],
+        { stroke_id, chunk_no },
         function(row)
             return { chunk_no = num(row[1]), point_count = num(row[2]), points = row[3] }
         end)
-    if not chunks then return nil, err end
+    if not rows then return nil, err end
+    if not rows[1] then return nil, "missing_chunk" end
+    return rows[1]
+end
+
+function Repository:readStroke(canvas, meta)
+    local cursor, err = self:openStrokeCursor(meta.id)
+    if not cursor then return nil, err end
+    local chunks = {}
+    while true do
+        local row, rerr, done = cursor:next()
+        if rerr then return nil, rerr end
+        if done then break end
+        chunks[#chunks + 1] = row
+    end
     return Codec.join(chunks, canvas.logical_w, canvas.logical_h)
 end
 
@@ -731,38 +863,49 @@ function Repository:layoutPages(book_id, layout_hash)
 end
 
 --[[--
-Store a resolved page map and prune everything but the two newest layouts of
-this book.
+Store one bounded resolved-page batch. The final batch also prunes everything
+but the two newest layouts of this book. Direct callers that omit `finalize`
+retain the original whole-map behaviour.
 
 Two, not one: trying a font size and going back should not throw away the index
 that was just built. More than two would let a table of derived data grow with
 every typography experiment the reader ever makes.
 ]]
-function Repository:saveLayoutPages(book_id, layout_hash, pages)
+function Repository:saveLayoutPages(book_id, layout_hash, pages, finalize)
     local ready, reason = self:_ready(true)
     if not ready then return nil, reason end
-    if next(pages) == nil then return true end
+    if next(pages) == nil and finalize == nil then return true end
+    if finalize == nil then finalize = true end
+    if next(pages) == nil and not finalize then return true end
 
     local now = self.now()
     return self:transaction(function()
-        for canvas_id, page in pairs(pages) do
-            local ok, err = self:_run([[
+        local stmt
+        local written, write_err = pcall(function()
+            stmt = self.conn:prepare([[
                 INSERT OR REPLACE INTO canvas_layout_cache
                     (canvas_id, book_id, layout_hash, resolved_page, updated_at)
-                VALUES (?1, ?2, ?3, ?4, ?5);]],
-                { canvas_id, book_id, layout_hash, page, now })
-            if not ok then return nil, err end
+                VALUES (?1, ?2, ?3, ?4, ?5);]])
+            for canvas_id, page in pairs(pages) do
+                stmt:reset():bind(canvas_id, book_id, layout_hash, page, now):step()
+            end
+        end)
+        if stmt then pcall(stmt.close, stmt) end
+        if not written then return nil, tostring(write_err) end
+
+        if finalize then
+            return self:_run([[
+                DELETE FROM canvas_layout_cache
+                 WHERE book_id = ?1
+                   AND layout_hash NOT IN (
+                       SELECT layout_hash FROM canvas_layout_cache
+                        WHERE book_id = ?1
+                        GROUP BY layout_hash
+                        ORDER BY MAX(updated_at) DESC
+                        LIMIT 2);]],
+                { book_id })
         end
-        return self:_run([[
-            DELETE FROM canvas_layout_cache
-             WHERE book_id = ?1
-               AND layout_hash NOT IN (
-                   SELECT layout_hash FROM canvas_layout_cache
-                    WHERE book_id = ?1
-                    GROUP BY layout_hash
-                    ORDER BY MAX(updated_at) DESC
-                    LIMIT 2);]],
-            { book_id })
+        return true
     end)
 end
 

@@ -13,11 +13,10 @@ tells us the session might be about to end.
 missed its chance. The normal close order emits `SaveSettings` too, before
 DocSettings is flushed and the document closed.
 
-Strokes are addressed by a *local* id from the moment they are drawn, because
-the row id does not exist until the insert runs. That is what lets an undo of a
-still-pending stroke delete its queued insert instead of writing the stroke and
-then deleting it, and it means nothing in memory has to learn a new identity
-half way through a session.
+Strokes start with a negative *local* id because the row id does not exist until
+the insert commits. That lets an undo of a still-pending stroke withdraw its
+queued insert. After COMMIT, `on_persisted` atomically teaches the cache the
+positive SQLite id; reopened strokes already use that positive identity.
 
 A failure loses nothing. The queue is kept exactly as it was, further editing
 is refused, and the caller is told once so it can offer a retry. Nothing is
@@ -47,6 +46,7 @@ end
   opts.schedule    function(delay_seconds, fn) -- UIManager:scheduleIn
   opts.unschedule  function(fn)                -- UIManager:unschedule
   opts.on_error    function(reason), called once per failed flush
+  opts.on_persisted function(local_id, row_id), after the transaction commits
 ]]
 function Queue.new(opts)
     return setmetatable({
@@ -54,6 +54,7 @@ function Queue.new(opts)
         schedule = opts.schedule,
         unschedule = opts.unschedule,
         on_error = opts.on_error,
+        on_persisted = opts.on_persisted,
         max_ops = opts.max_ops or FLUSH_OPS,
         max_bytes = opts.max_bytes or FLUSH_BYTES,
         delay = opts.delay or FLUSH_DELAY,
@@ -83,6 +84,12 @@ end
 --- The row id a local id ended up with, or nil while it is still pending.
 function Queue:realId(local_id)
     return self.real[local_id]
+end
+
+--- Release a fallback mapping after the cache reconciled an insert that was
+--- flushed synchronously before `Session:addStroke` could register it.
+function Queue:forgetReal(local_id, row_id)
+    if self.real[local_id] == row_id then self.real[local_id] = nil end
 end
 
 -- ------------------------------------------------------------------ queuing
@@ -121,13 +128,13 @@ and deleting it again would be two round trips for nothing, and would leave a
 row id in the log that never meant anything. One already written gets a delete
 keyed by the row it actually created.
 ]]
-function Queue:removeStroke(canvas, local_id)
+function Queue:removeStroke(canvas, id)
     if self.closed then return nil, "closed" end
     if self.failed then return nil, "failed" end
 
     for i = #self.ops, 1, -1 do
         local op = self.ops[i]
-        if op.kind == "insert" and op.local_id == local_id then
+        if op.kind == "insert" and op.local_id == id then
             table.remove(self.ops, i)
             self.bytes = self.bytes - estimateBytes(op.stroke.n)
             if self.bytes < 0 then self.bytes = 0 end
@@ -136,11 +143,18 @@ function Queue:removeStroke(canvas, local_id)
         end
     end
 
-    if not self.real[local_id] then return true end
+    local row_id
+    if id > 0 then
+        row_id = id
+    else
+        row_id = self.real[id]
+    end
+    if not row_id then return nil, "unknown_stroke" end
     self.ops[#self.ops + 1] = {
         kind = "delete",
         canvas = canvas,
-        local_id = local_id,
+        local_id = id < 0 and id or nil,
+        row_id = row_id,
     }
     self:_afterChange()
     return true
@@ -182,7 +196,11 @@ running the same operations again.
 ]]
 function Queue:flush()
     self:_cancelTimer()
-    if #self.ops == 0 then return true end
+    if #self.ops == 0 then
+        self.failed = false
+        self.error = nil
+        return true
+    end
 
     local ops = self.ops
     local assigned = {}
@@ -195,11 +213,8 @@ function Queue:flush()
                 if not id then return nil, e or "insert failed" end
                 assigned[#assigned + 1] = { op.local_id, id }
             else
-                local row = self.real[op.local_id]
-                if row then
-                    local done, e = self.repository:deleteStroke(row)
-                    if not done then return nil, e or "delete failed" end
-                end
+                local done, e = self.repository:deleteStroke(op.row_id)
+                if not done then return nil, e or "delete failed" end
             end
         end
         return true
@@ -217,13 +232,34 @@ function Queue:flush()
 
     logger.dbg("FingerInk: canvas commit,", #ops, "operations,", self.bytes, "bytes")
     for i = 1, #assigned do
-        self.real[assigned[i][1]] = assigned[i][2]
+        local local_id, row_id = assigned[i][1], assigned[i][2]
+        -- Keep the map only when the insert committed before the cache knew
+        -- the temporary id. In the normal path the callback rekeys the cache
+        -- immediately and retaining one entry per stroke would leak for the
+        -- whole document session.
+        local reconciled = false
+        if self.on_persisted then
+            local notified, result, nerr = pcall(self.on_persisted,
+                local_id, row_id)
+            if not notified then
+                logger.err("FingerInk: could not reconcile a persisted canvas stroke:", result)
+            elseif result then
+                reconciled = true
+            elseif nerr and nerr ~= "unknown_stroke" then
+                logger.err("FingerInk: could not reconcile a persisted canvas stroke:", nerr)
+            end
+        end
+        if not reconciled then self.real[local_id] = row_id end
     end
     for i = #ops, 1, -1 do
-        if ops[i].kind == "delete" then self.real[ops[i].local_id] = nil end
+        if ops[i].kind == "delete" and ops[i].local_id then
+            self.real[ops[i].local_id] = nil
+        end
     end
     self.ops = {}
     self.bytes = 0
+    self.failed = false
+    self.error = nil
     return true
 end
 
@@ -238,6 +274,7 @@ function Queue:discard()
     self:_cancelTimer()
     self.ops = {}
     self.bytes = 0
+    self.real = {}
     self.failed = false
 end
 
@@ -264,8 +301,8 @@ function Queue:close()
     if self.closed then return true end
     local ok, err = self:flush()
     self:_cancelTimer()
-    self.closed = true
     if not ok then return nil, err end
+    self.closed = true
     return true
 end
 

@@ -492,6 +492,7 @@ function FakeConn:rowexec(sql)
     end
     local rows = maybeInt64(self, scriptedRows(self, sql))
     local first = rows and rows[1]
+    if not first and sql:find("wal_checkpoint") then return 0, 0, 0 end
     if not first then return nil end
     return unpack(first)
 end
@@ -556,8 +557,8 @@ opts.fail_on  - Lua pattern; any statement matching it raises
 ]]
 function support.newSqlDriver(opts)
     opts = opts or {}
-    local driver = { opened = {}, conns = {} }
-    function driver.open(path)
+    local driver = { opened = {}, modes = {}, conns = {} }
+    function driver.open(path, mode)
         local conn = setmetatable({
             path = path,
             log = {},
@@ -569,6 +570,7 @@ function support.newSqlDriver(opts)
             fail_on = opts.fail_on,
         }, FakeConn)
         driver.opened[#driver.opened + 1] = path
+        driver.modes[#driver.modes + 1] = mode
         driver.conns[#driver.conns + 1] = conn
         if opts.on_open then opts.on_open(conn) end
         return conn
@@ -666,6 +668,7 @@ function support.newCanvasStore(canvases)
     }
     function store:listCanvases()
         self.calls.list = self.calls.list + 1
+        if self.fail_list_canvases then return nil, self.fail_list_canvases end
         -- A fresh array, the way the real repository builds one per query.
         -- Handing out the live table lets a caller that appends to the result
         -- quietly grow the store, which is a bug the fake would then hide.
@@ -677,12 +680,16 @@ function support.newCanvasStore(canvases)
         self.calls.read = self.calls.read + 1
         return self.layouts[hash] or {}
     end
-    function store:saveLayoutPages(_, hash, pages)
+    function store:saveLayoutPages(_, hash, pages, finalize)
         self.calls.save = self.calls.save + 1
         local copy = {}
         for id, page in pairs(pages) do copy[id] = page end
-        self.layouts[hash] = copy
-        self.saves[#self.saves + 1] = { hash = hash, pages = copy }
+        local layout = self.layouts[hash]
+        if not layout then layout = {}; self.layouts[hash] = layout end
+        for id, page in pairs(copy) do layout[id] = page end
+        self.saves[#self.saves + 1] = {
+            hash = hash, pages = copy, finalize = finalize == true,
+        }
         return true
     end
 
@@ -694,6 +701,7 @@ function support.newCanvasStore(canvases)
     store.next_stroke_id = 1
     store.calls.stroke_list = 0
     store.calls.stroke_read = 0
+    store.calls.stroke_chunk = 0
 
     function store:putStroke(canvas_id, stroke)
         local list = self.strokes[canvas_id]
@@ -720,6 +728,7 @@ function support.newCanvasStore(canvases)
 
     function store:listStrokes(canvas_id)
         self.calls.stroke_list = self.calls.stroke_list + 1
+        if self.fail_stroke_list then return nil, self.fail_stroke_list end
         local out = {}
         for _, s in ipairs(self.strokes[canvas_id] or {}) do
             out[#out + 1] = {
@@ -740,6 +749,89 @@ function support.newCanvasStore(canvases)
         return nil, "empty"
     end
 
+    local Codec = require("ink_canvas_codec")
+    function store:openStrokeCursor(stroke_id)
+        self.calls.stroke_read = self.calls.stroke_read + 1
+        if self.fail_stroke_cursor then return nil, self.fail_stroke_cursor end
+        local found, found_canvas_id
+        for canvas_id, list in pairs(self.strokes) do
+            for _, s in ipairs(list) do
+                if s.id == stroke_id then found = s; found_canvas_id = canvas_id; break end
+            end
+            if found then break end
+        end
+        if not found then return nil, "empty" end
+        local logical_w, logical_h = 1860, 2480
+        for _, canvas in ipairs(self.canvases) do
+            if canvas.id == found_canvas_id then
+                logical_w, logical_h = canvas.logical_w, canvas.logical_h
+                break
+            end
+        end
+        local valid, err = Codec.validate(found.points, found.n,
+            logical_w, logical_h)
+        if not valid then return nil, err end
+        local at, closed = 0, false
+        local owner = self
+        local function chunkAt(chunk_no)
+            local first
+            if chunk_no == 0 then first = 1
+            else first = chunk_no * (Codec.MAX_POINTS - 1) + 1 end
+            if first > found.n then return nil end
+            local last = math.min(first + Codec.MAX_POINTS - 1, found.n)
+            local part = {}
+            for i = first, last do
+                part[#part + 1] = found.points[i * 2 - 1]
+                part[#part + 1] = found.points[i * 2]
+            end
+            local chunks, encode_err = Codec.encode(part, last - first + 1,
+                logical_w, logical_h)
+            if not chunks then return nil, encode_err end
+            return chunks[1]
+        end
+        return {
+            next = function(cursor)
+                if closed then return nil, "closed" end
+                local chunk, chunk_err = chunkAt(at)
+                if chunk_err then closed = true; return nil, chunk_err end
+                if not chunk then
+                    closed = true
+                    if owner.fail_stroke_cursor_close then
+                        return nil, owner.fail_stroke_cursor_close
+                    end
+                    return nil, nil, true
+                end
+                owner.calls.stroke_chunk = owner.calls.stroke_chunk + 1
+                if owner.fail_stroke_chunk == at then
+                    closed = true
+                    return nil, "chunk failed"
+                end
+                local row = { chunk_no = at, point_count = chunk.point_count,
+                    points = chunk.points }
+                at = at + 1
+                return row
+            end,
+            close = function(cursor)
+                closed = true
+                if owner.fail_stroke_cursor_close then
+                    return nil, owner.fail_stroke_cursor_close
+                end
+                return true
+            end,
+        }
+    end
+
+    function store:readStrokeChunk(stroke_id, chunk_no)
+        local cursor, err = self:openStrokeCursor(stroke_id)
+        if not cursor then return nil, err end
+        while true do
+            local row, rerr, done = cursor:next()
+            if rerr then return nil, rerr end
+            if done then return nil, "missing_chunk" end
+            if row.chunk_no == chunk_no then cursor:close(); return row end
+        end
+    end
+
     function store:addStroke(canvas, stroke)
         return self:putStroke(canvas.id, stroke)
     end
@@ -756,12 +848,11 @@ function support.newCanvasStore(canvases)
     store.deleted = {}
 
     --[[--
-    A transaction that really does undo appends.
+    A transaction that restores inserts and deletes.
 
-    Set `fail_transaction` to "begin" to refuse before the body runs. Only
-    appends are rolled back -- the queue never deletes and inserts in one
-    transaction, and pretending to model more than that would be a fake
-    answering a question it cannot.
+    Queue may mix a persisted DELETE with a new INSERT in one flush, so a fake
+    that only truncates appended rows would let retry and atomicity tests pass
+    while leaving the deletion applied.
     ]]
     --- The rest of the repository interface the session drives.
     store.calls.book = 0
@@ -798,6 +889,7 @@ function support.newCanvasStore(canvases)
     end
 
     function store:deleteCanvas(canvas_id)
+        if self.fail_delete_canvas then return nil, self.fail_delete_canvas end
         for i = #self.canvases, 1, -1 do
             if self.canvases[i].id == canvas_id then table.remove(self.canvases, i) end
         end
@@ -805,7 +897,10 @@ function support.newCanvasStore(canvases)
         return true
     end
 
-    function store:touchCanvas() return true end
+    function store:touchCanvas()
+        if self.fail_touch then return nil, self.fail_touch end
+        return true
+    end
 
     function store:close() self.closed = true end
 
@@ -814,12 +909,22 @@ function support.newCanvasStore(canvases)
     function store:transaction(fn)
         self.calls.transaction = self.calls.transaction + 1
         if self.fail_transaction == "begin" then return nil, "cannot begin" end
-        local counts = {}
-        for cid, list in pairs(self.strokes) do counts[cid] = #list end
+        local before = {}
+        for cid, list in pairs(self.strokes) do
+            before[cid] = {}
+            for i = 1, #list do before[cid][i] = list[i] end
+        end
+        local next_id = self.next_stroke_id
+        local deleted_count = #self.deleted
         local ok, res, err = pcall(fn, self)
+        if self.fail_transaction == "commit" then
+            ok, res, err = true, nil, "cannot commit"
+        end
         if not ok or res == nil then
-            for cid, list in pairs(self.strokes) do
-                for i = #list, (counts[cid] or 0) + 1, -1 do table.remove(list, i) end
+            self.strokes = before
+            self.next_stroke_id = next_id
+            for i = #self.deleted, deleted_count + 1, -1 do
+                table.remove(self.deleted, i)
             end
             return nil, ok and err or res
         end

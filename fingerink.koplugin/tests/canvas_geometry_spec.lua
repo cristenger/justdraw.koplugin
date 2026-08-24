@@ -169,6 +169,12 @@ return function(ctx)
         }
         t:eq(tr, nil, "refused")
         t:eq(err, "bad_geometry", "with a reason")
+        local infinite, ierr = Transform.new{
+            logical_w = math.huge, logical_h = 100,
+            screen_w = 100, screen_h = 100, sheet_top = 0,
+        }
+        t:eq(infinite, nil, "infinite geometry is refused too")
+        t:eq(ierr, "bad_geometry", "before NaN reaches a raster size")
     end)
 
     -- =================================================================

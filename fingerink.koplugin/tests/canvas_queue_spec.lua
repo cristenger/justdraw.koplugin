@@ -52,6 +52,7 @@ return function(ctx)
                 unscheduled[#unscheduled + 1] = fn
             end,
             on_error = function(err) errors[#errors + 1] = err end,
+            on_persisted = opts.on_persisted,
         }
         return queue, store, sched, { errors = errors, scheduled = scheduled,
                                       unscheduled = unscheduled }
@@ -174,6 +175,49 @@ return function(ctx)
             "so the cache never has to learn a new identity mid-session")
     end)
 
+    t:case("a reconciled durable id is not retained for the whole session", function()
+        local queue, store = fixture{
+            on_persisted = function() return true end,
+        }
+        local id = queue:addStroke(CANVAS, stroke(4, 1))
+        queue:flush()
+        t:eq(queue:realId(id), nil, "the cache owns the positive id now")
+        t:eq(strokeCount(store), 1, "the row itself is still durable")
+    end)
+
+    t:case("a persisted id loaded in this session deletes without a local map", function()
+        local queue, store = fixture()
+        local row_id = store:putStroke(CANVAS.id, stroke(4, 1))
+        t:eq(queue:removeStroke(CANVAS, row_id), true, "delete accepted")
+        queue:flush()
+        t:eq(store.deleted[1], row_id, "the positive row id is used directly")
+        t:eq(strokeCount(store), 0, "and the loaded stroke is gone")
+    end)
+
+    t:case("an unknown temporary id is an error, not a successful no-op", function()
+        local queue = fixture()
+        local ok, err = queue:removeStroke(CANVAS, -999)
+        t:eq(ok, nil, "not accepted")
+        t:eq(err, "unknown_stroke", "the cache cannot pretend it was deleted")
+    end)
+
+    t:case("the durable id is published only after the transaction succeeds", function()
+        local assigned = {}
+        local queue, store = fixture{
+            on_persisted = function(local_id, row_id)
+                assigned[#assigned + 1] = { local_id, row_id }
+            end,
+        }
+        local local_id = queue:addStroke(CANVAS, stroke(4, 1))
+        store.fail_transaction = "begin"
+        queue:flush()
+        t:eq(#assigned, 0, "a failed transaction publishes nothing")
+        store.fail_transaction = nil
+        queue:retry()
+        t:eq(assigned[1][1], local_id, "local id")
+        t:eq(assigned[1][2], store.strokes[1][1].id, "SQLite id")
+    end)
+
     -- =================================================================
     t:describe("ink_canvas_queue / failure")
 
@@ -228,6 +272,35 @@ return function(ctx)
         t:eq(queue:isFailed(), false, "and the queue is usable again")
     end)
 
+    t:case("an ordinary successful flush clears an earlier failure latch", function()
+        local queue, store = fixture()
+        store.fail_transaction = "begin"
+        queue:addStroke(CANVAS, stroke(4, 1))
+        queue:flush()
+        t:eq(queue:isFailed(), true, "failed first")
+        store.fail_transaction = nil
+        t:eq(queue:flush(), true, "the lifecycle flush can recover without retry()")
+        t:eq(queue:isFailed(), false, "success clears the latch")
+        t:check(queue:addStroke(CANVAS, stroke(4, 2)) ~= nil,
+            "new editing is accepted immediately")
+    end)
+
+    t:case("a mixed delete and insert rolls back together and retries once", function()
+        local queue, store = fixture()
+        local old = queue:addStroke(CANVAS, stroke(4, 1))
+        queue:flush()
+        queue:removeStroke(CANVAS, old)
+        queue:addStroke(CANVAS, stroke(4, 2))
+        store.fail_transaction = "commit"
+        t:eq(queue:flush(), nil, "the mixed commit fails")
+        t:eq(strokeCount(store), 1, "the deleted row was restored")
+        t:eq(queue:pendingCount(), 2, "both operations remain for retry")
+        store.fail_transaction = nil
+        t:eq(queue:retry(), true, "the same batch retries")
+        t:eq(strokeCount(store), 1, "old out and new in, exactly once")
+        t:eq(store.strokes[CANVAS.id][1].seq, 2, "the surviving row is the insert")
+    end)
+
     t:case("a retry that fails again leaves the queue intact", function()
         local queue, store = fixture()
         store.fail_transaction = "begin"
@@ -271,6 +344,10 @@ return function(ctx)
         local ok = queue:close()
         t:eq(ok, nil, "the caller is told the work is not durable")
         t:eq(queue:pendingCount(), 1, "and it is still in hand")
+        t:eq(queue.closed, false, "so Retry can still use the queue")
+        store.fail_transaction = nil
+        t:eq(queue:retry(), true, "retry succeeds")
+        t:eq(queue:close(), true, "and only then can it close")
     end)
 
     t:case("a flush after closing does not write again", function()

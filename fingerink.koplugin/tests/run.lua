@@ -349,6 +349,26 @@ t:case("a second stylus slot in the same frame does not call a nil callback", fu
     t:eq(input.stylus_callback, nil, "unhooked afterwards, from a safe stack")
 end)
 
+t:case("a stale deferred removal never tears down a newer capture", function()
+    local input = reset()
+    local stale_cleanup = 0
+    Capture:installStylus(function() return true end,
+                          function() return false end)
+
+    Capture:removeDeferred(function() stale_cleanup = stale_cleanup + 1 end)
+    Capture:remove()
+    local installed = Capture:installStylus(function() return true end,
+                                             function() return false end)
+    local newer_callback = input.stylus_callback
+
+    env.UIManager:flush()
+    t:eq(installed, true, "the replacement capture installed")
+    t:eq(Capture.active, true, "the replacement stayed active")
+    t:eq(input.stylus_callback, newer_callback,
+        "the stale tick did not unregister the replacement callback")
+    t:eq(stale_cleanup, 0, "cleanup tied to the old generation was discarded")
+end)
+
 t:case("a throwing residual handler does not escape and disarms capture", function()
     local input = reset()
     local gd = input.gesture_detector

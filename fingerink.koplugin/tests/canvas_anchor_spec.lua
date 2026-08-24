@@ -185,15 +185,19 @@ return function(ctx)
         t:eq(index:isComplete(), false, "and the index is still only started")
     end)
 
-    t:case("the derived pages are written once, when the index completes", function()
+    t:case("derived pages are persisted in bounded batches", function()
         local index, _, store, sched = fixture(20, { batch = 5 })
         index:open()
         sched:tick()
-        t:eq(store.calls.save, 0, "nothing is written halfway")
+        t:eq(store.calls.save, 1, "the first tick writes only its own batch")
+        local first_count = 0
+        for _ in pairs(store.saves[1].pages) do first_count = first_count + 1 end
+        t:check(first_count <= 5, "the write is bounded by the resolve budget")
         sched:drain()
-        t:eq(store.calls.save, 1, "one write at the end")
-        t:eq(store.saves[1].hash, "layout-a", "against the layout it describes")
-        t:eq(store.saves[1].pages[7], 7, "carrying the resolved pages")
+        t:eq(store.calls.save, 4, "twenty anchors make four small transactions")
+        t:eq(store.saves[4].hash, "layout-a", "against the layout it describes")
+        t:eq(store.saves[4].finalize, true, "only the last batch prunes old layouts")
+        t:eq(store.layouts["layout-a"][7], 7, "the batches merge into one cache")
     end)
 
     t:case("an anchor that no longer resolves becomes an orphan", function()
@@ -378,13 +382,14 @@ return function(ctx)
         index:invalidate()
         sched:drain()
         t:eq(index:pageOf(3), 103, "every placement is from the new layout")
+        local old_finalized = false
         for _, save in ipairs(store.saves) do
-            if save.hash == "layout-a" then
-                t:check(false, "a half-built old index was written")
-                return
-            end
+            if save.hash == "layout-a" and save.finalize then old_finalized = true end
         end
-        t:check(true, "and the abandoned index was never written")
+        t:eq(old_finalized, false,
+            "the abandoned generation may leave safe partial rows but never prunes")
+        t:eq(store.layouts["layout-b"][3], 103,
+            "the new generation still completes independently")
     end)
 
     t:case("cancelling stops the build", function()
@@ -397,12 +402,13 @@ return function(ctx)
         t:eq(doc.resolutions, resolved, "no further work after teardown")
     end)
 
-    t:case("a cancelled index does not write a partial layout", function()
+    t:case("a cancelled index never finalizes its partial layout", function()
         local index, _, store, sched = fixture(50, { batch = 5 })
         index:open()
         sched:tick()
         index:cancel()
         sched:drain()
-        t:eq(store.calls.save, 0, "half an index is worse than none")
+        t:eq(store.calls.save, 1, "the completed first batch is safe derived data")
+        t:eq(store.saves[1].finalize, false, "but it cannot prune completed layouts")
     end)
 end

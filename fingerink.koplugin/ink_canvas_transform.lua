@@ -22,6 +22,11 @@ local floor = math.floor
 local Transform = {}
 Transform.__index = Transform
 
+local function finite(v)
+    return type(v) == "number" and v == v
+        and v ~= math.huge and v ~= -math.huge
+end
+
 --[[--
   opts.logical_w, logical_h   the canvas's own geometry
   opts.screen_w, screen_h     the screen as it is right now
@@ -33,12 +38,13 @@ missing or non-positive -- every formula here divides by one of them.
 function Transform.new(opts)
     local lw, lh = tonumber(opts.logical_w), tonumber(opts.logical_h)
     local sw, sh = tonumber(opts.screen_w), tonumber(opts.screen_h)
-    if not lw or not lh or not sw or not sh
+    if not finite(lw) or not finite(lh) or not finite(sw) or not finite(sh)
         or lw <= 0 or lh <= 0 or sw <= 0 or sh <= 0 then
         return nil, "bad_geometry"
     end
 
     local sheet_top = tonumber(opts.sheet_top) or 0
+    if not finite(sheet_top) then return nil, "bad_geometry" end
     if sheet_top < 0 then sheet_top = 0 end
     if sheet_top > sh then sheet_top = sh end
 

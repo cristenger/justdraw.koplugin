@@ -39,6 +39,9 @@ return function(ctx)
             pages = opts.pages or { ["/body/p[7]"] = 1 },
         }
         local store = support.newCanvasStore(opts.canvases or {})
+        for _, entry in ipairs(opts.strokes or {}) do
+            store:putStroke(entry.canvas_id, entry.stroke)
+        end
         local p = support.newPlugin(ctx.FingerInk, env, { document = doc })
         p.canvas_repository = store
         env.UIManager:flush()
@@ -150,6 +153,62 @@ return function(ctx)
         t:eq(p.drawing, true, "there is no point opening one to look at it")
     end)
 
+    t:case("a populated sheet captures no ink until its chunks validate", function()
+        local canvas = {
+            id = 41, anchor_kind = "xpointer", anchor_key = "xp:/body/p[7]",
+            anchor_raw = "/body/p[7]", anchor_normalized = "/body/p[7]",
+            anchor_dom_version = 20240114, logical_w = SW, logical_h = SH,
+        }
+        local p, store = canvasPlugin{
+            canvases = { canvas },
+            strokes = { { canvas_id = canvas.id, stroke = {
+                width = 4, tool = 1, points = { 100, 100, 200, 100 }, n = 2,
+            } } },
+        }
+        p:openCanvas(canvas)
+        t:eq(p.drawing, false, "loading is not advertised as Draw")
+        t:eq(p.bar.draw_btn.text, "Loading", "the reachable button shows the state")
+        p:setDrawing(true)
+        t:eq(p.drawing, false, "manual Draw is guarded too")
+        p:onFingerInkUndo()
+        t:eq(p.session:pendingWrites(), 0, "Undo cannot enqueue a premature delete")
+        t:eq(#p.session:cache():strokes(), 1, "unvalidated metadata stays intact")
+        penFrame(p, SHEET.x, SHEET.y)
+        penLift(p, SHEET.x, SHEET.y)
+        t:eq(p.session:pendingWrites(), 0, "a premature pen sample was ignored")
+        env.UIManager:flush()
+        t:eq(p.session:cache():isReady(), true, "the stored stroke validated")
+        t:eq(p.drawing, true, "only then is capture enabled")
+        t:eq(store.calls.stroke_chunk, 1, "one persisted chunk was streamed")
+    end)
+
+    t:case("an asynchronous load failure turns capture off and remains retryable", function()
+        local canvas = {
+            id = 42, anchor_kind = "xpointer", anchor_key = "xp:/body/p[7]",
+            anchor_raw = "/body/p[7]", anchor_normalized = "/body/p[7]",
+            anchor_dom_version = 20240114, logical_w = SW, logical_h = SH,
+        }
+        local p, store = canvasPlugin{
+            canvases = { canvas },
+            strokes = { { canvas_id = canvas.id, stroke = {
+                width = 4, tool = 1, points = { 100, 100, 200, 100 }, n = 2,
+            } } },
+        }
+        store.fail_stroke_chunk = 0
+        p:openCanvas(canvas)
+        env.UIManager:flush()
+        t:eq(p.session:loadFailed(), true, "corruption is visible as load_failed")
+        t:eq(p.drawing, false, "the failed sheet does not capture input")
+        t:eq(p.canvas_open, true, "Hide and Retry remain reachable")
+        t:eq(p.bar.draw_btn.text, "Retry", "the toolbar exposes recovery")
+        store.fail_stroke_chunk = nil
+        t:eq(p:retryCanvasLoad(), true, "retry starts a fresh generation")
+        t:eq(p.bar.draw_btn.text, "Loading", "retry reports its new state")
+        env.UIManager:flush()
+        t:eq(p.session:cache():isReady(), true, "retry rebuilt the raster")
+        t:eq(p.drawing, true, "capture resumes after successful validation")
+    end)
+
     t:case("closing the sheet brings the standalone toolbar back", function()
         local p = canvasPlugin()
         p:openCanvasHere()
@@ -167,6 +226,173 @@ return function(ctx)
         p:setBarShown(false)
         t:eq(p.canvas_open, false, "the sheet closed")
         t:eq(p.drawing, false, "and drawing stopped")
+    end)
+
+    t:case("a failed Hide keeps the sheet and its retry controls alive", function()
+        local p, store = canvasPlugin()
+        p:openCanvasHere()
+        penFrame(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 20, SHEET.y)
+        penLift(p, SHEET.x + 20, SHEET.y)
+        store.fail_transaction = "begin"
+        local overlay, bar = p.session:overlay(), p.bar
+        local ok = p:closeCanvas()
+        t:eq(ok, nil, "close reports the save failure")
+        t:eq(p.canvas_open, true, "main still agrees the sheet is open")
+        t:eq(p.session:overlay(), overlay, "window retained")
+        t:eq(p.bar, bar, "toolbar retained for Retry")
+        t:eq(p.drawing, false, "new editing is stopped")
+        t:eq(p.session:pendingWrites(), 1, "ink retained")
+    end)
+
+    t:case("a failed switch retains the old overlay and embedded toolbar", function()
+        local first = {
+            id = 51, anchor_kind = "xpointer", anchor_key = "xp:/body/p[7]",
+            anchor_raw = "/body/p[7]", anchor_normalized = "/body/p[7]",
+            anchor_dom_version = 20240114, logical_w = SW, logical_h = SH,
+        }
+        local second = {
+            id = 52, anchor_kind = "xpointer", anchor_key = "xp:/body/p[8]",
+            anchor_raw = "/body/p[8]", anchor_normalized = "/body/p[8]",
+            anchor_dom_version = 20240114, logical_w = SW, logical_h = SH,
+        }
+        local p, store = canvasPlugin{
+            canvases = { first, second },
+            pages = { ["/body/p[7]"] = 1, ["/body/p[8]"] = 2 },
+        }
+        p:openCanvas(first)
+        penFrame(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 20, SHEET.y)
+        penLift(p, SHEET.x + 20, SHEET.y)
+        store.fail_transaction = "begin"
+        local old_overlay, old_bar = p.session:overlay(), p.bar
+        local opened = p:openCanvas(second)
+        t:eq(opened, nil, "the switch was refused")
+        t:eq(p.session:activeCanvas().id, first.id, "the old sheet remains active")
+        t:eq(p.session:overlay(), old_overlay, "the old window remains stacked")
+        t:eq(p.bar, old_bar, "main still owns its embedded toolbar")
+        t:eq(p.drawing, false, "capture stays off until Retry succeeds")
+        t:eq(p.canvas_open, true, "the visible state remains coherent")
+    end)
+
+    t:case("a target load failure keeps the target open with Retry", function()
+        local first = {
+            id = 53, anchor_kind = "xpointer", anchor_key = "xp:/body/p[7]",
+            anchor_raw = "/body/p[7]", anchor_normalized = "/body/p[7]",
+            anchor_dom_version = 20240114, logical_w = SW, logical_h = SH,
+        }
+        local second = {
+            id = 54, anchor_kind = "xpointer", anchor_key = "xp:/body/p[8]",
+            anchor_raw = "/body/p[8]", anchor_normalized = "/body/p[8]",
+            anchor_dom_version = 20240114, logical_w = SW, logical_h = SH,
+        }
+        local p, store = canvasPlugin{
+            canvases = { first, second },
+            pages = { ["/body/p[7]"] = 1, ["/body/p[8]"] = 2 },
+        }
+        p:openCanvas(first)
+        store.fail_stroke_list = "read failed"
+        local opened = p:openCanvas(second)
+        t:check(opened ~= nil, "the unreadable target presents its recovery surface")
+        t:eq(p.session:activeCanvas().id, second.id, "session retains the target")
+        t:eq(p.canvas_open, true, "main agrees the failed sheet is open")
+        t:check(p.bar ~= nil and p.bar.embedded, "Retry remains in the overlay")
+        t:eq(p.bar.draw_btn.text, "Retry", "the failure is explicit, not a blank editable page")
+        t:eq(p.drawing, false, "capture is off")
+        store.fail_stroke_list = nil
+        t:eq(p:retryCanvasLoad(), true, "the target can be retried in place")
+        env.UIManager:flush()
+        t:eq(p.drawing, true, "successful recovery resumes drawing")
+    end)
+
+    t:case("rotation keeps main bound to the overlay's rebuilt toolbar", function()
+        local p = canvasPlugin()
+        p:openCanvasHere()
+        local old = p.bar
+        p:onScreenResize()
+        t:check(p.bar ~= old, "geometry produced a new embedded bar")
+        t:eq(p.bar, p.session:overlay().bar, "main adopted the visible bar")
+        t:eq(p.bar.embedded, true, "not a standalone replacement")
+    end)
+
+    t:case("height changes keep every toolbar action bound to the visible bar", function()
+        local p = canvasPlugin()
+        p:openCanvasHere()
+        local old = p.bar
+        p.session:overlay():setHeight(40)
+        t:check(p.bar ~= old, "the embedded bar was replaced")
+        t:eq(p.bar, p.session:overlay().bar, "main owns the replacement")
+        p.bar.draw_btn.callback()
+        t:eq(p.drawing, false, "Stop on the visible bar controls capture")
+        t:eq(p.bar.draw_btn.text, "Draw", "and its own label updates")
+    end)
+
+    t:case("changing toolbar side moves the embedded bar and preserves ownership", function()
+        local p = canvasPlugin()
+        p:openCanvasHere()
+        local right_x = p.bar.dimen.x
+        p:sideItem("Left", "left").callback()
+        t:eq(p.bar, p.session:overlay().bar, "main owns the rebuilt left bar")
+        t:eq(p.session:overlay().bar_side, "left", "the overlay keeps the preference")
+        t:check(p.bar.dimen.x < right_x, "the visible bar moved to the left")
+        t:eq(p.drawing, true, "changing chrome did not interrupt ink")
+    end)
+
+    t:case("rotation aborts a live stroke before the populated cache reloads", function()
+        local canvas = {
+            id = 55, anchor_kind = "xpointer", anchor_key = "xp:/body/p[7]",
+            anchor_raw = "/body/p[7]", anchor_normalized = "/body/p[7]",
+            anchor_dom_version = 20240114, logical_w = SW, logical_h = SH,
+        }
+        local p = canvasPlugin{
+            canvases = { canvas },
+            strokes = { { canvas_id = canvas.id, stroke = {
+                width = 4, tool = 1, points = { 100, 100, 200, 100 }, n = 2,
+            } } },
+        }
+        p:openCanvas(canvas)
+        env.UIManager:flush()
+        penFrame(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 20, SHEET.y)
+        local old_w, old_h = Device.screen.w, Device.screen.h
+        Device.screen.w, Device.screen.h = old_h, old_w
+        p:onScreenResize()
+        t:eq(p.canvas_stroke, nil, "the in-flight stroke was repaired first")
+        t:eq(p.drawing, false, "capture is suspended")
+        t:eq(p.session:cache():stateName(), "loading", "while vectors replay")
+        t:eq(p.bar.draw_btn.text, "Loading", "the rebuilt visible bar reports it")
+        env.UIManager:flush()
+        t:eq(p.session:cache():isReady(), true, "the rotated raster completes")
+        t:eq(p.drawing, true, "and capture resumes only then")
+        Device.screen.w, Device.screen.h = old_w, old_h
+        p:onScreenResize()
+        env.UIManager:flush()
+    end)
+
+    t:case("deleting the active sheet clears main and session together", function()
+        local p, store = canvasPlugin()
+        p:openCanvasHere()
+        local active = p.session:activeCanvas()
+        t:eq(p:deleteCanvas(active), true, "deleted")
+        t:eq(p.canvas_open, false, "main closed")
+        t:eq(p.session:activeCanvas(), nil, "session closed")
+        t:eq(#store.canvases, 0, "row gone")
+        t:check(p.bar ~= nil and not p.bar.embedded, "standalone toolbar restored")
+    end)
+
+    t:case("a failed active delete changes neither UI nor pending ink", function()
+        local p, store = canvasPlugin()
+        p:openCanvasHere()
+        penFrame(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 20, SHEET.y)
+        penLift(p, SHEET.x + 20, SHEET.y)
+        store.fail_delete_canvas = "disk full"
+        local overlay = p.session:overlay()
+        local ok = p:deleteCanvas(p.session:activeCanvas())
+        t:eq(ok, nil, "delete refused")
+        t:eq(p.canvas_open, true, "main remains open")
+        t:eq(p.session:overlay(), overlay, "same overlay")
+        t:eq(p.session:pendingWrites(), 1, "pending work preserved")
     end)
 
     t:case("opening where a sheet already exists opens that one", function()
@@ -241,6 +467,75 @@ return function(ctx)
         p:onSaveSettings()
         local canvas_id = p.session:activeCanvas().id
         t:eq(#(store.strokes[canvas_id] or {}), 1, "one stroke on this sheet")
+    end)
+
+    t:case("a save failure repairs live ink and blocks capture until retry", function()
+        local p, store = canvasPlugin()
+        p:openCanvasHere()
+        penFrame(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 20, SHEET.y)
+        penLift(p, SHEET.x + 20, SHEET.y)
+        t:eq(p.session:pendingWrites(), 1, "one durable operation is pending")
+
+        -- Begin another stroke before the first one's timer fires. It exists
+        -- only in the raster and must be repaired if that timer fails.
+        penFrame(p, SHEET.x, SHEET.y + 30)
+        penFrame(p, SHEET.x + 20, SHEET.y + 30)
+        t:check(p.canvas_stroke ~= nil, "a second live stroke is visible")
+        store.fail_transaction = "begin"
+        env.UIManager:flush()
+        t:eq(Capture.active, false, "capture became inert in the failure tick")
+        t:eq(p.drawing, true, "gesture suppression stays on through that frame")
+        local before_repair = #p.session:cache():buffer().rects
+        env.UIManager:flush()
+        t:eq(p.drawing, false, "capture is visibly stopped from a safe tick")
+        t:eq(p.canvas_stroke, nil, "the unqueued stroke was abandoned")
+        t:check(#p.session:cache():buffer().rects > before_repair,
+            "its dirty region was cleared and rebuilt")
+        t:eq(#p.session:cache():strokes(), 1,
+            "only the first, queued stroke remains in the raster index")
+        t:eq(p.session:pendingWrites(), 1, "the failed write was retained")
+
+        p:setDrawing(true)
+        t:eq(p.drawing, false, "Draw is guarded while the queue is failed")
+        store.fail_transaction = nil
+        t:eq(p.session:retrySave(), true, "explicit retry commits the retained ink")
+        t:eq(p.session:saveFailed(), false, "the failure latch clears")
+        t:eq(p.drawing, true, "editing resumes after recovery")
+    end)
+
+    t:case("a chunk failure inside the eraser cannot unregister mid stylus frame", function()
+        local canvas = {
+            id = 56, anchor_kind = "xpointer", anchor_key = "xp:/body/p[7]",
+            anchor_raw = "/body/p[7]", anchor_normalized = "/body/p[7]",
+            anchor_dom_version = 20240114, logical_w = SW, logical_h = SH,
+        }
+        local p, store = canvasPlugin{
+            canvases = { canvas },
+            strokes = { { canvas_id = canvas.id, stroke = {
+                width = 4, tool = 1, points = { 100, 100, 200, 100 }, n = 2,
+            } } },
+        }
+        p:openCanvas(canvas)
+        env.UIManager:flush()
+        p:setEraser(true)
+        store.fail_stroke_chunk = 0
+        local sx, sy = p.session:transform():toScreen(150, 100)
+        local input, cb = Device.input, Device.input.stylus_callback
+        local frame = {
+            { slot = 2, id = 1, x = sx, y = sy, tool = Capture.TOOL_ERASER },
+            { slot = 4, id = 2, x = sx + 1, y = sy, tool = Capture.TOOL_PEN },
+        }
+        local ok, err = pcall(function()
+            for i = 1, #frame do input.stylus_callback(input, frame[i]) end
+        end)
+        t:eq(ok, true, "the full routeStylusEvents loop survived: " .. tostring(err))
+        t:eq(input.stylus_callback, cb, "the callback remains registered in-frame")
+        t:eq(Capture.active, false, "but it is already inert")
+        env.UIManager:flush()
+        t:eq(input.stylus_callback, nil, "it unhooks on the safe tick")
+        t:eq(p.drawing, false, "the failed sheet no longer captures")
+        t:eq(p.bar.draw_btn.text, "Retry", "recovery remains reachable")
     end)
 
     t:case("stored coordinates are the sheet's, not the screen's", function()

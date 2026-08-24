@@ -113,6 +113,8 @@ function FingerInk:init()
     self.session = nil
     self.router = nil
     self.canvas_open = false
+    self.canvas_erase_ctx = nil
+    self.canvas_erase_x, self.canvas_erase_y = nil, nil
     self.canvas_stroke = nil
     --- Left nil in production, where the session opens its own connection.
     --- The suite runs under a bare interpreter that cannot load the SQLite
@@ -224,7 +226,7 @@ function FingerInk:teardown()
     -- it, and an unfinished stroke is not in any store yet.
     self:abortStroke()
     if self.session then
-        self.session:close()
+        self.session:close{ force = true }
         self.session = nil
         self.router = nil
         self.canvas_open = false
@@ -248,7 +250,15 @@ The durable-save gate for canvas ink.
 document closed. Saving in `onSuspend` would already be too late.
 ]]
 function FingerInk:onSaveSettings()
-    if self.session then self.session:flush() end
+    if self.session then
+        local saved, save_err = self.session:flush()
+        if not saved then
+            -- Queue already retained the operations and emitted the reader's
+            -- deduplicated notification; this log makes the lifecycle gate's
+            -- failed return explicit without claiming settings were durable.
+            logger.warn("FingerInk: SaveSettings canvas flush failed:", save_err)
+        end
+    end
     if self.store:isEmpty() then
         self.ui.doc_settings:delSetting(SETTING_KEY)
     else
@@ -265,9 +275,13 @@ function FingerInk:rebuildBar()
 end
 
 function FingerInk:onScreenResize()
-    self:rebuildBar()
     local overlay = self.session and self.session:overlay()
-    if overlay then overlay:onScreenResize() end
+    if overlay then
+        overlay:onScreenResize()
+        self.bar = overlay.bar
+    else
+        self:rebuildBar()
+    end
 end
 
 function FingerInk:onSetRotationMode()
@@ -295,6 +309,13 @@ end
 --- stroke is read, written or moved.
 function FingerInk:onDocumentRerendered()
     if self.session then self.session:invalidate() end
+end
+
+--- The asynchronous page index has caught up with the current layout. Session
+--- already recomputed `marks_here`; repaint so the first visible page does not
+--- wait for an unrelated PageUpdate before showing its sheet markers.
+function FingerInk:onCanvasIndexReady()
+    if self.session then UIManager:setDirty(self.ui, "ui") end
 end
 
 -- ----------------------------------------------------------------- toolbar
@@ -451,6 +472,23 @@ end
 function FingerInk:setDrawing(on)
     on = on and true or false
     if on == self.drawing then return end
+    if on and self.canvas_open and self.session and not self.session:isWritable() then
+        self:notify(_("This sheet is read-only"))
+        return
+    end
+    if on and self.canvas_open and self.session then
+        if self.session:saveFailed() then
+            self:notify(_("Could not save ink. Use Retry saving before drawing again."))
+            return
+        end
+        local cache = self.session:cache()
+        if not cache or not cache:isReady() then
+            self:notify(_("This sheet's ink is still loading"))
+            return
+        end
+    end
+
+    self.drawing_generation = (self.drawing_generation or 0) + 1
 
     if on then
         -- Resolve before touching the toolbar: a refusal must not leave the
@@ -529,7 +567,12 @@ function FingerInk:setInputMode(mode)
 end
 
 function FingerInk:setEraser(on)
+    if on and self.canvas_open and self.session and not self.session:isWritable() then
+        self:notify(_("This sheet is read-only"))
+        return
+    end
     self.eraser = on and true or false
+    if not self.eraser then self:endCanvasErase() end
     if self.eraser and not self.drawing then
         self:setDrawing(true)   -- also updates the bar
     elseif self.bar then
@@ -1170,24 +1213,152 @@ function FingerInk:openCanvas(canvas)
     if not (self.session and canvas) then return end
     if self.canvas_open and self.session:activeCanvas() == canvas then return end
 
-    self.bar_restore = self.bar ~= nil
-    if self.bar then
+    local switching = self.canvas_open
+    if switching then
+        -- Session may refuse to close the old sheet. Stop capture first, but
+        -- leave its embedded toolbar/window owned by the old overlay until the
+        -- durable switch succeeds.
+        self:abortCanvasStroke()
+        self:setDrawing(false)
+    else
+        self.bar_restore = self.bar ~= nil
+    end
+    if not switching and self.bar then
         local dimen = self.bar.dimen
         UIManager:close(self.bar)
         self.bar = nil
         UIManager:setDirty(self.ui, "ui", dimen)
     end
 
-    local overlay = self.session:openCanvas(canvas)
+    local overlay, err = self.session:openCanvas(canvas)
     if not overlay then
-        if self.bar_restore then self:setBarShown(true) end
-        return
+        if switching then
+            local old = self.session:overlay()
+            if old then
+                self.bar = old.bar
+            else
+                self.canvas_open = false
+                self.bar = nil
+                if self.bar_restore then self:setBarShown(true) end
+            end
+        elseif self.bar_restore then
+            self:setBarShown(true)
+        end
+        return nil, err
     end
     self.bar = overlay.bar
     self.canvas_open = true
     if self.router then self.router:reset() end
-    self:setDrawing(true)
+    if self.session:isWritable() and self.session:cache():isReady() then
+        self:setDrawing(true)
+    end
     return overlay
+end
+
+--- Overlay replaces its embedded toolbar whenever geometry or side changes.
+--- Keep `self.bar` bound to the visible object; all state and input routing in
+--- this module intentionally go through that single owner reference.
+function FingerInk:onCanvasOverlayBarChanged(overlay)
+    local current = self.session and self.session:overlay()
+    if self.canvas_open and (current == nil or current == overlay) then
+        self.bar = overlay.bar
+    end
+end
+
+--- A rotation changes raster scale. This hook runs before Cache releases the
+--- ready buffer, which is the last safe moment to abandon and repair a live
+--- stroke. Rotation events are outside the stylus callback stack, so immediate
+--- unregistration is safe here.
+function FingerInk:onCanvasCacheWillRebuild(canvas)
+    local active = self.session and self.session:activeCanvas()
+    if not (self.canvas_open and active and canvas and active.id == canvas.id) then
+        return
+    end
+    self:abortCanvasStroke()
+    self:setDrawing(false)
+end
+
+--- A cache or save failure may be reported from inside the stylus callback.
+--- Make capture inert now, but leave the callback registered and `drawing`
+--- true through the rest of this frame so palm gestures remain suppressed.
+--- The visible state changes on the next safe UI tick.
+function FingerInk:_deferCanvasCaptureStop(canvas, repair_live_stroke)
+    local active = self.session and self.session:activeCanvas()
+    if not (self.canvas_open and active and canvas and active.id == canvas.id) then
+        return
+    end
+    if not self.drawing and not Capture.active then
+        local overlay = self.session and self.session:overlay()
+        if self.bar then self.bar:update(false) end
+        if overlay then UIManager:setDirty(overlay, "ui") end
+        return
+    end
+    local generation = self.drawing_generation or 0
+    Capture:removeDeferred(function()
+        if (self.drawing_generation or 0) ~= generation then return end
+        local still_active = self.session and self.session:activeCanvas()
+        if not (self.canvas_open and still_active and still_active.id == canvas.id) then
+            return
+        end
+        if repair_live_stroke then
+            self:abortCanvasStroke()
+        else
+            self:endCanvasErase()
+            self.canvas_stroke = nil
+            self.draw_slot = nil
+        end
+        self:setDrawing(false)
+        local overlay = self.session and self.session:overlay()
+        if self.bar then self.bar:update(false) end
+        if overlay then UIManager:setDirty(overlay, "ui") end
+    end)
+end
+
+--- Cache completion is asynchronous for a non-empty sheet. Do not capture pen
+--- or touch input until every chunk has validated and reached the raster.
+function FingerInk:onCanvasReady(canvas)
+    local active = self.session and self.session:activeCanvas()
+    local overlay = self.session and self.session:overlay()
+    if not (self.canvas_open and active and canvas and overlay
+        and active.id == canvas.id) then
+        return
+    end
+    if self.session:isWritable() then
+        self:setDrawing(true)
+    elseif self.bar then
+        self.bar:update(false)
+    end
+    UIManager:setDirty(overlay, "ui")
+end
+
+function FingerInk:onCanvasLoadFailed(canvas)
+    local active = self.session and self.session:activeCanvas()
+    local overlay = self.session and self.session:overlay()
+    if not (self.canvas_open and active and canvas and overlay
+        and active.id == canvas.id) then
+        return
+    end
+    self:_deferCanvasCaptureStop(canvas, false)
+end
+
+function FingerInk:onCanvasSaveFailed(canvas)
+    self:_deferCanvasCaptureStop(canvas, true)
+end
+
+function FingerInk:onCanvasSaveRecovered(canvas)
+    local active = self.session and self.session:activeCanvas()
+    if self.canvas_open and active and canvas and active.id == canvas.id
+        and self.session:cache() and self.session:cache():isReady() then
+        self:setDrawing(true)
+    end
+    if self.bar then self.bar:update(true) end
+end
+
+function FingerInk:retryCanvasLoad()
+    if not (self.session and self.canvas_open) then return nil, "no_canvas" end
+    local ok, err = self.session:retryLoad()
+    if self.bar then self.bar:update(true) end
+    return ok, err
 end
 
 --- Open the sheet at the reader's position, or make one there.
@@ -1203,7 +1374,6 @@ function FingerInk:openCanvasHere()
         end
         return
     end
-    -- createHere already opened it in the session; adopt its window.
     return self:openCanvas(canvas)
 end
 
@@ -1211,13 +1381,15 @@ function FingerInk:closeCanvas()
     if not self.canvas_open then return end
     self:abortCanvasStroke()
     self:setDrawing(false)
+    local ok, err = self.session:closeCanvas()
+    if not ok then return nil, err end
     self.canvas_open = false
     self.bar = nil
-    self.session:closeCanvas()
     if self.bar_restore then self:setBarShown(true) end
     -- The sheet uncovered a page of text; a partial refresh would leave it
     -- ghosted.
     UIManager:setDirty(self.ui, "full")
+    return true
 end
 
 --[[--
@@ -1227,6 +1399,8 @@ Returns whether it inked, which is what the pen route's lift-recovery uses to
 tell a stroke that produced nothing from one that was simply off the page.
 ]]
 function FingerInk:applyCanvasPoint(x, y, tool)
+    local cache = self.session and self.session:cache()
+    if not cache or not cache:isReady() then return false end
     local tr = self.session and self.session:transform()
     if not tr or not tr:contains(x, y) then
         -- Off the page. End the stroke at the edge rather than clamping it
@@ -1237,10 +1411,13 @@ function FingerInk:applyCanvasPoint(x, y, tool)
     local cx, cy = tr:toCanvas(x, y)
     if tool == Capture.TOOL_ERASER or self.eraser then
         self:eraseCanvasAt(cx, cy, tr)
-    elseif self.canvas_stroke then
-        self:addCanvasPoint(cx, cy, tr)
     else
-        self:startCanvasStroke(cx, cy, tr)
+        self:endCanvasErase()
+        if self.canvas_stroke then
+        self:addCanvasPoint(cx, cy, tr)
+        else
+            self:startCanvasStroke(cx, cy, tr)
+        end
     end
     return true
 end
@@ -1290,6 +1467,7 @@ function FingerInk:blitCanvasBox(box, tr)
 end
 
 function FingerInk:endCanvasStroke()
+    self:endCanvasErase()
     local s = self.canvas_stroke
     self.canvas_stroke = nil
     if not s or not self.session then return end
@@ -1306,6 +1484,12 @@ function FingerInk:endCanvasStroke()
     local ok, err = self.session:addStroke(s, s.n, s.w, Capture.TOOL_PEN)
     if not ok then
         logger.warn("FingerInk: canvas stroke not recorded:", err)
+        -- Live segments were painted before the queue accepted the stroke.
+        -- If acceptance failed, remove them now rather than showing ink that
+        -- will disappear on reopen.
+        local box = self.session:repair(
+            s.min_x, s.min_y, s.max_x, s.max_y, s.w)
+        if box and tr then self:blitCanvasBox(box, tr) end
     end
 end
 
@@ -1317,6 +1501,7 @@ what was underneath. Repainting the overlay alone would leave ink on screen
 that is in no canvas.
 ]]
 function FingerInk:abortCanvasStroke()
+    self:endCanvasErase()
     local s = self.canvas_stroke
     self.canvas_stroke = nil
     if not s or not self.session then return end
@@ -1328,8 +1513,28 @@ end
 function FingerInk:eraseCanvasAt(cx, cy, tr)
     -- The eraser is a fixed size under the reader's hand, so its reach in
     -- canvas units grows as the sheet shrinks.
-    local box = self.session:eraseAt(cx, cy, ERASER_RADIUS / tr.scale)
+    local radius = ERASER_RADIUS / tr.scale
+    if not self.canvas_erase_ctx then
+        self.canvas_erase_ctx = self.session:beginErase()
+    end
+    local lx, ly = self.canvas_erase_x, self.canvas_erase_y
+    local threshold = radius / 3
+    if threshold < 1 then threshold = 1 end
+    if lx then
+        local dx, dy = cx - lx, cy - ly
+        if dx * dx + dy * dy < threshold * threshold then return end
+    end
+    self.canvas_erase_x, self.canvas_erase_y = cx, cy
+    local box = self.session:eraseAt(cx, cy, radius, self.canvas_erase_ctx)
     self:blitCanvasBox(box, tr)
+end
+
+function FingerInk:endCanvasErase()
+    if self.canvas_erase_ctx and self.session then
+        self.session:endErase(self.canvas_erase_ctx)
+    end
+    self.canvas_erase_ctx = nil
+    self.canvas_erase_x, self.canvas_erase_y = nil, nil
 end
 
 -- ------------------------------------------------------------------ output
@@ -1397,9 +1602,12 @@ end
 
 function FingerInk:onFingerInkUndo()
     if self.canvas_open then
-        local box = self.session:undo()
+        local box, err = self.session:undo()
         if not box then
-            self:notify(_("Nothing to undo on this sheet"))
+            if err == "read_only" then self:notify(_("This sheet is read-only"))
+            elseif err == "loading" or err == "load_failed" then
+                self:notify(_("This sheet's ink is still loading"))
+            else self:notify(_("Nothing to undo on this sheet")) end
             return true
         end
         local tr = self.session:transform()
@@ -1443,7 +1651,13 @@ function FingerInk:sideItem(text, side)
             if self.bar_side == side then return end
             self.bar_side = side
             G_reader_settings:saveSetting("fingerink_bar_side", side)
-            self:rebuildBar()
+            local overlay = self.session and self.session:overlay()
+            if overlay then
+                overlay:setBarSide(side)
+                self.bar = overlay.bar
+            else
+                self:rebuildBar()
+            end
         end,
     }
 end
@@ -1494,10 +1708,37 @@ function FingerInk:confirmDeleteCanvas(canvas)
         text = _("Delete this sheet and everything drawn on it?"),
         ok_text = _("Delete"),
         ok_callback = function()
-            self.session:deleteCanvas(canvas)
-            UIManager:setDirty(self.ui, "full")
+            self:deleteCanvas(canvas)
         end,
     })
+end
+
+--- Delete through the plugin so its visible state changes together with the
+--- session. Session deliberately knows nothing about FingerInk's toolbar and
+--- capture flags.
+function FingerInk:deleteCanvas(canvas)
+    if not (self.session and canvas) then return nil, "no_canvas" end
+    local active = self.canvas_open and self.session:activeCanvas()
+        and self.session:activeCanvas().id == canvas.id
+    if active then
+        self:abortCanvasStroke()
+        self:setDrawing(false)
+    end
+
+    local ok, err = self.session:deleteCanvas(canvas)
+    if not ok then
+        self:notify(_("Could not delete this sheet"))
+        return nil, err
+    end
+
+    if active then
+        self.canvas_open = false
+        self.bar = nil
+        if self.router then self.router:reset() end
+        if self.bar_restore then self:setBarShown(true) end
+    end
+    UIManager:setDirty(self.ui, "full")
+    return true
 end
 
 --[[--
@@ -1521,6 +1762,7 @@ function FingerInk:canvasMenu()
         }
         items[#items + 1] = {
             text = _("Delete this sheet"),
+            enabled_func = function() return self.session:isWritable() end,
             keep_menu_open = true,
             separator = true,
             callback = function() self:confirmDeleteCanvas(active) end,
@@ -1530,7 +1772,11 @@ function FingerInk:canvasMenu()
             -- Closes the menu on purpose: opening a sheet turns drawing on,
             -- and an open menu is unusable once the pen is inking.
             text = _("Open sheet here"),
-            enabled_func = function() return not self.session:isIndexing() end,
+            enabled_func = function()
+                if self.session:isIndexing() then return false end
+                return self.session:isWritable()
+                    or #self.session:canvasesHere(self:currentPage()) > 0
+            end,
             callback = function() self:openCanvasHere() end,
             help_text = _([[Creates a blank sheet anchored to this position in the book, or opens the one that is already here. The sheet keeps its own coordinates, so changing font or margins moves the sheet, not what you drew on it.]]),
         }
@@ -1545,6 +1791,15 @@ function FingerInk:canvasMenu()
             separator = true,
             help_text = _([[A write to the sheet database failed. Nothing has been lost -- the strokes are still in memory -- but they are not durable until this succeeds, and no more can be drawn until it does.]]),
             callback = function() self.session:retrySave() end,
+        }
+    end
+
+    if self.session:loadFailed() then
+        items[#items + 1] = {
+            text = _("Retry loading sheet"),
+            keep_menu_open = true,
+            separator = true,
+            callback = function() self:retryCanvasLoad() end,
         }
     end
 
@@ -1579,6 +1834,7 @@ function FingerInk:canvasMenu()
                     },
                     {
                         text = _("Delete it"),
+                        enabled_func = function() return self.session:isWritable() end,
                         keep_menu_open = true,
                         callback = function() self:confirmDeleteCanvas(canvas) end,
                     },
@@ -1631,7 +1887,7 @@ function FingerInk:addToMainMenu(menu_items)
             {
                 text = _("Input mode"),
                 separator = true,
-                help_text = _([[Automatic uses the stylus route on devices that report a pen digitizer, and the finger route everywhere else. While the stylus route is active, finger and palm never draw and never turn pages — press Stop to read again.]]),
+                help_text = _([[Automatic uses the stylus route on devices that report a pen digitizer, and the finger route everywhere else. On a drawing sheet, finger and palm never draw; touches above the bounded sheet can still turn pages. With direct ink, press Stop to return all touch input to reading.]]),
                 sub_item_table = {
                     self:inputModeItem(_("Automatic"), "auto"),
                     self:inputModeItem(_("Stylus"), "stylus"),

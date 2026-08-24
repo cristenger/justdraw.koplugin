@@ -276,6 +276,23 @@ else
             true, back ~= nil and back_n == n and worst <= 2480 / 65535 / 2 + 1e-9,
             "n = " .. tostring(back_n) .. ", worst error = " .. tostring(worst))
 
+        local cursor = repo:openStrokeCursor(stroke_id)
+        local streamed, streamed_rows, stream_err = 0, 0, nil
+        if cursor then
+            while true do
+                local row, cursor_err, done = cursor:next()
+                if cursor_err then stream_err = cursor_err; break end
+                if done then break end
+                streamed_rows = streamed_rows + 1
+                streamed = streamed + row.point_count - (streamed_rows > 1 and 1 or 0)
+            end
+        end
+        claim("canvas database: the cursor streams normalized chunks in order",
+            true, cursor ~= nil and streamed_rows == Codec.chunkCount(n)
+                and streamed == n and stream_err == nil,
+            tostring(streamed_rows) .. " chunks, " .. tostring(streamed)
+                .. " points, error = " .. tostring(stream_err))
+
         -- The layout cache, its composite foreign key, and the prune.
         repo:saveLayoutPages(book_id, "layout-a", { [canvas.id] = 41 })
         local pages = repo:layoutPages(book_id, "layout-a")
@@ -310,9 +327,42 @@ else
             "user_version = " .. tostring(conn:rowexec("PRAGMA user_version;")))
 
         repo:close()
+
+        -- Hold an old read snapshot while a writer appends a WAL frame. A
+        -- TRUNCATE checkpoint cannot complete in that state; Repository must
+        -- refuse the backup rather than copy only the stale main file.
+        local writer = SQ3.open(db_path, "rw")
+        writer:exec("PRAGMA journal_mode=WAL;")
+        local reader = SQ3.open(db_path, "ro")
+        reader:exec("BEGIN;")
+        reader:rowexec("SELECT count(*) FROM books;")
+        writer:exec("UPDATE books SET updated_at = updated_at + 1;")
+        local backups = 0
+        local migrated, migration_err = Repository.open{
+            path = db_path,
+            driver = SQ3,
+            wal = true,
+            schema_version = Repository.SCHEMA_VERSION + 1,
+            migrations = {
+                [Repository.SCHEMA_VERSION] = function(conn)
+                    conn:exec("CREATE TABLE migration_probe(id INTEGER);")
+                end,
+            },
+            backup = function() backups = backups + 1; return true end,
+        }
+        claim("canvas database: a busy WAL checkpoint prevents a stale backup",
+            true, migrated == nil and migration_err == "migration_checkpoint_failed"
+                and backups == 0,
+            tostring(migration_err) .. ", backups = " .. tostring(backups))
+        if migrated then migrated:close() end
+        reader:exec("ROLLBACK;")
+        reader:close()
+        writer:close()
     end
 
     os.remove(db_path)
+    os.remove(db_path .. "-wal")
+    os.remove(db_path .. "-shm")
 end
 
 -- =====================================================================

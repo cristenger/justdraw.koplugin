@@ -62,20 +62,16 @@ end
 
 local function badNumber(v)
     return type(v) ~= "number" or v ~= v
+        or v == math.huge or v == -math.huge
 end
 
 -- ----------------------------------------------------------------- encoding
 
---[[--
-Encode `n` points of a flat `{x1, y1, x2, y2, ...}` array.
-
-Returns an array of `{ point_count = k, points = <string> }`, in order, or
-nil plus a reason. The reasons are `empty`, `bad_geometry` and `bad_point`;
-all three are caller bugs rather than data corruption, and none of them is
-worth writing a half-formed stroke over.
-]]
-function Codec.encode(points, n, logical_w, logical_h)
-    if type(n) ~= "number" or n < 1 then return nil, "empty" end
+local function validateInput(points, n, logical_w, logical_h)
+    if type(n) ~= "number" or n < 1 or n ~= floor(n) or n == math.huge then
+        return nil, "empty"
+    end
+    if type(points) ~= "table" then return nil, "bad_point" end
     if badNumber(logical_w) or badNumber(logical_h)
         or logical_w <= 0 or logical_h <= 0 then
         return nil, "bad_geometry"
@@ -85,9 +81,20 @@ function Codec.encode(points, n, logical_w, logical_h)
             return nil, "bad_point"
         end
     end
+    return true
+end
 
-    local chunks = {}
-    local first = 1
+Codec.validate = validateInput
+
+--- Encode and release one chunk at a time. The whole input is validated before
+--- the callback sees the first blob, so a late bad point cannot leave a
+--- partially emitted stroke inside the caller's transaction.
+function Codec.eachEncodedChunk(points, n, logical_w, logical_h, callback)
+    local valid, err = validateInput(points, n, logical_w, logical_h)
+    if not valid then return nil, err end
+    if type(callback) ~= "function" then return nil, "no_callback" end
+
+    local first, chunk_no = 1, 0
     while true do
         local last = first + Codec.MAX_POINTS - 1
         if last > n then last = n end
@@ -100,15 +107,31 @@ function Codec.encode(points, n, logical_w, logical_h)
             buf[#buf + 1] = char(x % 256, floor(x / 256), y % 256, floor(y / 256))
         end
 
-        chunks[#chunks + 1] = {
-            point_count = count,
-            points = table.concat(buf),
-        }
+        local ok, callback_err = callback(chunk_no, count, table.concat(buf))
+        if ok == nil or ok == false then return nil, callback_err or "callback" end
         if last == n then break end
-        -- The next chunk opens on the point this one closed on, so the
-        -- segment across the seam is drawable from either side alone.
         first = last
+        chunk_no = chunk_no + 1
     end
+    return true
+end
+
+--[[--
+Encode `n` points of a flat `{x1, y1, x2, y2, ...}` array.
+
+Returns an array of `{ point_count = k, points = <string> }`, in order, or
+nil plus a reason. The reasons are `empty`, `bad_geometry` and `bad_point`;
+all three are caller bugs rather than data corruption, and none of them is
+worth writing a half-formed stroke over.
+]]
+function Codec.encode(points, n, logical_w, logical_h)
+    local chunks = {}
+    local ok, err = Codec.eachEncodedChunk(points, n, logical_w, logical_h,
+        function(_, count, blob)
+            chunks[#chunks + 1] = { point_count = count, points = blob }
+            return true
+        end)
+    if not ok then return nil, err end
     return chunks
 end
 
@@ -179,6 +202,62 @@ function Codec.join(chunks, logical_w, logical_h)
         end
     end
     return points, n
+end
+
+-- ------------------------------------------------------ incremental decoding
+
+local Decoder = {}
+Decoder.__index = Decoder
+
+function Codec.newDecoder(logical_w, logical_h, meta)
+    if badNumber(logical_w) or badNumber(logical_h)
+        or logical_w <= 0 or logical_h <= 0 then
+        return nil, "bad_geometry"
+    end
+    meta = meta or {}
+    if tonumber(meta.codec) ~= Codec.VERSION then return nil, "unsupported_codec" end
+    local expected = tonumber(meta.point_count)
+    if not expected or expected < 1 then return nil, "stroke_point_count" end
+    return setmetatable({
+        logical_w = logical_w,
+        logical_h = logical_h,
+        expected = expected,
+        next_chunk = 0,
+        total = 0,
+        last_x = nil,
+        last_y = nil,
+    }, Decoder)
+end
+
+function Decoder:push(chunk_no, sql_point_count, blob)
+    if tonumber(chunk_no) ~= self.next_chunk then return nil, "chunk_order" end
+    local points, n = Codec.decode(blob, self.logical_w, self.logical_h)
+    if not points then
+        if n == "version" then return nil, "unsupported_codec" end
+        if n == "length" or n == "short" then return nil, "chunk_length" end
+        return nil, "chunk_count"
+    end
+    if tonumber(sql_point_count) ~= n then return nil, "chunk_count" end
+
+    local from = 1
+    if self.next_chunk > 0 then
+        if points[1] ~= self.last_x or points[2] ~= self.last_y then
+            return nil, "chunk_joint"
+        end
+        from = 2
+    end
+    self.total = self.total + n - (from - 1)
+    if self.total > self.expected then return nil, "stroke_point_count" end
+    self.last_x = points[n * 2 - 1]
+    self.last_y = points[n * 2]
+    self.next_chunk = self.next_chunk + 1
+    return points, n, from
+end
+
+function Decoder:finish()
+    if self.next_chunk == 0 then return nil, "chunk_count" end
+    if self.total ~= self.expected then return nil, "stroke_point_count" end
+    return true
 end
 
 --[[--

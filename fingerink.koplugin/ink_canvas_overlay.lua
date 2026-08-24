@@ -94,13 +94,22 @@ end
 --- transform, the toolbar's fixed position, and the dirty region.
 function InkCanvasOverlay:_rebuild()
     local sw, sh = Screen:getWidth(), Screen:getHeight()
-    self.transform = Transform.new{
+    local transform = Transform.new{
         logical_w = self.canvas.logical_w,
         logical_h = self.canvas.logical_h,
         screen_w = sw,
         screen_h = sh,
         sheet_top = floor(sh * (100 - self.height_pct) / 100),
     }
+
+    -- Rotation changes the raster scale. Stop capture while the old ready
+    -- transform still exists, so an in-flight stroke can be repaired before
+    -- Cache frees its buffer and enters loading.
+    if self.cache and self.cache:needsRebuild(transform)
+        and self.plugin and self.plugin.onCanvasCacheWillRebuild then
+        self.plugin:onCanvasCacheWillRebuild(self.canvas)
+    end
+    self.transform = transform
 
     self.bar = InkBar:new{
         plugin = self.plugin,
@@ -112,7 +121,13 @@ function InkCanvasOverlay:_rebuild()
     -- refusal on every gesture. paintTo draws it last, on purpose.
     self[1] = self.bar
 
-    if self.cache then self.cache:setTransform(self.transform) end
+    if self.plugin and self.plugin.onCanvasOverlayBarChanged then
+        self.plugin:onCanvasOverlayBarChanged(self)
+    end
+    if self.cache then
+        self.cache:setTransform(self.transform)
+        self.bar:update(false)
+    end
 
     local sheet = self.transform:sheetRect()
     local bar = self.bar.dimen
@@ -121,6 +136,17 @@ function InkCanvasOverlay:_rebuild()
     local right = sheet.x + sheet.w
     if bar.x + bar.w > right then right = bar.x + bar.w end
     self.dimen = Geom:new{ x = left, y = top, w = right - left, h = sh - top }
+end
+
+function InkCanvasOverlay:setBarSide(side)
+    if side ~= "left" and side ~= "right" then return nil, "bad_side" end
+    if self.bar_side == side then return true end
+    local was = self.dimen
+    self.bar_side = side
+    self:_rebuild()
+    UIManager:setDirty(self.plugin and self.plugin.ui or self, "ui", was)
+    UIManager:setDirty(self, "ui", self.dimen)
+    return true
 end
 
 --- The grab strip at the top edge of the sheet.

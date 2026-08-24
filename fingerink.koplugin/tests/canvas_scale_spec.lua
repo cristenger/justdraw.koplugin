@@ -99,7 +99,15 @@ return function(ctx)
 
         sched:drain()
         t:eq(index:isComplete(), true, "it finishes on its own")
-        t:eq(store.calls.save, 1, "and caches the result once")
+        t:eq(store.calls.save, math.ceil(500 / 8),
+            "and persists one bounded batch per tick")
+        for i = 1, #store.saves do
+            local n = 0
+            for _ in pairs(store.saves[i].pages) do n = n + 1 end
+            t:check(n <= 8, "layout write " .. i .. " stays within the tick budget")
+        end
+        t:eq(store.saves[#store.saves].finalize, true,
+            "only completion performs layout pruning")
     end)
 
     -- =================================================================
@@ -217,6 +225,39 @@ return function(ctx)
         end
         t:check(biggest <= Codec.HEADER + 4 * Codec.MAX_POINTS,
             "and no single row is unbounded (" .. biggest .. " bytes)")
+    end)
+
+    t:case("a 100,000 point stroke yields at the point budget", function()
+        local ONE = { id = 3, logical_w = W, logical_h = H }
+        local store = support.newCanvasStore({ ONE })
+        local points = {}
+        for i = 1, 100000 do
+            points[#points + 1] = (i * 7) % W
+            points[#points + 1] = (i * 11) % H
+        end
+        store:putStroke(ONE.id, { width = 4, tool = 1, points = points, n = 100000 })
+        local sched = support.newScheduler()
+        local budget = 8 * Codec.MAX_POINTS
+        local cache = Cache.new{
+            repository = store, canvas = ONE,
+            transform = Transform.new{
+                logical_w = W, logical_h = H,
+                screen_w = W, screen_h = H, sheet_top = 0,
+            },
+            point_budget = budget,
+            chunk_budget = 1000,
+            schedule = function(fn) sched:schedule(fn) end,
+        }
+        cache:open()
+        local before = store.calls.stroke_chunk
+        sched:tick()
+        local chunks = store.calls.stroke_chunk - before
+        t:check(chunks * Codec.MAX_POINTS <= budget + Codec.MAX_POINTS,
+            "one tick is bounded by budget plus one chunk")
+        t:eq(cache:isReady(), false, "one huge stroke cannot monopolise the loop")
+        local ticks = 1 + sched:drain()
+        t:check(ticks > 1, "the work was split over multiple ticks")
+        t:eq(cache:isReady(), true, "and all chunks eventually validated")
     end)
 
     t:case("it comes back continuous, with no seam and no duplicate", function()

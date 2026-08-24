@@ -27,7 +27,9 @@ return function(ctx)
             int64 = opts.int64,
             fail_on = opts.fail_on,
             on_open = function(conn)
-                conn:answer("PRAGMA user_version", { { opts.user_version or 0 } })
+                local version = opts.user_version
+                if version == nil then version = Repository.SCHEMA_VERSION end
+                conn:answer("PRAGMA user_version", { { version } })
                 if opts.answers then opts.answers(conn) end
             end,
         }
@@ -51,7 +53,7 @@ return function(ctx)
     t:describe("ink_canvas_repository / opening")
 
     t:case("a fresh database gets the schema and the version stamp", function()
-        local repo, driver = openRepo()
+        local repo, driver = openRepo{ user_version = 0 }
         t:check(repo ~= nil, "opened")
         local conn = driver.last()
         t:check(conn:saw("CREATE TABLE books"), "books")
@@ -61,6 +63,10 @@ return function(ctx)
         t:check(conn:saw("CREATE TABLE stroke_chunks"), "stroke chunks")
         t:check(conn:saw("PRAGMA user_version=" .. Repository.SCHEMA_VERSION),
             "stamped with the schema version")
+        t:check(conn:indexOf("BEGIN") < conn:indexOf("CREATE TABLE books"),
+            "DDL starts inside the transaction")
+        t:check(conn:indexOf("PRAGMA user_version=") < conn:indexOf("COMMIT"),
+            "the stamp commits with the tables")
         t:eq(repo.version, Repository.SCHEMA_VERSION, "and reports it")
     end)
 
@@ -101,6 +107,9 @@ return function(ctx)
         t:eq(driver.last():saw("CREATE TABLE"), false, "and the schema is not recreated")
         t:eq(driver.last():saw("PRAGMA user_version="), false, "nor downgraded")
         t:check(repo.read_only_reason ~= nil, "with a reason to show the user")
+        t:eq(driver.modes[#driver.modes], "ro", "the live connection is SQLite read-only")
+        t:eq(driver.last():saw("journal_mode"), false,
+            "and does not mutate the future database's journal")
     end)
 
     t:case("every write is refused while read-only", function()
@@ -130,10 +139,24 @@ return function(ctx)
     end)
 
     t:case("a schema that fails to create closes the connection behind it", function()
-        local repo, driver, err = openRepo{ fail_on = "CREATE TABLE" }
+        local repo, driver, err = openRepo{ user_version = 0, fail_on = "CREATE TABLE" }
         t:eq(repo, nil, "no repository")
         t:eq(err, "schema_failed", "reported")
         t:eq(driver.last().closed, true, "and no connection is left dangling")
+        t:check(driver.last():saw("ROLLBACK"), "partial DDL was rolled back")
+    end)
+
+    t:case("a version-zero database with tables is preserved for diagnosis", function()
+        local repo, driver, err = openRepo{
+            user_version = 0,
+            answers = function(conn)
+                conn:answer("FROM sqlite_master", { { "books" } })
+            end,
+        }
+        t:eq(repo, nil, "not recreated")
+        t:eq(err, "schema_failed", "partial schema reported")
+        t:eq(driver.last():saw("CREATE TABLE"), false, "no destructive guess")
+        t:eq(driver.last():saw("DROP TABLE"), false, "nothing was dropped")
     end)
 
     -- =================================================================
@@ -153,6 +176,9 @@ return function(ctx)
             fail_on = extra.fail_on,
             on_open = function(conn)
                 conn:answer("PRAGMA user_version", { { extra.user_version or 1 } })
+                if extra.checkpoint then
+                    conn:answer("wal_checkpoint", { extra.checkpoint })
+                end
             end,
         }
         local repo, err = Repository.open{
@@ -204,6 +230,26 @@ return function(ctx)
     t:case("WAL is checkpointed before the copy, so the copy is complete", function()
         local _, driver = migratingRepo()
         t:check(driver.conns[1]:saw("wal_checkpoint"), "checkpointed")
+    end)
+
+    t:case("a busy WAL checkpoint aborts before copying the main file", function()
+        local repo, _, backups, ran, err = migratingRepo{
+            checkpoint = { 1, 12, 7 },
+        }
+        t:eq(repo, nil, "migration refused")
+        t:eq(err, "migration_checkpoint_failed", "with the durable reason")
+        t:eq(#backups, 0, "no incomplete backup was made")
+        t:eq(#ran, 0, "and no migration ran")
+    end)
+
+    t:case("a checkpoint without all three result columns is refused", function()
+        local repo, _, backups, ran, err = migratingRepo{
+            checkpoint = { 0 },
+        }
+        t:eq(repo, nil, "migration refused")
+        t:eq(err, "migration_checkpoint_failed", "frame counts are mandatory")
+        t:eq(#backups, 0, "no ambiguous main-file copy was made")
+        t:eq(#ran, 0, "and no migration ran")
     end)
 
     t:case("the migration runs inside a transaction", function()
@@ -274,6 +320,17 @@ return function(ctx)
         }
         t:eq(repo:bookId("abc", 5, "/x.epub"), 77, "new id")
         t:check(driver.last():saw("INSERT INTO books"), "inserted")
+    end)
+
+    t:case("read-only book lookup neither inserts nor updates", function()
+        local repo, driver = openRepo{
+            answers = function(conn)
+                conn:answer("SELECT id FROM books", { { 12 } })
+            end,
+        }
+        t:eq(repo:findBookId("abc", 5), 12, "found")
+        t:eq(driver.last():saw("INSERT INTO books"), false, "no insert")
+        t:eq(driver.last():saw("UPDATE books"), false, "no path update")
     end)
 
     t:case("the path is recorded for diagnosis but is not the key", function()
@@ -385,6 +442,10 @@ return function(ctx)
         local repo = openRepo()
         local _, err = repo:createCanvas(12, { anchor_key = "k", logical_w = 0, logical_h = 10 })
         t:eq(err, "bad_geometry", "zero width")
+        local _, infinite = repo:createCanvas(12, {
+            anchor_key = "inf", logical_w = math.huge, logical_h = 10,
+        })
+        t:eq(infinite, "bad_geometry", "infinite geometry")
     end)
 
     t:case("deleting a canvas leaves the cascade to do the rest", function()
@@ -514,6 +575,26 @@ return function(ctx)
         t:check(math.abs(got[6] - 600) < 0.1, "y2")
     end)
 
+    t:case("the production cursor yields one normalized chunk at a time", function()
+        local chunks = Codec.encode({ 10, 20, 30, 40 }, 2,
+            CANVAS.logical_w, CANVAS.logical_h)
+        local repo = openRepo{
+            int64 = true,
+            answers = function(conn)
+                conn:answer("FROM stroke_chunks", { { 0, 2, chunks[1].points } })
+            end,
+        }
+        local cursor = repo:openStrokeCursor(55)
+        local row = cursor:next()
+        t:eq(type(row.chunk_no), "number", "chunk number normalized")
+        t:eq(type(row.point_count), "number", "point count normalized")
+        local none, err, done = cursor:next()
+        t:eq(none, nil, "EOF")
+        t:eq(err, nil, "is not an error")
+        t:eq(done, true, "and is explicit")
+        t:eq(cursor:close(), true, "close remains idempotent")
+    end)
+
     t:case("a stroke whose chunks are missing is reported, not drawn as empty", function()
         local repo = openRepo{
             answers = function(conn) conn:answer("FROM stroke_chunks", {}) end,
@@ -619,6 +700,20 @@ return function(ctx)
         t:check(conn:saw("BEGIN"), "transactional")
         t:check(conn:saw("INSERT"), "and it writes")
         t:check(conn:indexOf("BEGIN") < conn:indexOf("COMMIT"), "committed at the end")
+    end)
+
+    t:case("a layout batch prepares its insert once", function()
+        local repo, driver = openRepo()
+        repo:saveLayoutPages(12, "hash-a", {
+            [1] = 11, [2] = 12, [3] = 13, [4] = 14,
+        }, false)
+        local prepares = 0
+        for _, entry in ipairs(driver.last().log) do
+            if entry.op == "prepare" and entry.sql:find("INSERT OR REPLACE") then
+                prepares = prepares + 1
+            end
+        end
+        t:eq(prepares, 1, "all rows reuse one lua-ljsqlite3 statement")
     end)
 
     t:case("saving a layout prunes older ones in the same transaction", function()

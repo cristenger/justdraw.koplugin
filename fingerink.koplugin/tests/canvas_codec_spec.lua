@@ -141,6 +141,51 @@ return function(ctx)
         t:eq(Codec.chunkCount(nil), 0, "and a missing count is not an error here")
     end)
 
+    t:describe("ink_canvas_codec / incremental paths")
+
+    t:case("the encoder emits one bounded blob at a time", function()
+        local n, emitted = 10000, {}
+        local ok = Codec.eachEncodedChunk(diagonal(n), n, W, H,
+            function(chunk_no, count, blob)
+                emitted[#emitted + 1] = { chunk_no, count, #blob }
+                return true
+            end)
+        t:eq(ok, true, "encoded")
+        t:eq(#emitted, Codec.chunkCount(n), "every chunk visited")
+        for i = 1, #emitted do
+            t:eq(emitted[i][1], i - 1, "contiguous chunk number")
+            t:check(emitted[i][2] <= Codec.MAX_POINTS, "bounded point count")
+        end
+    end)
+
+    t:case("the incremental decoder validates order, seams and total", function()
+        local n = Codec.MAX_POINTS + 10
+        local chunks = Codec.encode(diagonal(n), n, W, H)
+        local decoder = Codec.newDecoder(W, H, { codec = Codec.VERSION, point_count = n })
+        for i = 1, #chunks do
+            local points = decoder:push(i - 1, chunks[i].point_count, chunks[i].points)
+            t:check(points ~= nil, "chunk " .. i)
+        end
+        t:eq(decoder:finish(), true, "complete stroke")
+    end)
+
+    t:case("incremental corruption has stable reasons", function()
+        local chunks = Codec.encode(diagonal(10), 10, W, H)
+        local decoder = Codec.newDecoder(W, H, { codec = Codec.VERSION, point_count = 10 })
+        local _, order = decoder:push(1, chunks[1].point_count, chunks[1].points)
+        t:eq(order, "chunk_order", "gap caught")
+
+        local future, ferr = Codec.newDecoder(W, H, { codec = 99, point_count = 10 })
+        t:eq(future, nil, "future codec refused")
+        t:eq(ferr, "unsupported_codec", "without guessing")
+
+        local short = Codec.newDecoder(W, H, { codec = Codec.VERSION, point_count = 11 })
+        short:push(0, chunks[1].point_count, chunks[1].points)
+        local ok, total = short:finish()
+        t:eq(ok, nil, "wrong metadata total refused")
+        t:eq(total, "stroke_point_count", "with a stable reason")
+    end)
+
     -- =================================================================
     t:describe("ink_canvas_codec / refusals")
 
@@ -155,11 +200,29 @@ return function(ctx)
         t:eq(err, "bad_geometry", "zero width")
         local _, err2 = Codec.encode({ 1, 1 }, 1, W, -3)
         t:eq(err2, "bad_geometry", "negative height")
+        local _, err3 = Codec.encode({ 1, 1 }, 1, math.huge, H)
+        t:eq(err3, "bad_geometry", "infinite width")
+    end)
+
+    t:case("non-finite coordinates are refused before any chunk is emitted", function()
+        local emitted = 0
+        local ok, err = Codec.eachEncodedChunk(
+            { 1, 1, math.huge, 2 }, 2, W, H,
+            function() emitted = emitted + 1; return true end)
+        t:eq(ok, nil, "the stroke is refused")
+        t:eq(err, "bad_point", "with a corruption-safe reason")
+        t:eq(emitted, 0, "no partial payload escaped validation")
     end)
 
     t:case("a missing coordinate is refused rather than written as zero", function()
         local _, err = Codec.encode({ 1, 1, 2 }, 2, W, H)
         t:eq(err, "bad_point", "the truncated pair is caught")
+    end)
+
+    t:case("a missing point table is a refusal, not an indexing crash", function()
+        local chunks, err = Codec.encode(nil, 1, W, H)
+        t:eq(chunks, nil, "nothing emitted")
+        t:eq(err, "bad_point", "the boundary returns a stable reason")
     end)
 
     t:case("out-of-canvas points are clamped, not wrapped", function()

@@ -20,7 +20,9 @@ ever asked to confirm the handful of candidates the map already produced.
 
 A generation counter is what keeps a rerender from mixing two layouts: an
 in-flight batch belonging to the previous generation returns without touching
-anything, and a half-built index is never written.
+the new in-memory map. Each completed batch may persist its safe derived rows,
+but only the final batch prunes older layouts; abandoning a generation can
+therefore cost cache misses, never ink or a completed cache.
 ]]
 
 local logger = require("logger")
@@ -36,6 +38,7 @@ Index.__index = Index
   opts.book_id     row id from the repository
   opts.batch       anchors resolved per tick (default 8)
   opts.schedule    function(fn) -- UIManager:nextTick
+  opts.on_complete function(), after the current generation is fully indexed
 ]]
 function Index.new(opts)
     return setmetatable({
@@ -44,6 +47,7 @@ function Index.new(opts)
         book_id = opts.book_id,
         batch = opts.batch or 8,
         schedule = opts.schedule,
+        on_complete = opts.on_complete,
 
         canvases = {},
         by_id = {},
@@ -67,7 +71,7 @@ function Index:open()
     local canvases, err = self.repository:listCanvases(self.book_id)
     if not canvases then
         logger.err("FingerInk: cannot list canvases:", err)
-        canvases = {}
+        return nil, err
     end
     -- Copied, not aliased: `add` and `forget` mutate this list, and doing that
     -- to a table the repository still owns would be a change at a distance.
@@ -78,6 +82,19 @@ function Index:open()
         self.by_id[canvases[i].id] = canvases[i]
     end
     self:_rebuild()
+    return true
+end
+
+function Index:openEmpty()
+    self.canvases = {}
+    self.by_id = {}
+    self.page_of = {}
+    self.ids_by_page = {}
+    self.orphans = {}
+    self.pending = {}
+    self.derived = {}
+    self.complete = true
+    return true
 end
 
 --[[--
@@ -113,8 +130,8 @@ Take in a canvas that has just been created.
 
 Placed straight away rather than left for the next rebuild, so the reader's new
 sheet is on the page it was made on immediately. It is deliberately not written
-into the layout cache: that map is saved as a whole when a build finishes, and
-a single extra row would only be a miss saved on the next open.
+into the layout cache: that row will be included in the next bounded rebuild,
+and a miss before then only costs one resolution.
 ]]
 function Index:add(canvas, page)
     if self.by_id[canvas.id] then return end
@@ -216,6 +233,7 @@ function Index:_rebuild()
 
     if #self.pending == 0 then
         self.complete = true
+        self:_notifyComplete()
         return
     end
     self.complete = false
@@ -241,6 +259,7 @@ end
 
 function Index:_resolveBatch(generation)
     local doc = self.document
+    local resolved = {}
     for _ = 1, self.batch do
         local id = table.remove(self.pending)
         if not id then break end
@@ -250,6 +269,7 @@ function Index:_resolveBatch(generation)
         if page then
             self:_place(id, page)
             self.derived[id] = page
+            resolved[id] = page
         else
             -- Deliberately not cached. Writing "nowhere" would turn a
             -- temporary miss into a permanent one.
@@ -257,21 +277,36 @@ function Index:_resolveBatch(generation)
         end
     end
 
-    if #self.pending > 0 then
+    local final = #self.pending == 0
+    if self.repository.read_only ~= true
+        and (next(resolved) ~= nil or final) then
+        -- Persist only this bounded resolution batch. Partial layout rows are
+        -- safe derived data: a missing row is resolved again, while one that
+        -- landed already belongs to this exact rendering hash. Pruning waits
+        -- for the final batch so a half-built generation cannot evict one of
+        -- the two useful completed layouts.
+        local ok, err = self.repository:saveLayoutPages(
+            self.book_id, self.hash, resolved, final)
+        if not ok then
+            logger.warn("FingerInk: could not cache a canvas page-index batch:", err)
+        end
+    end
+
+    if not final then
         self:_scheduleBatch(generation)
         return
     end
 
     self.complete = true
-    if next(self.derived) ~= nil then
-        local ok, err = self.repository:saveLayoutPages(self.book_id, self.hash, self.derived)
-        if not ok then
-            -- Losing the cache costs a rebuild next time, nothing more.
-            logger.warn("FingerInk: could not cache the canvas page index:", err)
-        end
-    end
     logger.info("FingerInk: canvas page index ready,", #self.canvases, "canvases,",
         #self.orphans, "orphaned")
+    self:_notifyComplete()
+end
+
+function Index:_notifyComplete()
+    if not self.on_complete then return end
+    local ok, err = pcall(self.on_complete)
+    if not ok then logger.warn("FingerInk: canvas index completion callback failed:", err) end
 end
 
 return Index

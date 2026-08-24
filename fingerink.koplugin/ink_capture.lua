@@ -45,6 +45,7 @@ local Capture = {
     stylus_callback = nil,
     on_error = nil,
     failing = false,
+    generation = 0,
 
     TOOL_FINGER = TOOL_TYPE_FINGER,
     TOOL_PEN = TOOL_TYPE_PEN,
@@ -123,14 +124,42 @@ function Capture:fail(err)
     logger.err("FingerInk: input handler failed:", err)
     self.active = false
     local on_error = self.on_error
+    local generation = self.generation
     UIManager:nextTick(function()
         self.failing = false
+        if self.generation ~= generation then return end
         self:remove()
         if on_error then
             -- A failure in the notifier must not resurrect the original error.
             local ok, nested = pcall(on_error, err)
             if not ok then
                 logger.err("FingerInk: error handler itself failed:", nested)
+            end
+        end
+    end)
+end
+
+--[[--
+Make both input wrappers inert now and remove them from a safe UI stack.
+
+This is the non-error counterpart of `fail`: a storage or raster failure can
+be discovered while a stylus callback is running, and unregistering from that
+stack would make KOReader's next stylus slot call a nil callback. Callers may
+queue cleanup that must happen after the hook has actually been removed.
+]]
+function Capture:removeDeferred(after)
+    self.active = false
+    local generation = self.generation
+    UIManager:nextTick(function()
+        -- A programmatic close/switch may have removed the old hook and
+        -- installed another before this tick. Never tear down that newer
+        -- capture or apply stale cleanup to its state.
+        if self.generation ~= generation then return end
+        self:remove()
+        if after then
+            local ok, err = pcall(after)
+            if not ok then
+                logger.err("FingerInk: deferred capture cleanup failed:", err)
             end
         end
     end)
@@ -248,6 +277,7 @@ function Capture:installFinger(frame_handler, on_error)
     self.on_error = on_error
     self.backend = "finger"
     self.active = true
+    self.generation = self.generation + 1
     self:_installFeedWrapper(frame_handler)
 
     logger.info("FingerInk: capture installed, backend finger")
@@ -289,6 +319,7 @@ function Capture:installStylus(stylus_handler, residual_frame_handler, on_error)
     self.on_error = on_error
     self.backend = "stylus"
     self.active = true
+    self.generation = self.generation + 1
 
     local handler = guard(self, stylus_handler, false)
     local callback

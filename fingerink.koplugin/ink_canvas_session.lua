@@ -46,6 +46,9 @@ local MESSAGES = {
     save_failed = _("Could not save ink. It is still here: use Retry saving."),
     save_retried = _("Ink saved"),
     indexing = _("Still indexing this book's sheets"),
+    read_failed = _("Could not read this sheet's ink. The database was left unchanged."),
+    list_failed = _("Could not list this book's sheets."),
+    read_only = _("This sheet is read-only because it was created by a newer FingerInk version."),
 }
 
 --[[--
@@ -109,31 +112,69 @@ function Session:open()
         self.owns_repository = true
     end
 
-    local book_id, err = self.repository:bookId(
-        self.identity.partial_md5, self.identity.file_size, self.file)
-    if not book_id then
-        logger.warn("FingerInk: no stable identity for this book:", err)
-        return self:_unavailable("no_identity")
+    local read_only = self.repository.read_only == true
+    local book_id, err
+    if read_only then
+        book_id, err = self.repository:findBookId(
+            self.identity.partial_md5, self.identity.file_size)
+    else
+        book_id, err = self.repository:bookId(
+            self.identity.partial_md5, self.identity.file_size, self.file)
     end
-    self.book_id = book_id
-    self.available = true
-
+    local empty_read_only = read_only and err == "not_found"
+    if not book_id then
+        if empty_read_only then
+            -- A newer plugin has not registered this book. There can be no
+            -- canvases to list and this older plugin must not insert the row.
+            self.book_id = nil
+        else
+            logger.warn("FingerInk: no stable identity for this book:", err)
+            return self:_unavailable("no_identity")
+        end
+    else
+        self.book_id = book_id
+    end
     self.index = Index.new{
         repository = self.repository,
         document = self.document,
         book_id = book_id,
         batch = self.batch,
         schedule = self.schedule,
+        on_complete = function()
+            if self.closed or not self.index then return end
+            if self.page then self:setPage(self.page) end
+            if self.plugin and self.plugin.onCanvasIndexReady then
+                self.plugin:onCanvasIndexReady()
+            end
+        end,
     }
-    self.index:open()
+    local indexed, index_err
+    if empty_read_only then indexed = self.index:openEmpty()
+    else indexed, index_err = self.index:open() end
+    if not indexed then
+        self.index = nil
+        self:_closeOwnedRepository()
+        self.notify(MESSAGES.list_failed)
+        return nil, index_err or "list_failed"
+    end
+    self.available = true
     logger.dbg("FingerInk: canvas session open for book", book_id)
     return true
 end
 
 function Session:_unavailable(reason)
     self.available = false
+    self:_closeOwnedRepository()
     self.notify(MESSAGES[reason])
     return nil, reason
+end
+
+function Session:_closeOwnedRepository()
+    if self.owns_repository and self.repository and self.repository.close then
+        self.repository:close()
+        self.repository = nil
+        self.owns_repository = false
+    end
 end
 
 --- Required here rather than at the top: datastorage pulls in a chunk of
@@ -147,15 +188,32 @@ function Session:isAvailable()
     return self.available and not self.closed
 end
 
+function Session:isWritable()
+    return self:isAvailable() and self.repository ~= nil
+        and self.repository.read_only ~= true
+end
+
 function Session:isIndexing()
     return self.index ~= nil and not self.index:isComplete()
 end
 
 --- Close everything, innermost first: the canvas and its queue, then the
 --- index, then the connection.
-function Session:close()
+function Session:close(opts)
     if self.closed then return end
-    self:closeCanvas()
+    opts = opts or {}
+    local canvas_ok, canvas_err = self:closeCanvas()
+    if not canvas_ok and not opts.force then return nil, canvas_err end
+    if not canvas_ok then
+        if self.overlay_widget then UIManager:close(self.overlay_widget) end
+        if self.cache_obj then self.cache_obj:close() end
+        self.overlay_widget = nil
+        self.cache_obj = nil
+        self.queue = nil
+        self.canvas = nil
+        self.next_seq = nil
+        self.edited = false
+    end
     if self.index then
         self.index:cancel()
         self.index = nil
@@ -166,6 +224,7 @@ function Session:close()
     self.repository = nil
     self.available = false
     self.closed = true
+    return canvas_ok, canvas_err
 end
 
 --- A rerender moved the text. Only the page index is rebuilt; not one stroke
@@ -233,7 +292,7 @@ end
 -- ------------------------------------------------------------------ canvases
 
 --[[--
-Open the canvas at the reader's position, creating one if there is none.
+Find or create the canvas at the reader's position. The caller opens it.
 
 Refused while the index is still building: the index is the only thing that
 knows whether this paragraph already has a sheet, and a second sheet on one
@@ -241,6 +300,7 @@ paragraph is not something a reader can untangle afterwards.
 ]]
 function Session:createHere(page)
     if not self:isAvailable() then return nil, "unavailable" end
+    if not self:isWritable() then return nil, "read_only" end
     if self:isIndexing() then
         self.notify(MESSAGES.indexing)
         return nil, "indexing"
@@ -252,7 +312,6 @@ function Session:createHere(page)
     -- An existing sheet at this exact anchor is the one the reader means.
     for _, canvas in ipairs(self:canvasesHere(page or self.page or 1)) do
         if canvas.anchor_key == spec.anchor_key then
-            self:openCanvas(canvas)
             return canvas
         end
     end
@@ -263,7 +322,6 @@ function Session:createHere(page)
     if not canvas then return nil, cerr end
 
     self.index:add(canvas, page or self.page)
-    self:openCanvas(canvas)
     return canvas
 end
 
@@ -276,42 +334,97 @@ freed -- because loading the next one takes the memory the last one was using.
 function Session:openCanvas(canvas)
     if not canvas or not self:isAvailable() then return nil end
     if self.canvas and self.canvas.id == canvas.id then return self.overlay_widget end
-    self:closeCanvas()
+    local closed, close_err = self:closeCanvas()
+    if not closed then return nil, close_err end
+
+    local transform, transform_err = self:_transform(canvas, 0)
+    if not transform then return nil, transform_err or "bad_geometry" end
 
     self.canvas = canvas
-    self.queue = Queue.new{
-        repository = self.repository,
-        schedule = self.scheduleIn,
-        unschedule = self.unschedule,
-        on_error = function() self.notify(MESSAGES.save_failed) end,
-    }
+    if self:isWritable() then
+        self.queue = Queue.new{
+            repository = self.repository,
+            schedule = self.scheduleIn,
+            unschedule = self.unschedule,
+            on_error = function(reason)
+                self.notify(MESSAGES.save_failed)
+                if self.canvas == canvas and self.plugin
+                    and self.plugin.onCanvasSaveFailed then
+                    self.plugin:onCanvasSaveFailed(canvas, reason)
+                end
+            end,
+            on_persisted = function(local_id, row_id)
+                if self.cache_obj then
+                    return self.cache_obj:markPersisted(local_id, row_id)
+                end
+                return nil, "no_cache"
+            end,
+        }
+    else
+        self.queue = nil
+        self.notify(MESSAGES.read_only)
+    end
     self.cache_obj = Cache.new{
         repository = self.repository,
         canvas = canvas,
-        transform = self:_transform(canvas, 0),
+        transform = transform,
         schedule = self.schedule,
+        on_ready = function()
+            self:_syncNextSeq()
+            if self.canvas == canvas and self.overlay_widget
+                and self.plugin and self.plugin.onCanvasReady then
+                self.plugin:onCanvasReady(canvas)
+            end
+        end,
+        on_error = function()
+            self.notify(MESSAGES.read_failed)
+            if self.canvas == canvas and self.overlay_widget
+                and self.plugin and self.plugin.onCanvasLoadFailed then
+                self.plugin:onCanvasLoadFailed(canvas)
+            end
+        end,
     }
-    self.cache_obj:open()
+    local cache_ok, cache_err = self.cache_obj:open()
+    if cache_ok then self:_syncNextSeq() end
 
     self.overlay_widget = Overlay:new{
         plugin = self.plugin,
         cache = self.cache_obj,
         canvas = canvas,
+        bar_side = self.plugin and self.plugin.bar_side or "right",
     }
     UIManager:show(self.overlay_widget)
-    return self.overlay_widget
+    -- Synchronous list/metadata failures are represented by the same visible
+    -- load_failed sheet as asynchronous chunk failures. Closing the objects
+    -- here would remove the only Retry control and contradict fail-closed
+    -- recovery.
+    return self.overlay_widget, cache_ok and nil or cache_err
+end
+
+function Session:_syncNextSeq()
+    if not self.cache_obj then return end
+    local strokes = self.cache_obj:strokes()
+    local last = strokes[#strokes]
+    self.next_seq = (last and last.seq or 0) + 1
 end
 
 function Session:closeCanvas()
-    if not self.canvas then return end
+    if not self.canvas then return true end
+    if self.queue then
+        local ok, err = self.queue:close()
+        if not ok then return nil, err end
+    end
     if self.edited then
-        -- `listCanvases` orders by updated_at, and that ordering is what puts
-        -- the sheet the reader last wrote in at the top of the chooser.
-        self.repository:touchCanvas(self.canvas.id)
+        -- This is ordering metadata, not ink durability. Do it only after the
+        -- queue committed, and never keep a safely written canvas open merely
+        -- because its recency marker could not be updated.
+        local touched, terr = self.repository:touchCanvas(self.canvas.id)
+        if not touched then
+            logger.warn("FingerInk: could not update canvas recency:", terr)
+        end
         self.edited = false
     end
     if self.queue then
-        self.queue:close()
         self.queue = nil
     end
     if self.overlay_widget then
@@ -323,6 +436,8 @@ function Session:closeCanvas()
         self.cache_obj = nil
     end
     self.canvas = nil
+    self.next_seq = nil
+    return true
 end
 
 --[[--
@@ -334,12 +449,24 @@ that never existed is an error waiting to be logged.
 ]]
 function Session:deleteCanvas(canvas)
     if not canvas or not self:isAvailable() then return nil end
-    if self.canvas and self.canvas.id == canvas.id then
-        if self.queue then self.queue:discard() end
-        self:closeCanvas()
-    end
+    if not self:isWritable() then return nil, "read_only" end
     local ok, err = self.repository:deleteCanvas(canvas.id)
     if not ok then return nil, err end
+    if self.canvas and self.canvas.id == canvas.id then
+        if self.queue then self.queue:discard() end
+        if self.overlay_widget then
+            UIManager:close(self.overlay_widget)
+            self.overlay_widget = nil
+        end
+        if self.cache_obj then
+            self.cache_obj:close()
+            self.cache_obj = nil
+        end
+        self.queue = nil
+        self.canvas = nil
+        self.next_seq = nil
+        self.edited = false
+    end
     if self.index then self.index:forget(canvas.id) end
     self.marks_here = {}
     return true
@@ -357,6 +484,24 @@ function Session:cache()
     return self.cache_obj
 end
 
+function Session:loadFailed()
+    return self.cache_obj ~= nil and self.cache_obj:stateName() == "load_failed"
+end
+
+function Session:retryLoad()
+    if not self.cache_obj then return nil, "no_canvas" end
+    -- A ready cache may have failed while repairing after an erase/undo, and
+    -- there may also be newly drawn strokes that exist only in Queue. Reloading
+    -- straight from SQLite would resurrect pending deletes and drop pending
+    -- inserts from the raster. Make the queue the durability barrier first;
+    -- on failure both representations remain available for another retry.
+    if self.queue and self.queue:pendingCount() > 0 then
+        local saved, save_err = self.queue:flush()
+        if not saved then return nil, save_err end
+    end
+    return self.cache_obj:retryOpen()
+end
+
 function Session:transform()
     return self.overlay_widget and self.overlay_widget.transform
 end
@@ -370,11 +515,13 @@ Points are canvas coordinates. Nothing here touches the disk -- the queue
 decides when that happens.
 ]]
 function Session:addStroke(points, n, width, tool)
-    if not self.canvas or not self.queue then return nil, "no_canvas" end
+    if not self.canvas then return nil, "no_canvas" end
+    if not self:isWritable() then return nil, "read_only" end
+    if not self.queue then return nil, "no_queue" end
     if not self.cache_obj:isReady() then return nil, "loading" end
 
-    local seq = (self.cache_obj:strokes()[#self.cache_obj:strokes()] or {}).seq
-    seq = (seq or 0) + 1
+    local seq = self.next_seq
+    if not seq then return nil, "no_seq" end
 
     local local_id, err = self.queue:addStroke(self.canvas, {
         seq = seq, width = width, tool = tool, points = points, n = n,
@@ -392,17 +539,39 @@ function Session:addStroke(points, n, width, tool)
         id = local_id, seq = seq, width = width, tool = tool, point_count = n,
         min_x = min_x, min_y = min_y, max_x = max_x, max_y = max_y,
     }, points, n)
+    local row_id = self.queue:realId(local_id)
+    if row_id then
+        local marked, merr = self.cache_obj:markPersisted(local_id, row_id)
+        if not marked then return nil, merr end
+        self.queue:forgetReal(local_id, row_id)
+    end
+    self.next_seq = seq + 1
     self.edited = true
     return local_id
 end
 
 --- Remove the topmost stroke under a canvas point. Returns the dirty region.
-function Session:eraseAt(cx, cy, radius)
+function Session:beginErase()
+    if not self.cache_obj or not self.cache_obj:isReady() then return nil end
+    return self.cache_obj:beginErase()
+end
+
+function Session:endErase(ctx)
+    if self.cache_obj then self.cache_obj:endErase(ctx) end
+end
+
+function Session:eraseAt(cx, cy, radius, ctx)
     if not self.canvas or not self.cache_obj then return nil end
-    local hit = self.cache_obj:hitTest(cx, cy, radius)
-    if not hit then return nil end
-    local box = self.cache_obj:removeStroke(hit.id)
-    self.queue:removeStroke(self.canvas, hit.id)
+    if not self.queue then return nil, "read_only" end
+    if not self.cache_obj:isReady() then
+        return nil, self.cache_obj:stateName()
+    end
+    local hit, herr = self.cache_obj:hitTest(cx, cy, radius, ctx)
+    if not hit then return nil, herr end
+    local accepted, err = self.queue:removeStroke(self.canvas, hit.id)
+    if not accepted then return nil, err end
+    local box, rerr = self.cache_obj:removeStroke(hit.id)
+    if not box then return nil, rerr end
     self.edited = true
     return box
 end
@@ -411,11 +580,17 @@ end
 --- or nil when there was nothing to undo.
 function Session:undo()
     if not self.canvas or not self.cache_obj then return nil end
+    if not self.queue then return nil, "read_only" end
+    if not self.cache_obj:isReady() then
+        return nil, self.cache_obj:stateName()
+    end
     local strokes = self.cache_obj:strokes()
     local last = strokes[#strokes]
     if not last then return nil end
-    local box = self.cache_obj:removeStroke(last.id)
-    self.queue:removeStroke(self.canvas, last.id)
+    local accepted, err = self.queue:removeStroke(self.canvas, last.id)
+    if not accepted then return nil, err end
+    local box, rerr = self.cache_obj:removeStroke(last.id)
+    if not box then return nil, rerr end
     self.edited = true
     return box or true
 end
@@ -452,7 +627,12 @@ end
 function Session:retrySave()
     if not self.queue then return true end
     local ok, err = self.queue:retry()
-    if ok then self.notify(MESSAGES.save_retried) end
+    if ok then
+        self.notify(MESSAGES.save_retried)
+        if self.plugin and self.plugin.onCanvasSaveRecovered then
+            self.plugin:onCanvasSaveRecovered(self.canvas)
+        end
+    end
     return ok, err
 end
 

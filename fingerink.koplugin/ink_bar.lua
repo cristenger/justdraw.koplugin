@@ -59,7 +59,11 @@ function InkBar:init()
     local w = math.floor(Screen:getWidth() * 0.15)
 
     self.draw_btn = self:mkButton(_("Draw"), w, function()
-        p:setDrawing(not p.drawing)
+        if p.canvas_open and p.session and p.session:loadFailed() then
+            p:retryCanvasLoad()
+        else
+            p:setDrawing(not p.drawing)
+        end
     end)
     self.tool_btn = self:mkButton(_("Pen"), w, function()
         p:setEraser(not p.eraser)
@@ -110,7 +114,16 @@ end
 --- Relabel the two stateful buttons. Pass true to also repaint.
 function InkBar:update(refresh)
     local p = self.plugin
-    self.draw_btn:setText(p.drawing and _("Stop") or _("Draw"), self.draw_btn.width)
+    local draw_text = p.drawing and _("Stop") or _("Draw")
+    local session = p.session
+    local cache = session and session:cache()
+    if cache and not p.drawing then
+        local state = cache:stateName()
+        if state == "loading" then draw_text = _("Loading")
+        elseif state == "load_failed" then draw_text = _("Retry")
+        elseif not session:isWritable() then draw_text = _("View") end
+    end
+    self.draw_btn:setText(draw_text, self.draw_btn.width)
     self.tool_btn:setText(p.eraser and _("Eraser") or _("Pen"), self.tool_btn.width)
     if refresh then
         -- Embedded, the bar is not a window, and UIManager finds nothing to

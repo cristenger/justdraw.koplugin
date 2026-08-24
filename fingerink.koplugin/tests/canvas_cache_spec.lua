@@ -55,6 +55,7 @@ return function(ctx)
             canvas = CANVAS,
             transform = transform(opts.sheet_top),
             batch = opts.batch or 32,
+            point_budget = opts.point_budget,
             cell = opts.cell or 100,
             schedule = function(fn) sched:schedule(fn) end,
         }
@@ -85,6 +86,57 @@ return function(ctx)
         sched:drain()
         t:eq(store.calls.stroke_read, 5, "and then every stroke, once each")
         t:eq(cache:isReady(), true, "ready")
+    end)
+
+    t:case("one enormous stroke is bounded by points, not counted as one unit", function()
+        local cache, store, sched = fixture{
+            strokes = { bar(10, 10, 5000) },
+            point_budget = 1024,
+        }
+        cache:open()
+        sched:tick()
+        t:eq(store.calls.stroke_chunk, 1, "one bounded chunk in the first tick")
+        t:eq(cache:isReady(), false, "the rest stays scheduled")
+        sched:drain()
+        t:eq(cache:isReady(), true, "eventually complete")
+        t:check(store.calls.stroke_chunk > 1, "the stroke really was streamed")
+    end)
+
+    t:case("a read error fails closed instead of producing an empty ready sheet", function()
+        local cache, store, sched = fixture{ strokes = { bar(10, 10) } }
+        store.fail_stroke_chunk = 0
+        cache:open()
+        sched:drain()
+        t:eq(cache:isReady(), false, "not editable")
+        t:eq(cache:stateName(), "load_failed", "the error remains visible")
+        t:check(cache:loadError() ~= nil, "with a retryable reason")
+        local dest = support.newBlitbuffer(W, H)
+        cache:paintTo(dest)
+        t:eq(#dest.blits, 0, "a partial raster is not presented as complete ink")
+    end)
+
+    t:case("a cursor that cannot close does not declare the sheet ready", function()
+        local cache, store, sched = fixture{ strokes = { bar(10, 10) } }
+        store.fail_stroke_cursor_close = "cursor close failed"
+        cache:open()
+        sched:drain()
+        t:eq(cache:stateName(), "load_failed", "cursor lifetime failure is visible")
+        t:eq(cache:isReady(), false, "no complete generation was announced")
+    end)
+
+    t:case("corrupt stroke metadata fails closed before reaching the grid", function()
+        local cache, store = fixture()
+        function store:listStrokes()
+            return { {
+                id = 1, seq = 1, width = 4, tool = 1, codec = 1,
+                point_count = 2, min_x = 100, min_y = 100,
+                max_x = 0 / 0, max_y = 100,
+            } }
+        end
+        local ok, err = cache:open()
+        t:eq(ok, nil, "the sheet did not open")
+        t:eq(err, "stroke_metadata", "with a stable metadata reason")
+        t:eq(cache:stateName(), "load_failed", "not as an empty ready sheet")
     end)
 
     t:case("an empty canvas is ready straight away", function()
@@ -164,6 +216,39 @@ return function(ctx)
         t:check(#cache:buffer().rects > 0, "and it was painted")
     end)
 
+    t:case("a pending stroke is hit and repaired without a negative SQLite read", function()
+        local cache, store = readyCache()
+        local s = bar(100, 100)
+        cache:addStroke({ id = -1, seq = 1, width = 4, tool = 1,
+                          point_count = s.n, min_x = 100, min_y = 100,
+                          max_x = 130, max_y = 100 }, s.points, s.n)
+        local reads = store.calls.stroke_read
+        t:eq(cache:hitTest(115, 100, 2).id, -1, "the live metadata is found")
+        t:eq(store.calls.stroke_read, reads, "without repository access")
+        t:eq(cache:markPersisted(-1, 77), true, "durable id adopted")
+        t:eq(cache:strokes()[1].id, 77, "the public cache key changed")
+        t:eq(cache:removeStroke(77) ~= nil, true, "grid and by_id were rekeyed")
+    end)
+
+    t:case("pending repair visits nearby chunks, not every live point", function()
+        local cache, store = readyCache()
+        local points = {}
+        for i = 1, 5000 do
+            points[#points + 1] = i / 10
+            points[#points + 1] = 100
+        end
+        cache:addStroke({
+            id = -1, seq = 1, width = 2, tool = 1, point_count = 5000,
+            min_x = 0.1, min_y = 100, max_x = 500, max_y = 100,
+        }, points, 5000)
+        local reads = store.calls.stroke_read
+        local before = #cache:buffer().rects
+        cache:repair{ min_x = 450, min_y = 99, max_x = 451, max_y = 101, width = 2 }
+        local painted = #cache:buffer().rects - before
+        t:eq(store.calls.stroke_read, reads, "pending repair uses live memory")
+        t:check(painted < 1500, "only a bounded chunk was replayed (" .. painted .. ")")
+    end)
+
     t:case("erasing repaints only its own corner of the canvas", function()
         local cache = readyCache{
             strokes = { bar(100, 100), bar(1500, 2000) },
@@ -216,6 +301,77 @@ return function(ctx)
         local hit = cache:hitTest(110, 100, 18)
         t:check(hit ~= nil, "found")
         t:eq(hit.id, cache:strokes()[1].id, "the near one")
+    end)
+
+    t:case("a hit between sparse samples uses segment distance", function()
+        local sparse = { width = 2, tool = 1, points = { 100, 100, 200, 100 }, n = 2 }
+        local cache = readyCache{ strokes = { sparse } }
+        t:check(cache:hitTest(150, 100, 1) ~= nil,
+            "the line is erasable between its endpoints")
+    end)
+
+    t:case("stroke width expands the grid cells and the geometric reach", function()
+        local thick = { width = 20, tool = 1, points = { 95, 10, 95, 40 }, n = 2 }
+        local cache = readyCache{ strokes = { thick }, cell = 100 }
+        t:check(cache:hitTest(104, 25, 1) ~= nil,
+            "the visible edge crosses into the neighbouring cell")
+    end)
+
+    t:case("a one-point stroke remains erasable as a dot", function()
+        local dot = { width = 2, tool = 1, points = { 100, 100 }, n = 1 }
+        local cache = readyCache{ strokes = { dot } }
+        t:check(cache:hitTest(101, 100, 1) ~= nil, "point distance includes width")
+    end)
+
+    t:case("a multichunk seam is erasable on either side of its joint", function()
+        local points = {}
+        for i = 1, 1100 do
+            points[#points + 1] = i
+            points[#points + 1] = 100
+        end
+        local cache = readyCache{ strokes = {
+            { width = 2, tool = 1, points = points, n = 1100 },
+        } }
+        t:check(cache:hitTest(1023.5, 100, 1) ~= nil,
+            "the segment crossing the repeated joint is continuous")
+    end)
+
+    t:case("one eraser contact reuses decoded chunks", function()
+        local cache, store = readyCache{ strokes = { bar(100, 100) } }
+        local ctx = cache:beginErase()
+        local before = store.calls.stroke_read
+        t:check(cache:hitTest(110, 100, 4, ctx) ~= nil, "first hit")
+        local after_first = store.calls.stroke_read
+        t:check(cache:hitTest(111, 100, 4, ctx) ~= nil, "second hit")
+        t:check(after_first > before, "the chunk was read once for the contact")
+        t:eq(store.calls.stroke_read, after_first, "and then came from the LRU")
+        t:eq(ctx.stats.chunks_decoded, 1, "one decode is recorded for the operation")
+        t:eq(ctx.stats.lru_hits, 1, "the second sample is an observable LRU hit")
+        t:check(ctx.stats.candidates >= 2, "candidate work is counted")
+        cache:endErase(ctx)
+        t:eq(#ctx.order, 0, "lift releases the operation cache")
+    end)
+
+    t:case("the eraser LRU never retains more than eight chunks", function()
+        local points = {}
+        for i = 1, 10000 do
+            points[#points + 1] = (i - 1) * (W - 1) / 9999
+            points[#points + 1] = 100
+        end
+        local cache = readyCache{ strokes = {
+            { width = 2, tool = 1, points = points, n = 10000 },
+        } }
+        local ctx = cache:beginErase()
+        for chunk_no = 0, 8 do
+            local first = chunk_no == 0 and 1
+                or chunk_no * 1023 + 1
+            local x = points[(first + 20) * 2 - 1]
+            t:check(cache:hitTest(x, 100, 1, ctx) ~= nil,
+                "chunk " .. chunk_no .. " hit")
+            t:check(#ctx.order <= 8, "LRU bound after chunk " .. chunk_no)
+        end
+        t:eq(#ctx.order, 8, "the ninth decode evicted the oldest")
+        cache:endErase(ctx)
     end)
 
     t:case("a miss is a miss, not the nearest stroke on the page", function()
@@ -289,6 +445,21 @@ return function(ctx)
         local want_w, want_h = transform(0, H, W):cacheSize()
         t:eq(cache:buffer().w, want_w, "sized to the rotated aspect fit")
         t:eq(cache:buffer().h, want_h, "in both axes")
+    end)
+
+    t:case("rotation during loading invalidates the old generation", function()
+        local strokes = {}
+        for i = 1, 20 do strokes[i] = bar(i * 50, i * 50) end
+        local cache, store, sched = fixture{ strokes = strokes, batch = 1 }
+        cache:open()
+        sched:tick()
+        local before = cache:buffer()
+        cache:setTransform(transform(0, H, W))
+        t:eq(before.freed, true, "the partial old raster was freed")
+        sched:drain()
+        t:eq(cache:isReady(), true, "only the rotated generation completed")
+        t:eq(store.calls.stroke_read, 21,
+            "one old cursor plus each stroke of the replacement generation")
     end)
 
     -- =================================================================
