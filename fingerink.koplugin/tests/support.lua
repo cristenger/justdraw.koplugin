@@ -458,6 +458,131 @@ function support.newSqlDriver(opts)
     return driver
 end
 
+-- --------------------------------------------------------- fake document
+
+--[[--
+A CreDocument stand-in for the anchor and index tests.
+
+Only the xpointer surface is modelled, and every call that costs something on a
+real document is counted: `resolutions` for getPageFromXPointer and
+`in_page_checks` for isXPointerInCurrentPage. Several of the guarantees the
+index has to make are about *not* calling those -- a page turn resolving
+nothing, a repaint resolving nothing -- and a counter is the only way to state
+that as a test rather than as a hope.
+
+`getNormalizedXPointer` returns false for an xpointer the DOM does not know,
+which is what the real one does and is easy to mistake for nil.
+
+opts.pages        xpointer -> page number. Absent means "not in this document".
+opts.normalized   raw xpointer -> normalised form. Absent means unchanged.
+opts.hash         rendering hash (default "layout-a")
+opts.dom_version  the book's cre_dom_version (default 20240114)
+opts.visible      pages visible at once (default 1)
+opts.here         the xpointer getXPointer() reports (default "/body/p[1]")
+]]
+function support.newDocument(opts)
+    opts = opts or {}
+    local doc = {
+        pages = opts.pages or {},
+        normalized = opts.normalized or {},
+        hash = opts.hash or "layout-a",
+        dom_version = opts.dom_version or 20240114,
+        normalized_dom_version = opts.normalized_dom_version or 20200824,
+        visible = opts.visible or 1,
+        here = opts.here or "/body/p[1]",
+        current_page = opts.current_page or 1,
+        resolutions = 0,
+        in_page_checks = 0,
+    }
+    function doc:getXPointer() return self.here end
+    function doc:getNormalizedXPointer(xp)
+        if self.pages[xp] == nil and self.normalized[xp] == nil then return false end
+        return self.normalized[xp] or xp
+    end
+    function doc:isXPointerInDocument(xp) return self.pages[xp] ~= nil end
+    function doc:getPageFromXPointer(xp)
+        self.resolutions = self.resolutions + 1
+        return self.pages[xp]
+    end
+    function doc:isXPointerInCurrentPage(xp)
+        self.in_page_checks = self.in_page_checks + 1
+        local page = self.pages[xp]
+        return page ~= nil and page >= self.current_page
+            and page < self.current_page + self.visible
+    end
+    function doc:getVisiblePageNumberCount() return self.visible end
+    function doc:getDocumentRenderingHash() return self.hash end
+    function doc:getDomVersionWithNormalizedXPointers()
+        return self.normalized_dom_version
+    end
+    return doc
+end
+
+-- ------------------------------------------------------- fake canvas store
+
+--[[--
+An in-memory stand-in for the canvas repository.
+
+This one fakes an *interface*, not a database: the four methods the anchor
+index actually calls, backed by Lua tables. The repository's own behaviour is
+covered against a recorder and against real SQLite elsewhere, so nothing here
+is claiming anything about SQL. What it gives the index tests is a call count,
+which is how "a page turn issues no query" becomes a check rather than a claim.
+]]
+function support.newCanvasStore(canvases)
+    local store = {
+        canvases = canvases or {},
+        layouts = {},        -- [hash] = { [canvas_id] = page }
+        calls = { list = 0, read = 0, save = 0 },
+        saves = {},          -- every saveLayoutPages call, in order
+    }
+    function store:listCanvases()
+        self.calls.list = self.calls.list + 1
+        return self.canvases
+    end
+    function store:layoutPages(_, hash)
+        self.calls.read = self.calls.read + 1
+        return self.layouts[hash] or {}
+    end
+    function store:saveLayoutPages(_, hash, pages)
+        self.calls.save = self.calls.save + 1
+        local copy = {}
+        for id, page in pairs(pages) do copy[id] = page end
+        self.layouts[hash] = copy
+        self.saves[#self.saves + 1] = { hash = hash, pages = copy }
+        return true
+    end
+    return store
+end
+
+--[[--
+A manual scheduler standing in for UIManager:nextTick.
+
+Nothing runs until a test pumps it, which is what makes "the index is still
+incomplete here" an observable state rather than a race.
+]]
+function support.newScheduler()
+    local s = { queue = {} }
+    function s:schedule(fn) self.queue[#self.queue + 1] = fn end
+    --- Run one pending callback. Returns false when there was nothing to run.
+    function s:tick()
+        local fn = table.remove(self.queue, 1)
+        if not fn then return false end
+        fn()
+        return true
+    end
+    --- Run to quiescence, with a bound so a scheduling loop fails loudly.
+    function s:drain(limit)
+        local n = 0
+        while self:tick() do
+            n = n + 1
+            if n > (limit or 10000) then error("scheduler did not settle", 0) end
+        end
+        return n
+    end
+    return s
+end
+
 -- --------------------------------------------------------- module preload
 
 --[[--

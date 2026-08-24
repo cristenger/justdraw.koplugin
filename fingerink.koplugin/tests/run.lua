@@ -1670,6 +1670,7 @@ local ctx = {
 for _, spec in ipairs({
     "canvas_codec_spec",
     "canvas_repository_spec",
+    "canvas_anchor_spec",
 }) do
     dofile(tests_dir .. "/" .. spec .. ".lua")(ctx)
 end
