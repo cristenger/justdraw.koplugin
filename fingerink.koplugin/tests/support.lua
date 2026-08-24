@@ -725,12 +725,39 @@ function support.newCanvasStore(canvases)
     end
 
     function store:deleteStroke(stroke_id)
+        self.deleted[#self.deleted + 1] = stroke_id
         for _, list in pairs(self.strokes) do
             for i = #list, 1, -1 do
                 if list[i].id == stroke_id then table.remove(list, i) end
             end
         end
         return true
+    end
+    store.deleted = {}
+
+    --[[--
+    A transaction that really does undo appends.
+
+    Set `fail_transaction` to "begin" to refuse before the body runs. Only
+    appends are rolled back -- the queue never deletes and inserts in one
+    transaction, and pretending to model more than that would be a fake
+    answering a question it cannot.
+    ]]
+    store.calls.transaction = 0
+    store.fail_transaction = nil
+    function store:transaction(fn)
+        self.calls.transaction = self.calls.transaction + 1
+        if self.fail_transaction == "begin" then return nil, "cannot begin" end
+        local counts = {}
+        for cid, list in pairs(self.strokes) do counts[cid] = #list end
+        local ok, res, err = pcall(fn, self)
+        if not ok or res == nil then
+            for cid, list in pairs(self.strokes) do
+                for i = #list, (counts[cid] or 0) + 1, -1 do table.remove(list, i) end
+            end
+            return nil, ok and err or res
+        end
+        return res
     end
 
     return store
