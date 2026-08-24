@@ -164,6 +164,18 @@ function Cache:removeStroke(id)
     end
     self.grid:remove(id)
 
+    return self:repair(m)
+end
+
+--[[--
+Clear a stroke-shaped region and put back whatever else was under it.
+
+Takes the same shape a stroke's metadata has -- bounding box and width -- so it
+serves both an erase and the abandonment of a stroke that was being drawn and
+never got stored. Returns the region in cache coordinates.
+]]
+function Cache:repair(m)
+    if not self.bb then return nil end
     local box = self:_regionFor(m)
     if box.w <= 0 or box.h <= 0 then return box end
     self.bb:paintRect(box.x, box.y, box.w, box.h, self.background)
@@ -174,6 +186,8 @@ function Cache:removeStroke(id)
         (box.x + box.w) / scale, (box.y + box.h) / scale)
     if #neighbours > 0 then
         table.sort(neighbours, function(a, b) return a.seq < b.seq end)
+        -- A viewport of the region, so the repair cannot paint outside it even
+        -- if a neighbour reaches far beyond.
         local view = self.bb:viewport(box.x, box.y, box.w, box.h)
         for i = 1, #neighbours do
             local nm = neighbours[i]

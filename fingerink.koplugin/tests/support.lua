@@ -18,6 +18,13 @@ the bugs they exist to catch are invisible to a naive stub:
 
 local support = {}
 
+-- This file's own directory's parent: the plugin root. Derived from the source
+-- path because the suite is reached from the repository root and from inside
+-- the plugin, and neither is the working directory the other one has.
+local here = debug.getinfo(1, "S").source:sub(2)
+local tests_dir = here:match("^(.*)[/\\][^/\\]*$") or "."
+support.plugin_dir = tests_dir:match("^(.*)[/\\][^/\\]*$") or "."
+
 -- LuaJIT and Lua 5.1 expose unpack as a global; 5.2+ moved it to table. Keeping
 -- both alive is what lets this suite run in CI without a KOReader build.
 local unpack = unpack or table.unpack
@@ -659,7 +666,12 @@ function support.newCanvasStore(canvases)
     }
     function store:listCanvases()
         self.calls.list = self.calls.list + 1
-        return self.canvases
+        -- A fresh array, the way the real repository builds one per query.
+        -- Handing out the live table lets a caller that appends to the result
+        -- quietly grow the store, which is a bug the fake would then hide.
+        local out = {}
+        for i = 1, #self.canvases do out[i] = self.canvases[i] end
+        return out
     end
     function store:layoutPages(_, hash)
         self.calls.read = self.calls.read + 1
@@ -853,6 +865,7 @@ function support.install()
     local env = {
         notifications = {},
         shown_messages = {},
+        dialogs = {},
         reader_events = {},
         logs = { warn = {}, err = {}, info = {} },
         dispatcher_actions = {},
@@ -957,6 +970,14 @@ function support.install()
     local ConfirmBox = {}
     function ConfirmBox:new(o) return o end
 
+    local ButtonDialog = {}
+    function ButtonDialog:new(o)
+        o = o or {}
+        env.dialogs[#env.dialogs + 1] = o
+        o.handleEvent = function() return true end
+        return o
+    end
+
     package.preload["device"] = function() return Device end
     package.preload["ui/uimanager"] = function() return UIManager end
     package.preload["logger"] = function() return logger end
@@ -967,36 +988,22 @@ function support.install()
     package.preload["ui/widget/container/widgetcontainer"] = function() return WidgetContainer end
     package.preload["ui/widget/notification"] = function() return Notification end
     package.preload["ui/widget/confirmbox"] = function() return ConfirmBox end
+    package.preload["ui/widget/buttondialog"] = function() return ButtonDialog end
     package.preload["dispatcher"] = function() return Dispatcher end
 
-    -- ink_bar pulls in half the widget toolkit; the plugin only ever asks it
-    -- for geometry and the window below, so fake exactly that surface.
-    local InkBar = {}
-    InkBar.__index = InkBar
-    function InkBar:new(o)
-        o = o or {}
-        setmetatable(o, self)
-        o.dimen = o.dimen or { x = 500, y = 300, w = 90, h = 200 }
-        o.updates = 0
-        return o
+    -- The real toolbar, not a stub.
+    --
+    -- It used to be stubbed here to avoid pulling in the widget toolkit, and
+    -- the stubs below now cover that toolkit anyway. Keeping a second bar
+    -- class alive is worse than the dependency: main.lua, the canvas overlay
+    -- and the tests would each capture whichever one they saw first, and a
+    -- test could then pass against a bar the plugin never uses.
+    --
+    -- Preloaded rather than required outright because the widget stubs below
+    -- have to be registered first.
+    package.preload["ink_bar"] = function()
+        return dofile(support.plugin_dir .. "/ink_bar.lua")
     end
-    function InkBar:contains(x, y)
-        local d = self.dimen
-        return x >= d.x and x < d.x + d.w and y >= d.y and y < d.y + d.h
-    end
-    function InkBar:update() self.updates = self.updates + 1 end
-    --- Same walk as the production widget: skip ourselves and any toast, and
-    --- return the first real window underneath. Reading the actual stack is
-    --- what makes `dialogOnTop` mean something in these tests.
-    function InkBar:windowBelow()
-        local stack = UIManager._window_stack
-        for i = #stack, 1, -1 do
-            local widget = stack[i].widget
-            if widget ~= self and not widget.toast then return widget end
-        end
-    end
-    package.preload["ink_bar"] = function() return InkBar end
-    env.InkBar = InkBar
 
     -- Enough of the widget toolkit to load the real ink_bar.lua.
     local Geom = {}
@@ -1079,6 +1086,19 @@ function support.install()
     end
     package.preload["ui/widget/infomessage"] = function() return InfoMessage end
 
+    -- The real one is a C module in koreader-base. Only `attributes(path,
+    -- "size")` is used, and it is half a book's identity, so a stub that
+    -- silently answered nil would turn the canvas off in every test.
+    env.file_sizes = {}
+    package.preload["libs/libkoreader-lfs"] = function()
+        return {
+            attributes = function(path, what)
+                if what == "size" then return env.file_sizes[path] end
+                return nil
+            end,
+        }
+    end
+
     package.preload["version"] = function()
         return { getCurrentRevision = function() return "v2025.08-test" end }
     end
@@ -1113,6 +1133,16 @@ function support.newPlugin(FingerInk, env, opts)
             return true
         end,
     }
+    -- The reflowable-document surface. Absent by default, so every existing
+    -- test still describes a plugin with no canvas session at all.
+    if opts.document then
+        ui.document = opts.document
+        ui.rolling = opts.rolling ~= false and {} or nil
+        ui.partial_md5_checksum = opts.partial_md5 or "test-md5"
+        ui.document.file = opts.file or "/books/test.epub"
+        env.file_sizes[ui.document.file] = opts.file_size or 90210
+        doc_settings.data.cre_dom_version = opts.dom_version or 20240114
+    end
     local view = {
         state = { page = opts.page or 1 },
         registerViewModule = function() end,

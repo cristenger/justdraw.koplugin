@@ -40,6 +40,8 @@ local InkBar = WidgetContainer:extend{
     --- of its own. An embedded bar answers for its buttons and nothing else:
     --- the overlay owns the stack, the forwarding and the suppression rule.
     embedded = false,
+    --- The window this bar is painted inside, when embedded. What repaints.
+    parent = nil,
 }
 
 function InkBar:mkButton(text, width, cb)
@@ -111,7 +113,9 @@ function InkBar:update(refresh)
     self.draw_btn:setText(p.drawing and _("Stop") or _("Draw"), self.draw_btn.width)
     self.tool_btn:setText(p.eraser and _("Eraser") or _("Pen"), self.tool_btn.width)
     if refresh then
-        UIManager:setDirty(self, "ui", self.dimen)
+        -- Embedded, the bar is not a window, and UIManager finds nothing to
+        -- mark dirty when handed one that is not on the stack. The overlay is.
+        UIManager:setDirty(self.parent or self, "ui", self.dimen)
     end
 end
 

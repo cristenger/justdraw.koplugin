@@ -397,15 +397,26 @@ function Session:eraseAt(cx, cy, radius)
     return box
 end
 
---- Remove the last stroke drawn on this canvas.
+--- Remove the last stroke drawn on this canvas. Returns the region to repaint,
+--- or nil when there was nothing to undo.
 function Session:undo()
-    if not self.canvas or not self.cache_obj then return false end
+    if not self.canvas or not self.cache_obj then return nil end
     local strokes = self.cache_obj:strokes()
     local last = strokes[#strokes]
-    if not last then return false end
-    self.cache_obj:removeStroke(last.id)
+    if not last then return nil end
+    local box = self.cache_obj:removeStroke(last.id)
     self.queue:removeStroke(self.canvas, last.id)
-    return true
+    return box or true
+end
+
+--- Undo a stroke that was being drawn and never stored: the live segments are
+--- already in the raster, so the region has to be rebuilt from what was under
+--- them. Returns the region to repaint.
+function Session:repair(min_x, min_y, max_x, max_y, width)
+    if not self.cache_obj then return nil end
+    return self.cache_obj:repair{
+        min_x = min_x, min_y = min_y, max_x = max_x, max_y = max_y, width = width,
+    }
 end
 
 function Session:pendingWrites()

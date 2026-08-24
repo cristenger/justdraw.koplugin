@@ -106,6 +106,7 @@ function InkCanvasOverlay:_rebuild()
         plugin = self.plugin,
         side = self.bar_side,
         embedded = true,
+        parent = self,
     }
     -- Children before the container's own handler, so the toolbar gets first
     -- refusal on every gesture. paintTo draws it last, on purpose.

@@ -18,12 +18,6 @@ return function(ctx)
     local t = ctx.t
     local env = ctx.env
     local support = ctx.support
-    -- The harness preloads a stub `ink_bar` for main.lua's benefit. The
-    -- overlay's whole story is about the real toolbar's geometry and hit
-    -- testing, and a stub with no handleEvent would make every "the bar took
-    -- it" case pass because the sheet swallowed it instead. Swap in the real
-    -- widget before the overlay captures it.
-    package.loaded["ink_bar"] = dofile(ctx.plugin_dir .. "/ink_bar.lua")
     local Overlay = require("ink_canvas_overlay")
     local Cache = require("ink_canvas_cache")
     local Transform = require("ink_canvas_transform")

@@ -325,7 +325,7 @@ return function(ctx)
         session:openCanvas(session:canvasById(1))
         sched:drain()
         session:addStroke({ 10, 10, 20, 20 }, 2, 4, 1)
-        t:eq(session:undo(), true, "undone")
+        t:check(session:undo() ~= nil, "undone")
         session:flush()
         t:eq(store.strokes[1] == nil or #store.strokes[1] == 0, true,
             "and it never reached the disk")
@@ -337,7 +337,7 @@ return function(ctx)
         }
         session:openCanvas(session:canvasById(1))
         sched:drain()
-        t:eq(session:undo(), false, "nothing happened")
+        t:eq(session:undo(), nil, "nothing happened")
     end)
 
     t:case("deleting a canvas closes it and takes its strokes with it", function()

@@ -69,9 +69,12 @@ function Index:open()
         logger.err("FingerInk: cannot list canvases:", err)
         canvases = {}
     end
-    self.canvases = canvases
+    -- Copied, not aliased: `add` and `forget` mutate this list, and doing that
+    -- to a table the repository still owns would be a change at a distance.
+    self.canvases = {}
     self.by_id = {}
     for i = 1, #canvases do
+        self.canvases[i] = canvases[i]
         self.by_id[canvases[i].id] = canvases[i]
     end
     self:_rebuild()

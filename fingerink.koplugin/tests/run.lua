@@ -1661,6 +1661,8 @@ local ctx = {
     tests_dir = tests_dir,
     reset = reset,
     newPlugin = newPlugin,
+    FingerInk = FingerInk,
+    menuItem = menuItem,
     newRealBar = newRealBar,
     realBar = realBar,
     realBarPlugin = realBarPlugin,
@@ -1678,6 +1680,7 @@ for _, spec in ipairs({
     "capture_filter_spec",
     "canvas_queue_spec",
     "canvas_session_spec",
+    "main_canvas_spec",
 }) do
     dofile(tests_dir .. "/" .. spec .. ".lua")(ctx)
 end

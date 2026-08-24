@@ -14,6 +14,7 @@ pages. See ADR-11 and ADR-12.
 ]]
 
 local Blitbuffer = require("ffi/blitbuffer")
+local ButtonDialog = require("ui/widget/buttondialog")
 local ConfirmBox = require("ui/widget/confirmbox")
 local Device = require("device")
 local Dispatcher = require("dispatcher")
@@ -25,9 +26,12 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local logger = require("logger")
 local _ = require("gettext")
 
+local CanvasSession = require("ink_canvas_session")
 local Capture = require("ink_capture")
 local InkBar = require("ink_bar")
 local Render = require("ink_render")
+local Router = require("ink_contact_router")
+local Stack = require("ink_stack")
 local Store = require("ink_store")
 
 local Screen = Device.screen
@@ -40,6 +44,10 @@ local MODE_KEY = "fingerink_input_mode"
 local SUSPENDED = -1   -- draw_slot sentinel: ignore this contact until it lifts
 
 local INPUT_MODES = { auto = true, stylus = true, finger = true }
+
+-- The margin flag that says "there is a sheet anchored here". Drawn on the
+-- edge opposite the toolbar, so the two never overlap.
+local MARK_W, MARK_H = 6, 28
 
 -- Bounded twice on purpose. The only thing worse than no data from a hardware
 -- session is a log that filled the device and got truncated at the interesting
@@ -99,6 +107,18 @@ function FingerInk:init()
     self.diag_lines = 0
     self.pen_notice_shown = false
 
+    -- The EPUB canvas. Everything about it stays nil until a reflowable
+    -- document is ready, and every entry point checks `canvas_open`, so a PDF
+    -- session behaves exactly as it did before any of this existed.
+    self.session = nil
+    self.router = nil
+    self.canvas_open = false
+    self.canvas_stroke = nil
+    --- Left nil in production, where the session opens its own connection.
+    --- The suite runs under a bare interpreter that cannot load the SQLite
+    --- driver at all, so it hands one in.
+    self.canvas_repository = nil
+
     self.store = Store.new(self.ui.doc_settings:readSetting(SETTING_KEY))
 
     self:registerDispatcher()
@@ -129,6 +149,53 @@ function FingerInk:registerDispatcher()
     })
 end
 
+--[[--
+Start the canvas session, once the document is ready.
+
+Not in `init`: half the book's identity is `partial_md5_checksum`, which
+ReaderUI computes on its way to emitting this event. Only reflowable documents
+get one -- a canvas anchored by xpointer means nothing in a fixed layout, and
+`anchor_kind = 'page'` is reserved for when it does.
+]]
+function FingerInk:onReaderReady()
+    if self.session or not self.ui.rolling or not self.ui.document then return end
+
+    self.session = CanvasSession.new{
+        document = self.ui.document,
+        identity = {
+            partial_md5 = self.ui.partial_md5_checksum,
+            file_size = self:documentSize(),
+        },
+        file = self.ui.document.file,
+        dom_version = self.ui.doc_settings:readSetting("cre_dom_version"),
+        repository = self.canvas_repository,
+        plugin = self,
+        ui = self.ui,
+        schedule = function(fn) UIManager:nextTick(fn) end,
+        scheduleIn = function(delay, fn) UIManager:scheduleIn(delay, fn) end,
+        unschedule = function(fn) UIManager:unschedule(fn) end,
+        notify = function(text) self:notify(text) end,
+    }
+    if not self.session:open() then
+        self.session = nil
+        return
+    end
+    self.router = Router.new{
+        backend = self.input_backend or "finger",
+        regions = function(x, y) return self:regionAt(x, y) end,
+        dialogOnTop = function() return self:dialogOnTop() end,
+    }
+    self:onPageUpdate(self:currentPage())
+end
+
+--- The other half of the book's identity. `lfs` is not in the test harness and
+--- is not worth requiring for a value the caller can also supply.
+function FingerInk:documentSize()
+    local ok, lfs = pcall(require, "libs/libkoreader-lfs")
+    if not ok or not self.ui.document or not self.ui.document.file then return nil end
+    return lfs.attributes(self.ui.document.file, "size")
+end
+
 function FingerInk:onCloseDocument()
     self:teardown()
 end
@@ -148,7 +215,15 @@ leaving it dangling loses it silently and leaks contact state into whatever
 document is opened next in the same session.
 ]]
 function FingerInk:teardown()
+    -- Before the session goes: abortStroke reaches the sheet's stroke through
+    -- it, and an unfinished stroke is not in any store yet.
     self:abortStroke()
+    if self.session then
+        self.session:close()
+        self.session = nil
+        self.router = nil
+        self.canvas_open = false
+    end
     Capture:remove()
     self:resetContacts()
     self:resetStylusState()
@@ -160,7 +235,15 @@ function FingerInk:teardown()
     end
 end
 
+--[[--
+The durable-save gate for canvas ink.
+
+`Device:_beforeSuspend` calls `UIManager:flushSettings()` and only then emits
+`Suspend`, and the close path emits this before DocSettings is written and the
+document closed. Saving in `onSuspend` would already be too late.
+]]
 function FingerInk:onSaveSettings()
+    if self.session then self.session:flush() end
     if self.store:isEmpty() then
         self.ui.doc_settings:delSetting(SETTING_KEY)
     else
@@ -178,16 +261,48 @@ end
 
 function FingerInk:onScreenResize()
     self:rebuildBar()
+    local overlay = self.session and self.session:overlay()
+    if overlay then overlay:onScreenResize() end
 end
 
 function FingerInk:onSetRotationMode()
-    self:rebuildBar()
+    self:onScreenResize()
+end
+
+-- ----------------------------------------------------------- canvas events
+
+--- A page turn. Only the marks are recomputed; the index answers from memory.
+function FingerInk:onPageUpdate(page)
+    if self.session then self.session:setPage(page or self:currentPage()) end
+end
+
+--[[--
+`PosUpdate` carries `(pos, pageno)` -- the scroll position first
+(readerrolling.lua:1089 @ v2026.07). Aliasing it to `onPageUpdate` would hand a
+byte offset to something that looks up canvases by page number, and every mark
+in scroll mode would land on the wrong page or on none.
+]]
+function FingerInk:onPosUpdate(_, page)
+    self:onPageUpdate(page)
+end
+
+--- Font, margin or line-height change. The page index is rebuilt; not one
+--- stroke is read, written or moved.
+function FingerInk:onDocumentRerendered()
+    if self.session then self.session:invalidate() end
 end
 
 -- ----------------------------------------------------------------- toolbar
 
 function FingerInk:setBarShown(on)
     on = on and true or false
+    -- With a sheet open the toolbar is the overlay's child, not a window of
+    -- ours. "Hide" then means put the sheet away -- the invariant is still
+    -- that drawing is never on without a way to turn it off.
+    if self.canvas_open then
+        if not on then self:closeCanvas() end
+        return
+    end
     G_reader_settings:saveSetting("fingerink_bar_shown", on)
 
     if on then
@@ -221,9 +336,42 @@ Drawing mode eats single-finger touches before UIManager ever sees them, which
 would otherwise make an open menu impossible to dismiss — tapping outside it is
 the only way to close one. So drawing yields for as long as one is up.
 ]]
+--- Whichever FingerInk window is currently the topmost: the canvas overlay
+--- when a sheet is open, the standalone toolbar otherwise.
+function FingerInk:topWindow()
+    local overlay = self.session and self.session:overlay()
+    if overlay then return overlay end
+    return self.bar
+end
+
 function FingerInk:dialogOnTop()
-    local below = self.bar and self.bar:windowBelow()
+    local top = self:topWindow()
+    if not top then return false end
+    local below = Stack.below(top)
     return below ~= nil and below ~= self.ui
+end
+
+--[[--
+Which part of the screen this point belongs to.
+
+With no sheet open there are only two answers and only the toolbar matters.
+With one open this is the router's geometry oracle, and the order is the one
+that keeps Stop reachable: toolbar, handle, sheet, book.
+
+Everything inside the sheet answers "canvas", letterbox margins included. They
+are not a drawing surface -- the transform refuses to ink there -- but they do
+belong to the sheet, and a page turn under the sheet would be worse than
+nothing happening.
+]]
+function FingerInk:regionAt(x, y)
+    local overlay = self.session and self.session:overlay()
+    if not overlay then
+        return self:inBar(x, y) and "bar" or "reader"
+    end
+    if overlay.bar:contains(x, y) then return "bar" end
+    if overlay:inHandle(x, y) then return "handle" end
+    if overlay:inSheet(x, y) then return "canvas" end
+    return "reader"
 end
 
 -- ------------------------------------------------------------------- state
@@ -326,6 +474,7 @@ function FingerInk:setDrawing(on)
 
         self.input_backend = backend
         self.drawing = true
+        if self.router then self.router:setBackend(backend) end
         logger.info("FingerInk: drawing on, mode", self.input_mode, "backend", backend)
         self:notePenUnavailable(backend)
     else
@@ -424,6 +573,8 @@ passthrough latch. Since ADR-13 what reaches the app is decided per gesture in
 InkBar:suppresses, so this always returns true.
 ]]
 function FingerInk:onTouchFrame(slots)
+    if self.canvas_open then return self:routeCanvasFinger(slots) end
+
     if not self.passthrough and self:dialogOnTop() then
         -- Latches for the whole contact sequence, and re-latches on the next
         -- one, so drawing resumes by itself once the dialog is gone.
@@ -505,6 +656,7 @@ pen, highlighter, and the TOOL_TYPE_FINGER a pen slot reports on its way out of
 proximity — defers to it.
 ]]
 function FingerInk:applyPoint(x, y, tool)
+    if self.canvas_open then return self:applyCanvasPoint(x, y, tool) end
     if tool == Capture.TOOL_ERASER or self.eraser then
         self:eraseAt(x, y)
     elseif self.stroke then
@@ -549,6 +701,10 @@ function FingerInk:onStylusEvent(slot)
     if id >= 0 then
         if not self.stylus_active then
             self.stylus_active = true
+            -- The pen is on the page from this frame, even though where is
+            -- not known yet. A finger arriving in that window is no less of a
+            -- palm for being one frame early.
+            if self.router and self.canvas_open then self.router:penContact(nil, nil) end
             self.stylus_passthrough = self:dialogOnTop()
             self.stylus_geom_latched = self.stylus_passthrough
             self.stylus_dominated = false
@@ -584,7 +740,10 @@ function FingerInk:onStylusEvent(slot)
                 self.stylus_geom_latched = true
                 -- Only reachable before the first dominated frame, so the
                 -- decision can still go to passthrough without a flip.
-                if not self.stylus_dominated and self:inBar(sx, sy) then
+                if self.router and self.canvas_open then
+                    self.router:penContact(sx, sy)
+                end
+                if not self.stylus_dominated and self:penPassesThrough(sx, sy) then
                     self.stylus_passthrough = true
                     return false
                 end
@@ -617,8 +776,24 @@ function FingerInk:onStylusEvent(slot)
     if not was_passthrough then
         self:endStroke()
     end
+    if self.router then self.router:penUp() end
     self:resetStylusState()
     return not was_passthrough
+end
+
+--[[--
+Whether a pen contact starting here belongs to somebody else.
+
+With no sheet open that is the toolbar and nothing else, exactly as before.
+With one open the resize handle joins it: dragging the sheet with the pen has
+to work, and a stroke is not what the reader meant there.
+]]
+function FingerInk:penPassesThrough(x, y)
+    if self.canvas_open then
+        local region = self:regionAt(x, y)
+        return region == "bar" or region == "handle"
+    end
+    return self:inBar(x, y)
 end
 
 --[[--
@@ -723,6 +898,25 @@ at the edge rather than scribbling over the buttons.
 ]]
 function FingerInk:onStylusPoint(x, y, tool)
     if self.stylus_suspended then return end
+
+    if self.canvas_open then
+        local region = self:regionAt(x, y)
+        if region == "bar" or region == "handle" then
+            -- Dragged onto the toolbar or the handle: end at the edge rather
+            -- than scribbling over them.
+            self:endCanvasStroke()
+            self.stylus_suspended = true
+            return
+        end
+        -- Over the book's text the pen stays dominated -- so the palm rule
+        -- holds and no page turns under the reader's hand -- but the text is
+        -- not a drawing surface in v1.
+        if self:applyCanvasPoint(x, y, tool) then
+            self.stylus_inked = true
+        end
+        return
+    end
+
     if self:inBar(x, y) then
         self:endStroke()
         self.stylus_suspended = true
@@ -748,6 +942,8 @@ that decision reads: how many non-pen contacts are down, and whether any of them
 started on the toolbar. Always returns true.
 ]]
 function FingerInk:onStylusTouchFrame(slots)
+    if self.canvas_open then return self:routeCanvasTouch(slots) end
+
     if not self.passthrough and self:dialogOnTop() then
         self.passthrough = true
     end
@@ -793,6 +989,107 @@ function FingerInk:onStylusTouchFrame(slots)
     return true
 end
 
+-- --------------------------------------------------------- canvas routing
+
+--[[--
+Residual touch while a sheet is open, on the pen route.
+
+Slots the router calls palms are withheld from GestureDetector entirely -- down
+frame and lift alike. Withholding only the down would leave the detector a lift
+for a contact it never opened; withholding neither would let a palm's `hold`
+reach the book, and a gesture carries no slot number, so by then there is
+nothing left to tell it from the reader's own.
+
+A contact whose first frame carried no coordinates has already gone through by
+the time the next one places it. `dropContact` retires that one, per slot, so a
+finger on the toolbar is untouched.
+]]
+function FingerInk:routeCanvasTouch(slots)
+    local router = self.router
+    if not router then return true end
+
+    local kept = {}
+    for i = 1, #slots do
+        local ev = slots[i]
+        if Capture:isStylusSlot(ev) then
+            -- A pen slot handed back to the UI is not residual touch.
+            kept[#kept + 1] = ev
+        else
+            local slot = ev.slot or 0
+            local id = ev.id
+            if id and id >= 0 then
+                local before = router:destinationOf(slot)
+                local sx, sy
+                if ev.x and ev.y then sx, sy = Capture.toScreen(ev.x, ev.y) end
+                local dest = router:touchContact(slot, sx, sy)
+                if dest == "palm" then
+                    if before == nil then Capture:dropContact(slot) end
+                else
+                    kept[#kept + 1] = ev
+                end
+            else
+                local dest = router:destinationOf(slot)
+                router:touchUp(slot)
+                if dest ~= "palm" then kept[#kept + 1] = ev end
+            end
+        end
+    end
+
+    for _, slot in ipairs(router:takeCancelled()) do
+        Capture:dropContact(slot)
+    end
+    return kept
+end
+
+--[[--
+Touch while a sheet is open, on the finger route.
+
+A single contact on the sheet draws; everything else -- the toolbar, the
+handle, the book above the sheet -- goes to GestureDetector as usual, which is
+what keeps page turning alive. A second contact landing on the sheet abandons
+the stroke and hands both back, the same bargain ADR-3 makes for direct ink.
+]]
+function FingerInk:routeCanvasFinger(slots)
+    local router = self.router
+    if not router then return true end
+
+    local kept = {}
+    for i = 1, #slots do
+        local ev = slots[i]
+        local slot = ev.slot or 0
+        local id = ev.id
+        if id and id >= 0 then
+            local sx, sy
+            if ev.x and ev.y then sx, sy = Capture.toScreen(ev.x, ev.y) end
+            local dest = router:touchContact(slot, sx, sy)
+            if dest == "canvas" then
+                if self.draw_slot == nil then
+                    self.draw_slot = slot
+                elseif self.draw_slot ~= slot then
+                    self:abortCanvasStroke()
+                    self.draw_slot = SUSPENDED
+                end
+                if self.draw_slot == slot and sx then
+                    self:applyCanvasPoint(sx, sy, nil)
+                end
+            else
+                kept[#kept + 1] = ev
+            end
+        else
+            local dest = router:destinationOf(slot)
+            router:touchUp(slot)
+            if self.draw_slot == slot then
+                self:endCanvasStroke()
+                self.draw_slot = nil
+            elseif self.draw_slot == SUSPENDED and router:touchCount() == 0 then
+                self.draw_slot = nil
+            end
+            if dest ~= "canvas" then kept[#kept + 1] = ev end
+        end
+    end
+    return kept
+end
+
 -- ------------------------------------------------------------------ stroke
 
 function FingerInk:startStroke(x, y)
@@ -813,7 +1110,12 @@ function FingerInk:addPoint(x, y)
     self:refreshBox(px, py, x, y, s.w)
 end
 
+--- Ends whichever stroke is in progress. Every caller -- the pen lift, a
+--- dialog opening mid-stroke, Stop -- means "finish what is being drawn", and
+--- what that is depends on whether a sheet is open.
 function FingerInk:endStroke()
+    if self.canvas_open then return self:endCanvasStroke() end
+
     local s = self.stroke
     self.stroke = nil
     self.draw_slot = nil
@@ -826,7 +1128,12 @@ function FingerInk:endStroke()
     self.store:add(self:currentPage(), s)
 end
 
+--- Gives up whichever stroke is in progress. See endStroke.
 function FingerInk:abortStroke()
+    if self.canvas_open then
+        self.draw_slot = nil
+        return self:abortCanvasStroke()
+    end
     if not self.stroke then
         self.draw_slot = nil
         return
@@ -845,13 +1152,213 @@ function FingerInk:eraseAt(x, y)
     self:repaint()
 end
 
+-- ------------------------------------------------------------- canvas ink
+
+--[[--
+Open a sheet, taking the toolbar with it.
+
+There is never more than one FingerInk window: the standalone toolbar steps
+down and the overlay's embedded one takes its place, so `self.bar` keeps
+meaning "the toolbar the reader can see" everywhere else in this file.
+]]
+function FingerInk:openCanvas(canvas)
+    if not (self.session and canvas) then return end
+    if self.canvas_open and self.session:activeCanvas() == canvas then return end
+
+    self.bar_restore = self.bar ~= nil
+    if self.bar then
+        local dimen = self.bar.dimen
+        UIManager:close(self.bar)
+        self.bar = nil
+        UIManager:setDirty(self.ui, "ui", dimen)
+    end
+
+    local overlay = self.session:openCanvas(canvas)
+    if not overlay then
+        if self.bar_restore then self:setBarShown(true) end
+        return
+    end
+    self.bar = overlay.bar
+    self.canvas_open = true
+    if self.router then self.router:reset() end
+    self:setDrawing(true)
+    return overlay
+end
+
+--- Open the sheet at the reader's position, or make one there.
+function FingerInk:openCanvasHere()
+    if not (self.session and self.session:isAvailable()) then return end
+    local here = self.session:canvasesHere(self:currentPage())
+    if #here == 1 then return self:openCanvas(here[1]) end
+    if #here > 1 then return self:showCanvasPicker(here) end
+    local canvas, err = self.session:createHere(self:currentPage())
+    if not canvas then
+        if err ~= "indexing" then
+            self:notify(_("Cannot anchor a sheet at this position"))
+        end
+        return
+    end
+    -- createHere already opened it in the session; adopt its window.
+    return self:openCanvas(canvas)
+end
+
+function FingerInk:closeCanvas()
+    if not self.canvas_open then return end
+    self:abortCanvasStroke()
+    self:setDrawing(false)
+    self.canvas_open = false
+    self.bar = nil
+    self.session:closeCanvas()
+    if self.bar_restore then self:setBarShown(true) end
+    -- The sheet uncovered a page of text; a partial refresh would leave it
+    -- ghosted.
+    UIManager:setDirty(self.ui, "full")
+end
+
+--[[--
+One drawing point, in screen coordinates, while a sheet is open.
+
+Returns whether it inked, which is what the pen route's lift-recovery uses to
+tell a stroke that produced nothing from one that was simply off the page.
+]]
+function FingerInk:applyCanvasPoint(x, y, tool)
+    local tr = self.session and self.session:transform()
+    if not tr or not tr:contains(x, y) then
+        -- Off the page. End the stroke at the edge rather than clamping it
+        -- into a line along the margin.
+        self:endCanvasStroke()
+        return false
+    end
+    local cx, cy = tr:toCanvas(x, y)
+    if tool == Capture.TOOL_ERASER or self.eraser then
+        self:eraseCanvasAt(cx, cy, tr)
+    elseif self.canvas_stroke then
+        self:addCanvasPoint(cx, cy, tr)
+    else
+        self:startCanvasStroke(cx, cy, tr)
+    end
+    return true
+end
+
+--- Widths are stored in canvas units, so a stroke keeps its weight relative to
+--- the page when the sheet is shown at another size or on another screen.
+function FingerInk:startCanvasStroke(cx, cy, tr)
+    self.canvas_stroke = {
+        n = 1, w = self.pen_width / tr.scale,
+        min_x = cx, min_y = cy, max_x = cx, max_y = cy,
+        cx, cy,
+    }
+end
+
+function FingerInk:addCanvasPoint(cx, cy, tr)
+    local s = self.canvas_stroke
+    local i = s.n * 2
+    local px, py = s[i - 1], s[i]
+    if px == cx and py == cy then return end
+
+    s[i + 1] = cx
+    s[i + 2] = cy
+    s.n = s.n + 1
+    if cx < s.min_x then s.min_x = cx elseif cx > s.max_x then s.max_x = cx end
+    if cy < s.min_y then s.min_y = cy elseif cy > s.max_y then s.max_y = cy end
+
+    local cache = self.session:cache()
+    if not cache then return end
+    self:blitCanvasBox(cache:drawSegment(px, py, cx, cy, s.w), tr)
+end
+
+--[[--
+Copy one dirty region of the raster onto the screen, and refresh it.
+
+The raster is the source of truth for what the sheet looks like, so live ink
+goes into it first and is copied out. That is what lets a repaint mid-stroke --
+a notification, a menu closing -- show the stroke so far instead of losing it.
+]]
+function FingerInk:blitCanvasBox(box, tr)
+    if not box or box.w <= 0 or box.h <= 0 then return end
+    local cache = self.session and self.session:cache()
+    local bb = cache and cache:buffer()
+    if not bb then return end
+    local sx, sy = tr:fromCache(box.x, box.y)
+    Screen.bb:blitFrom(bb, sx, sy, box.x, box.y, box.w, box.h)
+    self:refreshBox(sx, sy, sx + box.w, sy + box.h, 0)
+end
+
+function FingerInk:endCanvasStroke()
+    local s = self.canvas_stroke
+    self.canvas_stroke = nil
+    if not s or not self.session then return end
+
+    local tr = self.session:transform()
+    if s.n == 1 and tr then
+        -- A dot is never painted live, because there is no segment to paint.
+        local cache = self.session:cache()
+        if cache then
+            self:blitCanvasBox(cache:drawSegment(s[1], s[2], s[1], s[2], s.w), tr)
+        end
+    end
+
+    local ok, err = self.session:addStroke(s, s.n, s.w, Capture.TOOL_PEN)
+    if not ok then
+        logger.warn("FingerInk: canvas stroke not recorded:", err)
+    end
+end
+
+--[[--
+Give up the stroke in progress.
+
+Its segments are already in the raster, so the region has to be rebuilt from
+what was underneath. Repainting the overlay alone would leave ink on screen
+that is in no canvas.
+]]
+function FingerInk:abortCanvasStroke()
+    local s = self.canvas_stroke
+    self.canvas_stroke = nil
+    if not s or not self.session then return end
+    local box = self.session:repair(s.min_x, s.min_y, s.max_x, s.max_y, s.w)
+    local tr = self.session:transform()
+    if box and tr then self:blitCanvasBox(box, tr) end
+end
+
+function FingerInk:eraseCanvasAt(cx, cy, tr)
+    -- The eraser is a fixed size under the reader's hand, so its reach in
+    -- canvas units grows as the sheet shrinks.
+    local box = self.session:eraseAt(cx, cy, ERASER_RADIUS / tr.scale)
+    self:blitCanvasBox(box, tr)
+end
+
 -- ------------------------------------------------------------------ output
 
 function FingerInk:paintTo(bb, x, y)
+    self:paintMarks(bb)
+
     local list = self.store:get(self:currentPage())
     if not list then return end
     for i = 1, #list do
         Render.stroke(bb, list[i], 0, 0, INK)
+    end
+end
+
+--[[--
+A flag in the margin for every sheet anchored on this view.
+
+Reads a table the session filled when the page turned. No query, no CREngine
+call and no xpointer resolution happens here, which is what keeps turning a
+page in a heavily annotated book the same cost as turning one in a plain book.
+
+Drawn on the edge opposite the toolbar so the two never overlap.
+]]
+function FingerInk:paintMarks(bb)
+    if not self.session then return end
+    local marks = self.session:marks()
+    if #marks == 0 then return end
+
+    local x = (self.bar_side == "left") and (Screen:getWidth() - MARK_W) or 0
+    local limit = Screen:getHeight() - MARK_H
+    for i = 1, #marks do
+        local y = marks[i].y - math.floor(MARK_H / 2)
+        if y < 0 then y = 0 elseif y > limit then y = limit end
+        bb:paintRect(x, y, MARK_W, MARK_H, INK)
     end
 end
 
@@ -884,6 +1391,21 @@ end
 -- -------------------------------------------------------------------- menu
 
 function FingerInk:onFingerInkUndo()
+    if self.canvas_open then
+        local box = self.session:undo()
+        if not box then
+            self:notify(_("Nothing to undo on this sheet"))
+            return true
+        end
+        local tr = self.session:transform()
+        if type(box) == "table" and tr then
+            self:blitCanvasBox(box, tr)
+        else
+            UIManager:setDirty(self.session:overlay(), "ui")
+        end
+        return true
+    end
+
     local page = self:currentPage()
     if not self.store:pop(page) then
         self:notify(_("Nothing to undo on this page"))
@@ -931,6 +1453,132 @@ function FingerInk:inputModeItem(text, value)
         enabled_func = function() return not self.drawing end,
         callback = function() self:setInputMode(value) end,
     }
+end
+
+--[[--
+Ask which sheet, when the reader's position has more than one.
+
+Opening the first one silently is the failure worth avoiding: the reader would
+write into a sheet they cannot see the identity of, and find their earlier
+notes in the other one later.
+]]
+function FingerInk:showCanvasPicker(list)
+    local buttons = {}
+    for i = 1, #list do
+        local canvas = list[i]
+        buttons[i] = { {
+            text = string.format(_("Sheet %d"), i),
+            callback = function()
+                if self.canvas_picker then
+                    UIManager:close(self.canvas_picker)
+                    self.canvas_picker = nil
+                end
+                self:openCanvas(canvas)
+            end,
+        } }
+    end
+    self.canvas_picker = ButtonDialog:new{
+        title = _("Sheets at this position"),
+        buttons = buttons,
+    }
+    UIManager:show(self.canvas_picker)
+end
+
+function FingerInk:confirmDeleteCanvas(canvas)
+    UIManager:show(ConfirmBox:new{
+        text = _("Delete this sheet and everything drawn on it?"),
+        ok_text = _("Delete"),
+        ok_callback = function()
+            self.session:deleteCanvas(canvas)
+            UIManager:setDirty(self.ui, "full")
+        end,
+    })
+end
+
+--[[--
+The sheet menu, rebuilt every time it is opened.
+
+Deliberately built on demand rather than kept as a static table: what it can
+offer depends on where the reader is, whether a sheet is open, and whether the
+page index has finished -- and a stale menu that offers to create a second
+sheet on a paragraph that already has one is the failure this feature can least
+afford.
+]]
+function FingerInk:canvasMenu()
+    local items = {}
+    if not (self.session and self.session:isAvailable()) then return items end
+
+    if self.canvas_open then
+        local active = self.session:activeCanvas()
+        items[#items + 1] = {
+            text = _("Close sheet"),
+            callback = function() self:closeCanvas() end,
+        }
+        items[#items + 1] = {
+            text = _("Delete this sheet"),
+            keep_menu_open = true,
+            separator = true,
+            callback = function() self:confirmDeleteCanvas(active) end,
+        }
+    else
+        items[#items + 1] = {
+            -- Closes the menu on purpose: opening a sheet turns drawing on,
+            -- and an open menu is unusable once the pen is inking.
+            text = _("Open sheet here"),
+            enabled_func = function() return not self.session:isIndexing() end,
+            callback = function() self:openCanvasHere() end,
+            help_text = _([[Creates a blank sheet anchored to this position in the book, or opens the one that is already here. The sheet keeps its own coordinates, so changing font or margins moves the sheet, not what you drew on it.]]),
+        }
+    end
+
+    local here = self.session:canvasesHere(self:currentPage())
+    if #here > 1 then
+        local sub = {}
+        for i = 1, #here do
+            local canvas = here[i]
+            sub[i] = {
+                text = string.format(_("Sheet %d"), i),
+                callback = function() self:openCanvas(canvas) end,
+            }
+        end
+        items[#items + 1] = {
+            text = _("Sheets on this page"),
+            separator = true,
+            sub_item_table = sub,
+        }
+    end
+
+    local orphans = self.session:orphans()
+    if #orphans > 0 then
+        local sub = {}
+        for i = 1, #orphans do
+            local canvas = orphans[i]
+            sub[i] = {
+                text = string.format(_("Lost sheet %d"), i),
+                sub_item_table = {
+                    {
+                        text = _("Open it anyway"),
+                        callback = function() self:openCanvas(canvas) end,
+                    },
+                    {
+                        text = _("Delete it"),
+                        keep_menu_open = true,
+                        callback = function() self:confirmDeleteCanvas(canvas) end,
+                    },
+                },
+            }
+        end
+        items[#items + 1] = {
+            -- Anchors that no longer resolve are kept, never deleted for the
+            -- reader: the text may come back. But a sheet nothing can reach is
+            -- no use either, so there is a way in.
+            text = string.format(_("Lost sheets (%d)"), #orphans),
+            help_text = _([[Sheets whose place in the book can no longer be found -- usually because the file was replaced with a different edition. Nothing drawn on them has been lost.]]),
+            sub_item_table = sub,
+        }
+    end
+
+    return items
 end
 
 function FingerInk:addToMainMenu(menu_items)
@@ -999,6 +1647,15 @@ function FingerInk:addToMainMenu(menu_items)
                 callback = function() self:showDiagnostics() end,
                 help_text = _([[Shows why the pen route is or is not running, and writes the same report to the log along with one line per pen event for a minute, capped at 500 lines. Digitizer numbers only - nothing from the book.]]),
                 separator = true,
+            },
+            {
+                text = _("Drawing sheet"),
+                separator = true,
+                enabled_func = function()
+                    return self.session ~= nil and self.session:isAvailable()
+                end,
+                help_text = _([[Blank sheets anchored to a position in a reflowable book. Not available in PDFs and other fixed layouts, where drawing goes straight onto the page instead.]]),
+                sub_item_table_func = function() return self:canvasMenu() end,
             },
             {
                 text = _("Clear this page"),
