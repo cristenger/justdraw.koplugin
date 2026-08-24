@@ -805,6 +805,8 @@ function support.newCanvasStore(canvases)
         return true
     end
 
+    function store:touchCanvas() return true end
+
     function store:close() self.closed = true end
 
     store.calls.transaction = 0

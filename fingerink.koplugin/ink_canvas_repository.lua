@@ -529,14 +529,6 @@ function Repository:listCanvases(book_id)
         { book_id }, canvasRow)
 end
 
-function Repository:getCanvas(canvas_id)
-    local ready, reason = self:_ready(false)
-    if not ready then return nil, reason end
-    local rows, err = self:_select(CANVAS_COLUMNS .. " WHERE id = ?1;",
-        { canvas_id }, canvasRow)
-    if not rows then return nil, err end
-    return rows[1]
-end
 
 --[[--
 Create a canvas and return its row, geometry included.

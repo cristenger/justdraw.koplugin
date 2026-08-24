@@ -109,9 +109,6 @@ function Router:penDraws()
     return self.pen == "canvas"
 end
 
-function Router:penDestination()
-    return self.pen
-end
 
 -- ------------------------------------------------------------------- touch
 

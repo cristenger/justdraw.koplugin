@@ -131,11 +131,5 @@ function Grid:candidates(min_x, min_y, max_x, max_y)
     return out
 end
 
---- How many strokes are indexed. Diagnostics only.
-function Grid:count()
-    local n = 0
-    for _ in pairs(self.boxes) do n = n + 1 end
-    return n
-end
 
 return Grid

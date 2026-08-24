@@ -75,9 +75,6 @@ function Queue:pendingCount()
     return #self.ops
 end
 
-function Queue:pendingBytes()
-    return self.bytes
-end
 
 function Queue:isFailed()
     return self.failed

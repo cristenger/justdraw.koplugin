@@ -302,6 +302,12 @@ end
 
 function Session:closeCanvas()
     if not self.canvas then return end
+    if self.edited then
+        -- `listCanvases` orders by updated_at, and that ordering is what puts
+        -- the sheet the reader last wrote in at the top of the chooser.
+        self.repository:touchCanvas(self.canvas.id)
+        self.edited = false
+    end
     if self.queue then
         self.queue:close()
         self.queue = nil
@@ -384,6 +390,7 @@ function Session:addStroke(points, n, width, tool)
         id = local_id, seq = seq, width = width, tool = tool, point_count = n,
         min_x = min_x, min_y = min_y, max_x = max_x, max_y = max_y,
     }, points, n)
+    self.edited = true
     return local_id
 end
 
@@ -394,6 +401,7 @@ function Session:eraseAt(cx, cy, radius)
     if not hit then return nil end
     local box = self.cache_obj:removeStroke(hit.id)
     self.queue:removeStroke(self.canvas, hit.id)
+    self.edited = true
     return box
 end
 
@@ -406,6 +414,7 @@ function Session:undo()
     if not last then return nil end
     local box = self.cache_obj:removeStroke(last.id)
     self.queue:removeStroke(self.canvas, last.id)
+    self.edited = true
     return box or true
 end
 

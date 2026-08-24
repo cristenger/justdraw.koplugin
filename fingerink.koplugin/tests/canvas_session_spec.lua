@@ -291,6 +291,33 @@ return function(ctx)
         t:eq(session:overlay(), nil, "with the window gone")
     end)
 
+    t:case("a sheet that was written to is marked as recently used", function()
+        -- listCanvases orders by updated_at, which is what makes the chooser
+        -- put the sheet the reader last wrote in at the top.
+        local session, store, sched = openedSession{
+            canvases = { canvasAt(1, "/p1") }, pages = { ["/p1"] = 3 },
+        }
+        store.touched = nil
+        store.touchCanvas = function(self, id) self.touched = id end
+        session:openCanvas(session:canvasById(1))
+        sched:drain()
+        session:addStroke({ 10, 10, 20, 20 }, 2, 4, 1)
+        session:closeCanvas()
+        t:eq(store.touched, 1, "touched on the way out")
+    end)
+
+    t:case("a sheet that was only looked at is left alone", function()
+        local session, store, sched = openedSession{
+            canvases = { canvasAt(1, "/p1") }, pages = { ["/p1"] = 3 },
+        }
+        store.touched = nil
+        store.touchCanvas = function(self, id) self.touched = id end
+        session:openCanvas(session:canvasById(1))
+        sched:drain()
+        session:closeCanvas()
+        t:eq(store.touched, nil, "opening a sheet is not using it")
+    end)
+
     t:case("switching canvases flushes the first one before loading the second", function()
         local session, store, sched = openedSession{
             canvases = { canvasAt(1, "/p1"), canvasAt(2, "/p2") },
