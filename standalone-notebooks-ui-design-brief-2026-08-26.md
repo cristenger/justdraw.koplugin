@@ -1,4 +1,4 @@
-# Encargo de diseño: interfaz de cuadernos independientes para FingerInk
+# Encargo de diseño: interfaz de cuadernos independientes para JustDraw
 
 - Fecha: 2026-08-26
 - Tipo de entrega: propuesta de producto e interfaz, sin implementación
@@ -7,7 +7,7 @@
 
 ## 1. Instrucción principal para el agente de diseño
 
-Actúa como diseñador sénior de producto e interacción especializado en interfaces para tinta electrónica y lápiz. Diseña la experiencia completa de los cuadernos independientes de FingerInk: entrada a la función, biblioteca, creación y administración de cuadernos, edición de páginas con lápiz, navegación, recuperación de errores y salida segura.
+Actúa como diseñador sénior de producto e interacción especializado en interfaces para tinta electrónica y lápiz. Diseña la experiencia completa de los cuadernos independientes de JustDraw: entrada a la función, biblioteca, creación y administración de cuadernos, edición de páginas con lápiz, navegación, recuperación de errores y salida segura.
 
 No estás diseñando una aplicación móvil convencional ni una réplica visual de Kindle Notes. La propuesta debe poder implementarse con los widgets, el ciclo de vida y el sistema de refresco de KOReader, y debe respetar el backend que ya existe en este repositorio. El resultado esperado es una especificación de diseño argumentada y verificable, no código de producción.
 
@@ -17,7 +17,7 @@ Antes de diseñar:
 2. Si está disponible, usa la skill `koreader-docs-research` para resolver de nuevo la última versión estable y el commit actual de desarrollo de KOReader. Contrasta ambos; no trates la copia local antigua como autoridad sobre APIs nuevas.
 3. Usa una skill de diseño de interfaz si el entorno ofrece una adecuada para este trabajo, pero no permitas que patrones de iOS, Android o web sustituyan las convenciones de KOReader.
 4. Comprueba en fuentes oficiales cualquier afirmación que dependa del stack de ventanas, propagación de eventos, widgets, refrescos de pantalla, FileManager o ReaderUI.
-5. No modifiques código de FingerInk en esta tarea. Si el diseño necesita ampliar un contrato del backend, descríbelo como una brecha concreta y propón la API mínima necesaria.
+5. No modifiques código de JustDraw en esta tarea. Si el diseño necesita ampliar un contrato del backend, descríbelo como una brecha concreta y propón la API mínima necesaria.
 
 No bloquees la propuesta por preguntas menores. Formula una recomendación principal, documenta los supuestos y separa con claridad qué forma parte del MVP y qué pertenece a una etapa posterior.
 
@@ -27,7 +27,7 @@ El usuario debe poder tomar notas manuscritas sin abrir un libro:
 
 - entrar a una biblioteca de cuadernos desde el explorador de archivos de KOReader o mientras lee un documento;
 - crear un cuaderno con una primera página;
-- abrirlo y escribir con el lápiz con la misma ruta de tinta ya probada en FingerInk;
+- abrirlo y escribir con el lápiz con la misma ruta de tinta ya probada en JustDraw;
 - alternar entre lápiz y goma, deshacer el último trazo y cambiar de página;
 - añadir páginas al final y borrar una página con confirmación;
 - volver a la biblioteca sin perder tinta;
@@ -41,9 +41,9 @@ La propuesta debe dar prioridad a cuatro cualidades:
 3. La interacción habitual debe requerir pocos refrescos e-ink y pocos cambios de pantalla.
 4. La biblioteca debe seguir siendo utilizable con miles de cuadernos y páginas.
 
-## 3. Qué es FingerInk hoy
+## 3. Qué es JustDraw hoy
 
-FingerInk es un plugin de KOReader escrito en Lua/LuaJIT. Actualmente tiene tres dominios claramente separados:
+JustDraw es un plugin de KOReader escrito en Lua/LuaJIT. Actualmente tiene tres dominios claramente separados:
 
 1. **Tinta directa sobre documentos de página fija, como PDF.** Dibuja en coordenadas de pantalla/página y conserva su comportamiento actual. Esta ruta no debe rediseñarse como parte de los cuadernos.
 2. **Hojas acotadas dentro de EPUB y otros documentos reflowables.** Una hoja se ancla al texto mediante un xpointer y ofrece un área delimitada para dibujar. Tampoco debe convertirse en la interfaz de cuadernos.
@@ -63,7 +63,7 @@ Asume lo siguiente:
 - Los refrescos completos son lentos y pueden parpadear; los rápidos sacrifican fidelidad y pueden dejar ghosting.
 - No conviene usar animaciones, transiciones continuas, arrastre con feedback por frame ni barras que cambien de forma constantemente.
 - Un lápiz puede tocar controles, pero la captura de tinta ocurre antes del reconocimiento normal de gestos. El widget no recibirá ese contacto si la región no fue declarada como passthrough.
-- La palma debe tratarse de manera deliberada. En la ruta moderna de stylus, FingerInk distingue lápiz, goma y dedo; presión, inclinación, hover y proximidad no forman parte del contrato público actual usado por el plugin.
+- La palma debe tratarse de manera deliberada. En la ruta moderna de stylus, JustDraw distingue lápiz, goma y dedo; presión, inclinación, hover y proximidad no forman parte del contrato público actual usado por el plugin.
 - La goma posterior se puede utilizar si KOReader la expone como herramienta de borrado.
 - La latencia, el rechazo real de palma, el ghosting, las waveforms y el comportamiento del firmware sólo pueden aprobarse en un Scribe físico.
 - KOReader también puede ejecutar la ruta de compatibilidad con dedo en hardware sin stylus moderno. La UI no debe quedar inutilizable en ese modo.
@@ -75,13 +75,13 @@ Diseña objetivos táctiles cómodos para dedo y lápiz. Usa escalado de KOReade
 La relación de componentes es ésta:
 
 ```text
-Instancia FingerInk del host
+Instancia JustDraw del host
 ├── ReaderUI existente
 │   ├── tinta directa PDF, sin cambios
 │   └── hojas EPUB, sin cambios
 ├── NotebookController
 │   ├── NotebookRepository
-│   │   └── settings/fingerink-notebooks.sqlite3
+│   │   └── settings/justdraw-notebooks.sqlite3
 │   └── NotebookSession
 │       └── InkSurfaceSession
 │           ├── un InkCanvasCache/raster activo
@@ -165,9 +165,9 @@ No presentes las plantillas como una capacidad ya terminada.
 
 ### 7.1 Entrada del plugin
 
-`FingerInk:notebookController()` crea de forma perezosa el dominio de cuadernos; no abre la base hasta la primera operación que la necesita.
+`JustDraw:notebookController()` crea de forma perezosa el dominio de cuadernos; no abre la base hasta la primera operación que la necesita.
 
-`FingerInk:configureNotebookInteraction(opts)` debe ejecutarse antes de abrir un cuaderno. La UI suministra:
+`JustDraw:configureNotebookInteraction(opts)` debe ejecutarse antes de abrir un cuaderno. La UI suministra:
 
 - `viewport_provider` o geometría equivalente;
 - `fit_rect` y `clip_rect` si no usa provider;
@@ -299,7 +299,7 @@ Usuario solicita salir
 → si falla: mantener la ventana y mostrar recuperación de guardado
 ```
 
-No cierres primero el widget. La API de KOReader no ofrece veto después de iniciar el cierre. Un cierre externo forzado del proceso sigue siendo un límite residual: FingerInk libera el callback y la base aunque el último COMMIT falle, después de informar el error.
+No cierres primero el widget. La API de KOReader no ofrece veto después de iniciar el cierre. Un cierre externo forzado del proceso sigue siendo un límite residual: JustDraw libera el callback y la base aunque el último COMMIT falle, después de informar el error.
 
 ## 10. Enrutado de lápiz, dedo y controles
 
@@ -616,28 +616,28 @@ Fuentes principales:
 - `README.md`, especialmente “Standalone notebooks”, entrada, límites y pruebas.
 - `decisions.md`, especialmente ADR-6, ADR-8 a ADR-13 y ADR-18.
 - `standalone-notebooks-dev-plan-2026-08-26.md`.
-- `fingerink.koplugin/main.lua`.
-- `fingerink.koplugin/ink_notebook_controller.lua`.
-- `fingerink.koplugin/ink_notebook_session.lua`.
-- `fingerink.koplugin/ink_notebook_repository.lua`.
-- `fingerink.koplugin/ink_notebook_input.lua`.
-- `fingerink.koplugin/ink_input_controller.lua`.
-- `fingerink.koplugin/ink_surface_session.lua`.
-- `fingerink.koplugin/ink_canvas_transform.lua`.
-- `fingerink.koplugin/ink_canvas_cache.lua`.
-- `fingerink.koplugin/ink_canvas_queue.lua`.
+- `justdraw.koplugin/main.lua`.
+- `justdraw.koplugin/ink_notebook_controller.lua`.
+- `justdraw.koplugin/ink_notebook_session.lua`.
+- `justdraw.koplugin/ink_notebook_repository.lua`.
+- `justdraw.koplugin/ink_notebook_input.lua`.
+- `justdraw.koplugin/ink_input_controller.lua`.
+- `justdraw.koplugin/ink_surface_session.lua`.
+- `justdraw.koplugin/ink_canvas_transform.lua`.
+- `justdraw.koplugin/ink_canvas_cache.lua`.
+- `justdraw.koplugin/ink_canvas_queue.lua`.
 
 Pruebas que documentan contratos y edge cases:
 
-- `fingerink.koplugin/tests/notebook_controller_spec.lua`.
-- `fingerink.koplugin/tests/notebook_session_spec.lua`.
-- `fingerink.koplugin/tests/notebook_repository_spec.lua`.
-- `fingerink.koplugin/tests/notebook_input_spec.lua`.
-- `fingerink.koplugin/tests/notebook_geometry_spec.lua`.
-- `fingerink.koplugin/tests/notebook_host_spec.lua`.
-- `fingerink.koplugin/tests/surface_session_spec.lua`.
-- `fingerink.koplugin/tests/input_controller_spec.lua`.
-- `fingerink.koplugin/tests/conformance.lua`.
+- `justdraw.koplugin/tests/notebook_controller_spec.lua`.
+- `justdraw.koplugin/tests/notebook_session_spec.lua`.
+- `justdraw.koplugin/tests/notebook_repository_spec.lua`.
+- `justdraw.koplugin/tests/notebook_input_spec.lua`.
+- `justdraw.koplugin/tests/notebook_geometry_spec.lua`.
+- `justdraw.koplugin/tests/notebook_host_spec.lua`.
+- `justdraw.koplugin/tests/surface_session_spec.lua`.
+- `justdraw.koplugin/tests/input_controller_spec.lua`.
+- `justdraw.koplugin/tests/conformance.lua`.
 
 Para patrones KOReader, estudia en las referencias estable y dev actuales:
 

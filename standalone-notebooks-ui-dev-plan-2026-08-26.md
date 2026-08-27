@@ -2,9 +2,9 @@
 
 - **ID:** `FI-NOTEBOOK-UI-MVP`
 - **Fecha:** 2026-08-26
-- **Repositorio:** `fingerink.koplugin`
+- **Repositorio:** `justdraw`
 - **Rama objetivo:** `codex/kindle-scribe-stylus`
-- **Stack:** Lua/LuaJIT, widgets de KOReader, `lua-ljsqlite3`, raster de FingerInk, entrada Wacom a través de KOReader
+- **Stack:** Lua/LuaJIT, widgets de KOReader, `lua-ljsqlite3`, raster de JustDraw, entrada Wacom a través de KOReader
 - **Plan previo de dominio:** `standalone-notebooks-dev-plan-2026-08-26.md`
 - **Propuesta visual analizada:** `/Users/christianstenger/Desktop/Propuesta UI Cuadernos FingerInk/Propuesta UI Cuadernos FingerInk.dc.html`
 - **Objetivo:** activar el backend de cuadernos ya construido mediante una biblioteca y un editor de pantalla completa utilizables en FileManager y ReaderUI, seguros ante fallos de carga/guardado/entrada y adecuados para e-ink y lápiz.
@@ -27,7 +27,7 @@ Las decisiones finales son:
 7. El ordinal `3 / 57` queda fuera del MVP. Se mostrará el total de páginas y se deshabilitarán Previous/Next con flags cacheados. Esto evita una consulta `COUNT` en cada cambio de UI y no inventa un ordinal a partir de `sort_key`.
 8. El snapshot de UI no ejecutará SQL ni se cacheará como una tabla mutable compartida. Cada llamada devolverá una tabla nueva calculada sólo con estado de sesión ya disponible y flags de navegación actualizados una vez por transición de página.
 9. No se añadirá un `full` automático cada 32 trazos. Es una hipótesis de hardware, duplica parcialmente las promociones de refresco de KOReader y debe decidirse en el gate físico. Los cambios de página, entrada/salida, rotación y resume ya ofrecen puntos seguros para limpiar ghosting.
-10. `onSuspend()` no repetirá el flush. En KOReader, `Device:_beforeSuspend()` llama `UIManager:flushSettings()` antes de emitir `Suspend`; FingerInk conservará el flush durable en `onSaveSettings()` y usará `onSuspend()` para abortar contacto y soltar captura.
+10. `onSuspend()` no repetirá el flush. En KOReader, `Device:_beforeSuspend()` llama `UIManager:flushSettings()` antes de emitir `Suspend`; JustDraw conservará el flush durable en `onSaveSettings()` y usará `onSuspend()` para abortar contacto y soltar captura.
 11. La biblioteca no se recargará por cada batch durable de tinta mientras permanezca bajo el editor. Se marcará como stale y se volverá al primer lote cuando el editor se cierre.
 12. No se guardará `last_notebook_id` ni “list density” en v1. La biblioteca ya ordena por actividad y siempre se abre primero. La única preferencia visual nueva será el lado del riel.
 
@@ -73,14 +73,14 @@ El backend de cuadernos existe sin UI y está sin commit en el worktree actual. 
 
 | Archivo | Responsabilidad actual | Uso por la UI |
 |---|---|---|
-| `fingerink.koplugin/main.lua` | lifecycle de plugin, ReaderUI, herramientas compartidas, handoff de input | activa FileManager, crea el coordinador visual y conserva la única fuente de preferencias |
-| `fingerink.koplugin/ink_notebook_repository.lua` | SQLite, keyset, metadata, páginas y trazos | no se usa directamente desde widgets |
-| `fingerink.koplugin/ink_notebook_controller.lua` | repositorio lazy, una sesión activa, host lifecycle y purga | fachada única para biblioteca/editor |
-| `fingerink.koplugin/ink_notebook_session.lua` | una página activa, navegación y gates durables | snapshot cohesivo y acciones del editor |
-| `fingerink.koplugin/ink_notebook_input.lua` | clasificación de papel/chrome y state machine de stylus/dedo/goma | callbacks dinámicos de regiones y dirty boxes |
-| `fingerink.koplugin/ink_surface_session.lua` | raster único, cola, undo y pending writes | sigue oculto detrás de NotebookSession |
-| `fingerink.koplugin/ink_canvas_transform.lua` | fit/clip y conversiones pantalla/lienzo | reutilizado por viewport y dirty boxes |
-| `fingerink.koplugin/ink_input_controller.lua` | exclusión global de captura y desarme seguro | sin cambios de arquitectura |
+| `justdraw.koplugin/main.lua` | lifecycle de plugin, ReaderUI, herramientas compartidas, handoff de input | activa FileManager, crea el coordinador visual y conserva la única fuente de preferencias |
+| `justdraw.koplugin/ink_notebook_repository.lua` | SQLite, keyset, metadata, páginas y trazos | no se usa directamente desde widgets |
+| `justdraw.koplugin/ink_notebook_controller.lua` | repositorio lazy, una sesión activa, host lifecycle y purga | fachada única para biblioteca/editor |
+| `justdraw.koplugin/ink_notebook_session.lua` | una página activa, navegación y gates durables | snapshot cohesivo y acciones del editor |
+| `justdraw.koplugin/ink_notebook_input.lua` | clasificación de papel/chrome y state machine de stylus/dedo/goma | callbacks dinámicos de regiones y dirty boxes |
+| `justdraw.koplugin/ink_surface_session.lua` | raster único, cola, undo y pending writes | sigue oculto detrás de NotebookSession |
+| `justdraw.koplugin/ink_canvas_transform.lua` | fit/clip y conversiones pantalla/lienzo | reutilizado por viewport y dirty boxes |
+| `justdraw.koplugin/ink_input_controller.lua` | exclusión global de captura y desarme seguro | sin cambios de arquitectura |
 
 ### 3.2 Restricciones confirmadas en el código
 
@@ -202,7 +202,7 @@ El agente implementador debe usar estas cadenas base o una variante gramaticalme
 | Error input | `Pen input stopped responding.` |
 | Acción input | `Retry pen input` |
 | Sólo lectura | `Read-only` |
-| Cuerpo sólo lectura | `This notebook was created by a newer version of FingerInk. You can view it and change pages, but you can’t edit it.` |
+| Cuerpo sólo lectura | `This notebook was created by a newer version of JustDraw. You can view it and change pages, but you can’t edit it.` |
 | Contacto activo | `Lift the pen and try again.` |
 | Límites | `First page`, `Last page` |
 | Herramientas | `Pen`, `Eraser`, `Undo`, `Previous page`, `Next page`, `Add page`, `More`, `Exit notebook` |
@@ -247,7 +247,7 @@ El checkout local está limpio en archivos tracked y su submódulo coincide con 
 FileManager / ReaderUI
         │
         ▼
-FingerInk (host adapter, settings, lifecycle)
+JustDraw (host adapter, settings, lifecycle)
         │
         ├── NotebookUI (coordinator, no SQL)
         │      ├── NotebookLibraryWindow (top-level, no input lease)
@@ -284,14 +284,14 @@ Invariantes:
 
 | Archivo | Contenido |
 |---|---|
-| `fingerink.koplugin/ink_notebook_ui.lua` | coordinador de ventanas, callbacks de controller, apertura/cierre y host teardown |
-| `fingerink.koplugin/ink_notebook_library.lua` | LibraryWindow, NotebookRow, paginación, estados vacío/error/read-only y diálogos de biblioteca |
-| `fingerink.koplugin/ink_notebook_editor.lua` | EditorWindow, ToolRail, InfoStrip, PaperViewport, ErrorBand y comandos |
-| `fingerink.koplugin/ink_notebook_layout.lua` | cálculo puro de geometría física, presets y viewport |
-| `fingerink.koplugin/ink_notebook_errors.lua` | normalización de razones internas a códigos estables; sin mensajes SQLite |
-| `fingerink.koplugin/tests/notebook_ui_spec.lua` | coordinador, stack, copy y lifecycle |
-| `fingerink.koplugin/tests/notebook_library_spec.lua` | lotes, filas, acciones, diálogos y read-only |
-| `fingerink.koplugin/tests/notebook_editor_spec.lua` | layout, estados, herramientas, dirty y cierre durable |
+| `justdraw.koplugin/ink_notebook_ui.lua` | coordinador de ventanas, callbacks de controller, apertura/cierre y host teardown |
+| `justdraw.koplugin/ink_notebook_library.lua` | LibraryWindow, NotebookRow, paginación, estados vacío/error/read-only y diálogos de biblioteca |
+| `justdraw.koplugin/ink_notebook_editor.lua` | EditorWindow, ToolRail, InfoStrip, PaperViewport, ErrorBand y comandos |
+| `justdraw.koplugin/ink_notebook_layout.lua` | cálculo puro de geometría física, presets y viewport |
+| `justdraw.koplugin/ink_notebook_errors.lua` | normalización de razones internas a códigos estables; sin mensajes SQLite |
+| `justdraw.koplugin/tests/notebook_ui_spec.lua` | coordinador, stack, copy y lifecycle |
+| `justdraw.koplugin/tests/notebook_library_spec.lua` | lotes, filas, acciones, diálogos y read-only |
+| `justdraw.koplugin/tests/notebook_editor_spec.lua` | layout, estados, herramientas, dirty y cierre durable |
 
 No crear un archivo por cada subwidget. Los componentes pequeños y exclusivos de una ventana se quedan en el mismo módulo.
 
@@ -299,13 +299,13 @@ No crear un archivo por cada subwidget. Los componentes pequeños y exclusivos d
 
 | Archivo | Cambio acotado |
 |---|---|
-| `fingerink.koplugin/main.lua` | `is_doc_only=false`, registro de menú docless, creación lazy de NotebookUI, callbacks y setting del lado del riel |
-| `fingerink.koplugin/ink_notebook_controller.lua` | lote UI `limit+1`, library status, `undo`, snapshot passthrough y callbacks durables |
-| `fingerink.koplugin/ink_notebook_session.lua` | snapshot sin SQL, flags de vecinos, `undo`, dirty callback y capacidad de cierre |
-| `fingerink.koplugin/ink_notebook_input.lua` | método público para presentar dirty box de undo y reloj/guard de toque inyectable si se habilita |
-| `fingerink.koplugin/ink_surface_session.lua` | `canUndo()` O(1), sin exponer cache a UI |
-| `fingerink.koplugin/tests/support.lua` | shims de widgets, FocusManager, RadioButtonTable, BD, datetime y Screen DPI |
-| `fingerink.koplugin/tests/run.lua` | registrar nuevos specs |
+| `justdraw.koplugin/main.lua` | `is_doc_only=false`, registro de menú docless, creación lazy de NotebookUI, callbacks y setting del lado del riel |
+| `justdraw.koplugin/ink_notebook_controller.lua` | lote UI `limit+1`, library status, `undo`, snapshot passthrough y callbacks durables |
+| `justdraw.koplugin/ink_notebook_session.lua` | snapshot sin SQL, flags de vecinos, `undo`, dirty callback y capacidad de cierre |
+| `justdraw.koplugin/ink_notebook_input.lua` | método público para presentar dirty box de undo y reloj/guard de toque inyectable si se habilita |
+| `justdraw.koplugin/ink_surface_session.lua` | `canUndo()` O(1), sin exponer cache a UI |
+| `justdraw.koplugin/tests/support.lua` | shims de widgets, FocusManager, RadioButtonTable, BD, datetime y Screen DPI |
+| `justdraw.koplugin/tests/run.lua` | registrar nuevos specs |
 | specs de notebook existentes | contratos nuevos sin reescribir pruebas de dominio |
 | `README.md` | uso de Notebooks, alcance, copy inglés y gates físicos pendientes |
 | `decisions.md` | ADR de biblioteca custom, handoff tardío, geometría DPI y salida durable |
@@ -603,7 +603,7 @@ Resultado de `compute(screen_w, screen_h, rail_side)`:
 
 Reglas:
 
-- rail left/right por setting `fingerink_notebook_rail_side`.
+- rail left/right por setting `justdraw_notebook_rail_side`.
 - `paper_rect` excluye rail e info strip.
 - `fit_rect` y `clip_rect` se mantienen iguales durante un error.
 - el transform centra la página según aspect ratio dentro de paper_rect.
@@ -641,7 +641,7 @@ Reglas:
 - Targets de al menos 10 mm.
 - Disabled implica apariencia atenuada **y** ausencia de callback efectivo.
 - Delete page y Delete notebook sólo aparecen en More y requieren ConfirmBox.
-- More incluye Rename notebook, Delete page, Delete notebook, Input mode, Pen width y Rail side sólo si el diseño cabe sin duplicar settings inconsistentes. Los submenús reutilizan los métodos de settings existentes de FingerInk.
+- More incluye Rename notebook, Delete page, Delete notebook, Input mode, Pen width y Rail side sólo si el diseño cabe sin duplicar settings inconsistentes. Los submenús reutilizan los métodos de settings existentes de JustDraw.
 
 ### 11.4 InfoStrip
 
@@ -735,7 +735,7 @@ Crear helper del editor `showModalSafely(widget, rect_provider)`:
 6. llamar `UIManager:show`;
 7. al cerrar, cerrar widget primero y quitar la región en el siguiente tick seguro.
 
-La región full-screen temporal es preferible a dejar un hueco de papel activo bajo un diálogo. Mientras exista, la ventana modal recibe la secuencia y las ventanas full-screen de FingerInk consumen los gestos no manejados; no se filtran al host inferior.
+La región full-screen temporal es preferible a dejar un hueco de papel activo bajo un diálogo. Mientras exista, la ventana modal recibe la secuencia y las ventanas full-screen de JustDraw consumen los gestos no manejados; no se filtran al host inferior.
 
 Para un error asíncrono, el orden es abort/release capture, reparar provisional, publicar ErrorBand, dirty. No esperar un modal.
 
@@ -784,7 +784,7 @@ Regla transversal: si una operación síncrona cambia el estado después de que 
 
 ### 14.1 Activación en FileManager
 
-Modificar `FingerInk`:
+Modificar `JustDraw`:
 
 1. `is_doc_only = false`.
 2. En `init`, detectar docless como hoy.
@@ -795,7 +795,7 @@ Modificar `FingerInk`:
 
 ### 14.2 Activación en ReaderUI
 
-- Conservar el submenu `Finger Ink` y añadir `Notebooks` como primer item.
+- Conservar el submenu `JustDraw` y añadir `Notebooks` como primer item.
 - Abrir LibraryWindow no llama `prepareNotebookHandoff`.
 - Al abrir una row, `openNotebook` realiza preflight y luego `before_open`:
   - si hay hoja EPUB, flush y close;
@@ -1162,17 +1162,17 @@ Conformance real:
 
 ```sh
 /Users/christianstenger/koreader/koreader/luajit \
-  /Users/christianstenger/GitHub/fingerink.koplugin/fingerink.koplugin/tests/conformance.lua
+  /Users/christianstenger/GitHub/justdraw/justdraw.koplugin/tests/conformance.lua
 
 /Users/christianstenger/koreader/koreader/luajit \
-  /Users/christianstenger/GitHub/fingerink.koplugin/fingerink.koplugin/tests/conformance.lua \
+  /Users/christianstenger/GitHub/justdraw/justdraw.koplugin/tests/conformance.lua \
   /Users/christianstenger/koreader/koreader/test/juliet.epub
 ```
 
 Sintaxis:
 
 ```sh
-find fingerink.koplugin -name '*.lua' -print0 | \
+find justdraw.koplugin -name '*.lua' -print0 | \
   xargs -0 -n1 /Users/christianstenger/koreader/koreader/luajit -b
 ```
 

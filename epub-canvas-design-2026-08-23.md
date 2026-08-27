@@ -1,4 +1,4 @@
-# FingerInk: lienzo EPUB anclado y escalable — diseño revisado
+# JustDraw: lienzo EPUB anclado y escalable — diseño revisado
 
 Fecha: 2026-08-23
 
@@ -26,13 +26,13 @@ Se mantienen estas decisiones:
 - el texto queda visible por encima de la hoja;
 - con el lienzo abierto, el dedo puede navegar fuera de la hoja cuando no hay
   un contacto de lápiz activo;
-- el dibujo directo actual sobre PDF y su clave `fingerink_strokes` no cambian.
+- el dibujo directo actual sobre PDF y su clave `justdraw_strokes` no cambian.
 
 Se reemplazan cinco piezas del diseño anterior:
 
 | Diseño anterior | Decisión revisada | Motivo |
 | --- | --- | --- |
-| Todos los lienzos y puntos en `fingerink_canvases` dentro de `metadata.lua` | SQLite dedicada, BLOBs de puntos y carga perezosa | `DocSettings:flush()` serializa y reescribe toda la tabla; el coste crece con todas las notas del libro |
+| Todos los lienzos y puntos en `justdraw_canvases` dentro de `metadata.lua` | SQLite dedicada, BLOBs de puntos y carga perezosa | `DocSettings:flush()` serializa y reescribe toda la tabla; el coste crece con todas las notas del libro |
 | `ReaderUI < hoja < barra`, tres ventanas ordinarias | Una sola ventana compuesta `InkCanvasOverlay`, con hoja y barra como hijos | `UIManager` no propaga automáticamente un evento ordinario a ventanas inferiores; una sola ventana elimina una pila frágil |
 | Supresión según la posición de cada gesto | Destino fijado al comienzo de cada contacto/slot | Un contacto que cruza hoja, texto o barra no puede cambiar de dueño a mitad de secuencia |
 | Escalado sólo por el ancho | Transformación uniforme `aspect-fit`, con inversa única | La rotación y las pantallas con otra relación de aspecto deben conservar todo el lienzo sin deformarlo |
@@ -97,7 +97,7 @@ usuario.
 ### 2.2 Altura de la hoja
 
 La altura es estado de interfaz, no del contenido. Se guarda como preferencia
-global de FingerInk y usa paradas de 40, 70 y 100%. Cerrar corresponde a 0%.
+global de JustDraw y usa paradas de 40, 70 y 100%. Cerrar corresponde a 0%.
 
 El asa usa `hold_pan`, como `MovableContainer`. Durante el arrastre no se
 repinta la hoja; la altura se calcula y se aplica al soltar. KOReader sigue este
@@ -110,7 +110,7 @@ repintado completo por movimiento.
 ### 3.1 Por qué el sidecar monolítico queda descartado
 
 `DocSettings:flush()` ejecuta `dump(data, nil, true)` y escribe el resultado
-completo. Guardar `fingerink_canvases` allí haría que una nueva raya serializara
+completo. Guardar `justdraw_canvases` allí haría que una nueva raya serializara
 de nuevo todos los puntos acumulados. También duplicaría ese volumen en las
 copias de seguridad de metadatos que el usuario tenga activadas.
 
@@ -134,7 +134,7 @@ suficiente para no usar el sidecar como almacén nuevo.
 La base se crea en:
 
 ```lua
-DataStorage:getSettingsDir() .. "/fingerink.sqlite3"
+DataStorage:getSettingsDir() .. "/justdraw.sqlite3"
 ```
 
 Es la misma ubicación global que usa el plugin oficial Statistics para su base.
@@ -147,9 +147,9 @@ calcula `partial_md5_checksum` antes de emitir `ReaderReady`. La clave de libro
 es `(partial_md5_checksum, file_size)`, donde el tamaño se obtiene con
 `lfs.attributes(document.file, "size")`; `last_path` sirve para diagnóstico, no
 como identidad. Dos copias byte a byte idénticas comparten los lienzos si
-comparten la misma base de FingerInk. Un libro copiado por sí solo a otro
+comparten la misma base de JustDraw. Un libro copiado por sí solo a otro
 dispositivo no lleva las notas: sincronización y exportación siguen fuera de
-alcance. El backup del lector debe incluir `fingerink.sqlite3`, no sólo la
+alcance. El backup del lector debe incluir `justdraw.sqlite3`, no sólo la
 carpeta `.sdr` del libro. Con WAL activo, el backup se hace con KOReader cerrado
 o incluye también los archivos `-wal`/`-shm`.
 
@@ -246,8 +246,8 @@ Los puntos de lienzos cerrados nunca se convierten a tablas Lua. Para construir
 o reparar la caché activa se leen chunks por orden, se decodifica uno, se pinta
 y se libera antes del siguiente.
 
-No existe una migración desde `fingerink_canvases`: esa clave pertenecía sólo
-al diseño y nunca llegó a producción. `fingerink_strokes` continúa en el
+No existe una migración desde `justdraw_canvases`: esa clave pertenecía sólo
+al diseño y nunca llegó a producción. `justdraw_strokes` continúa en el
 sidecar con el formato actual.
 
 ### 3.4 Journal, migraciones y errores
@@ -291,7 +291,7 @@ borra la fila: marca el lienzo como huérfano recuperable.
 
 Esto no puede delegarse a la migración interna de `ReaderRolling`: su lista de
 xpointers incluye sólo la última posición y `page/pos0/pos1` de anotaciones. No
-conoce las tablas de FingerInk. Guardar la forma normalizada desde el nacimiento
+conoce las tablas de JustDraw. Guardar la forma normalizada desde el nacimiento
 evita depender de ese recorrido cerrado.
 
 ### 4.2 Índice por página
@@ -584,20 +584,20 @@ uso de memoria contra el plugin sin lienzo.
 
 | Archivo | Cambio | Responsabilidad |
 | --- | --- | --- |
-| `fingerink.koplugin/ink_canvas_repository.lua` | Crear | Conexión SQLite, esquema, migraciones, transacciones, consultas perezosas y fallos |
-| `fingerink.koplugin/ink_canvas_codec.lua` | Crear | Codec BLOB versionado y chunks; ninguna dependencia UI |
-| `fingerink.koplugin/ink_anchor.lua` | Crear | Crear/validar raw + normalized xpointer y ancla de página fija |
-| `fingerink.koplugin/ink_anchor_index.lua` | Crear | Metadata, hash de layout, resolución incremental, índice de página y huérfanos |
-| `fingerink.koplugin/ink_canvas_cache.lua` | Crear | Caché BB8, cuadrícula espacial, rasterizado por lotes e invalidación regional |
-| `fingerink.koplugin/ink_canvas_overlay.lua` | Crear | Ventana compuesta, hoja, asa, transformación, pintado y forwarding |
-| `fingerink.koplugin/ink_contact_router.lua` | Crear | Estado por slot y destinos latchados; sin persistencia ni widgets |
-| `fingerink.koplugin/ink_bar.lua` | Modificar | Convertir en hijo embebible y añadir acciones de lienzo; quitar propiedad de la pila |
-| `fingerink.koplugin/ink_capture.lua` | Modificar | Permitir filtrar slots táctiles dominados antes de `feedEvent`, manteniendo desregistro seguro |
-| `fingerink.koplugin/ink_render.lua` | Modificar mínimo | Pintar sobre viewport/caché con transformación explícita; sin conocer SQLite |
-| `fingerink.koplugin/main.lua` | Modificar | Coordinar repositorio, overlay, backend, eventos y lifecycle |
-| `fingerink.koplugin/ink_store.lua` | No modificar para esta función | Seguir siendo el store de tinta directa por página/PDF |
-| `fingerink.koplugin/tests/support.lua` | Modificar | Stubs fieles de SQLite, viewport, timers, pila y eventos |
-| `fingerink.koplugin/tests/run.lua` | Modificar | Tests unitarios, pipeline real y fixtures de escala |
+| `justdraw.koplugin/ink_canvas_repository.lua` | Crear | Conexión SQLite, esquema, migraciones, transacciones, consultas perezosas y fallos |
+| `justdraw.koplugin/ink_canvas_codec.lua` | Crear | Codec BLOB versionado y chunks; ninguna dependencia UI |
+| `justdraw.koplugin/ink_anchor.lua` | Crear | Crear/validar raw + normalized xpointer y ancla de página fija |
+| `justdraw.koplugin/ink_anchor_index.lua` | Crear | Metadata, hash de layout, resolución incremental, índice de página y huérfanos |
+| `justdraw.koplugin/ink_canvas_cache.lua` | Crear | Caché BB8, cuadrícula espacial, rasterizado por lotes e invalidación regional |
+| `justdraw.koplugin/ink_canvas_overlay.lua` | Crear | Ventana compuesta, hoja, asa, transformación, pintado y forwarding |
+| `justdraw.koplugin/ink_contact_router.lua` | Crear | Estado por slot y destinos latchados; sin persistencia ni widgets |
+| `justdraw.koplugin/ink_bar.lua` | Modificar | Convertir en hijo embebible y añadir acciones de lienzo; quitar propiedad de la pila |
+| `justdraw.koplugin/ink_capture.lua` | Modificar | Permitir filtrar slots táctiles dominados antes de `feedEvent`, manteniendo desregistro seguro |
+| `justdraw.koplugin/ink_render.lua` | Modificar mínimo | Pintar sobre viewport/caché con transformación explícita; sin conocer SQLite |
+| `justdraw.koplugin/main.lua` | Modificar | Coordinar repositorio, overlay, backend, eventos y lifecycle |
+| `justdraw.koplugin/ink_store.lua` | No modificar para esta función | Seguir siendo el store de tinta directa por página/PDF |
+| `justdraw.koplugin/tests/support.lua` | Modificar | Stubs fieles de SQLite, viewport, timers, pila y eventos |
+| `justdraw.koplugin/tests/run.lua` | Modificar | Tests unitarios, pipeline real y fixtures de escala |
 | `README.md`, `spec.md`, `decisions.md` | Modificar | UX, límites, formato y ADR de persistencia/overlay |
 
 No se copiará la arquitectura de `drawnotes.koplugin`. Ese plugin abre un
@@ -618,7 +618,7 @@ Cada fase deja la suite verde y puede revisarse por separado.
    copia antes de migración.
 4. Probar que `listCanvases(book_id)` no selecciona `stroke_chunks.points`.
 
-Gate: ninguna integración UI; `fingerink_strokes` y `ink_store.lua` sin diff.
+Gate: ninguna integración UI; `justdraw_strokes` y `ink_store.lua` sin diff.
 
 ### Fase 2 — Anclas e índice
 
@@ -650,7 +650,7 @@ Gate: tras completar la carga densa, diez `paintTo` no decodifican ningún BLOB.
 4. Implementar alturas imantadas y reconstrucción por rotación.
 5. Añadir selector local, borrar y recuperación de huérfanos.
 
-Gate: nunca hay más de una ventana ordinaria de FingerInk y la barra sigue
+Gate: nunca hay más de una ventana ordinaria de JustDraw y la barra sigue
 alcanzable en 40/70/100%.
 
 ### Fase 5 — Router y lápiz
@@ -694,7 +694,7 @@ Gate: no declarar terminada la función hasta completar la matriz física mínim
 ```sh
 lua test.lua
 luajit test.lua
-cd fingerink.koplugin && luajit tests/run.lua
+cd justdraw.koplugin && luajit tests/run.lua
 ```
 
 Con el runtime de KOReader:

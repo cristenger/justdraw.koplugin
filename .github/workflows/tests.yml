@@ -17,7 +17,7 @@ jobs:
         run: |
           set -e
           n=0
-          for f in $(find fingerink.koplugin -name '*.lua'); do
+          for f in $(find justdraw.koplugin -name '*.lua'); do
             luajit -b "$f" /dev/null
             n=$((n + 1))
           done

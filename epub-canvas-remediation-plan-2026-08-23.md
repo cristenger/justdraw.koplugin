@@ -87,7 +87,7 @@ lua test.lua
 La ejecución informada antes de esta remediación fue de 1044 comprobaciones y
 42 claims de conformance. Esos números son una referencia, no un sustituto de
 volver a ejecutar las suites. El runner debe mostrar que ejecutó
-`fingerink.koplugin/tests/run.lua`; un `SKIP` no es verde.
+`justdraw.koplugin/tests/run.lua`; un `SKIP` no es verde.
 
 ## 4. Invariantes que mandan sobre el diseño
 
@@ -131,7 +131,7 @@ un presupuesto de puntos, no un número de trazos de longitud arbitraria.
 
 ### I-6. La UI principal coordina los cambios visibles
 
-Sólo `FingerInk` modifica conjuntamente `canvas_open`, `drawing`, `bar`, el
+Sólo `JustDraw` modifica conjuntamente `canvas_open`, `drawing`, `bar`, el
 router y la ventana activa. `Session` devuelve éxito/error y administra datos y
 recursos, pero no deja al plugin principal creyendo que una hoja cerrada o
 eliminada sigue abierta.
@@ -146,18 +146,18 @@ otra escritura.
 
 | Archivo | Responsabilidad tras la remediación |
 |---|---|
-| `fingerink.koplugin/ink_canvas_queue.lua` | operaciones pendientes, asignación local→SQLite, flush/retry/close |
-| `fingerink.koplugin/ink_canvas_cache.lua` | raster, claves activas, metadata de chunks, carga por presupuesto, hit-test y repair |
-| `fingerink.koplugin/ink_canvas_codec.lua` | encoder incremental y validador/decoder incremental |
-| `fingerink.koplugin/ink_canvas_repository.lua` | cursores de chunks, consultas puntuales, transacciones, esquema, WAL y read-only |
-| `fingerink.koplugin/ink_canvas_session.lua` | estado de carga/guardado, `next_seq`, aperturas/cierres/borrados recuperables |
-| `fingerink.koplugin/ink_anchor_index.lua` | propagar fallo de listado; nunca convertirlo en índice vacío |
-| `fingerink.koplugin/ink_spatial_grid.lua` | seguir indexando cajas; la caché le entrega cajas expandidas por grosor |
-| `fingerink.koplugin/ink_canvas_overlay.lua` | mostrar `loading`, `load_failed` y `read_only`; bloquear edición sin ocultar Hide/Retry |
-| `fingerink.koplugin/main.lua` | coordinación UI, ciclos de la goma y propiedad de la barra |
-| `fingerink.koplugin/tests/support.lua` | dobles con cursores, fallos por etapa, contadores y límites de memoria lógica |
-| `fingerink.koplugin/tests/*_spec.lua` | contratos unitarios e integración entre capas |
-| `fingerink.koplugin/tests/conformance.lua` | semántica SQLite real, blobs, DDL, WAL y EPUB real |
+| `justdraw.koplugin/ink_canvas_queue.lua` | operaciones pendientes, asignación local→SQLite, flush/retry/close |
+| `justdraw.koplugin/ink_canvas_cache.lua` | raster, claves activas, metadata de chunks, carga por presupuesto, hit-test y repair |
+| `justdraw.koplugin/ink_canvas_codec.lua` | encoder incremental y validador/decoder incremental |
+| `justdraw.koplugin/ink_canvas_repository.lua` | cursores de chunks, consultas puntuales, transacciones, esquema, WAL y read-only |
+| `justdraw.koplugin/ink_canvas_session.lua` | estado de carga/guardado, `next_seq`, aperturas/cierres/borrados recuperables |
+| `justdraw.koplugin/ink_anchor_index.lua` | propagar fallo de listado; nunca convertirlo en índice vacío |
+| `justdraw.koplugin/ink_spatial_grid.lua` | seguir indexando cajas; la caché le entrega cajas expandidas por grosor |
+| `justdraw.koplugin/ink_canvas_overlay.lua` | mostrar `loading`, `load_failed` y `read_only`; bloquear edición sin ocultar Hide/Retry |
+| `justdraw.koplugin/main.lua` | coordinación UI, ciclos de la goma y propiedad de la barra |
+| `justdraw.koplugin/tests/support.lua` | dobles con cursores, fallos por etapa, contadores y límites de memoria lógica |
+| `justdraw.koplugin/tests/*_spec.lua` | contratos unitarios e integración entre capas |
+| `justdraw.koplugin/tests/conformance.lua` | semántica SQLite real, blobs, DDL, WAL y EPUB real |
 | `README.md`, `epub-canvas-design-2026-08-23.md` | estado real, límites y gate físico; no promesas adelantadas |
 
 No modificar `ink_capture.lua`, `ink_contact_router.lua`, `ink_store.lua` ni la
@@ -172,13 +172,13 @@ esté rojo. No hace falta reorganizar la historia Git para seguir este orden.
 
 Archivos:
 
-- `fingerink.koplugin/tests/canvas_queue_spec.lua`
-- `fingerink.koplugin/tests/canvas_cache_spec.lua`
-- `fingerink.koplugin/tests/canvas_session_spec.lua`
-- `fingerink.koplugin/tests/main_canvas_spec.lua`
-- `fingerink.koplugin/tests/canvas_repository_spec.lua`
-- `fingerink.koplugin/tests/canvas_scale_spec.lua`
-- `fingerink.koplugin/tests/support.lua`
+- `justdraw.koplugin/tests/canvas_queue_spec.lua`
+- `justdraw.koplugin/tests/canvas_cache_spec.lua`
+- `justdraw.koplugin/tests/canvas_session_spec.lua`
+- `justdraw.koplugin/tests/main_canvas_spec.lua`
+- `justdraw.koplugin/tests/canvas_repository_spec.lua`
+- `justdraw.koplugin/tests/canvas_scale_spec.lua`
+- `justdraw.koplugin/tests/support.lua`
 
 Trabajo:
 
@@ -306,25 +306,25 @@ Archivos principales:
    liberar la hoja.
 4. `Session:openCanvas(next)` aborta si no puede cerrar la actual. No asigna el
    nuevo canvas ni libera el raster actual.
-5. `FingerInk:closeCanvas()` no cambia `canvas_open` ni pierde `bar` hasta que
+5. `JustDraw:closeCanvas()` no cambia `canvas_open` ni pierde `bar` hasta que
    Session confirme el cierre. Puede dejar `drawing = false` tras un fallo para
    impedir nueva tinta mientras `Retry saving` está activo.
 6. `Session:close({ force = true })` distingue el teardown obligatorio del
    cierre interactivo. Debe intentar flush y notificar; si el proceso/documento
    se está cerrando puede liberar recursos después del fallo, pero nunca debe
    registrar que los datos fueron guardados.
-7. `FingerInk:onSaveSettings()` conserva el gate actual y comprueba el retorno
+7. `JustDraw:onSaveSettings()` conserva el gate actual y comprueba el retorno
    para emitir la misma notificación deduplicada.
 
 #### 2.2 Borrar una hoja
 
-1. Añadir un coordinador `FingerInk:deleteCanvas(canvas)`; el callback del
+1. Añadir un coordinador `JustDraw:deleteCanvas(canvas)`; el callback del
    diálogo no llama a Session directamente.
 2. Para hoja activa, `Session:deleteCanvas` ejecuta primero el DELETE durable.
    Si falla, overlay, queue, caché e índice permanecen intactos.
 3. Sólo después del DELETE exitoso descarta las operaciones pendientes de esa
    hoja, cierra sus recursos y la quita del índice.
-4. Tras éxito, FingerInk aborta cualquier trazo en curso sin guardarlo,
+4. Tras éxito, JustDraw aborta cualquier trazo en curso sin guardarlo,
    restablece `drawing`, `canvas_open`, `bar`, router y barra independiente, y
    solicita refresh completo.
 5. Para hoja inactiva no se toca la hoja abierta ni su cola.
@@ -581,7 +581,7 @@ Archivos principales:
 4. Exponer `Session:isWritable()`. Main no activa drawing y el menú deshabilita
    create, delete, undo, pen y eraser. Hide y navegación siguen disponibles.
 5. Overlay muestra una vez: `This sheet is read-only because it was created by
-   a newer FingerInk version.`
+   a newer JustDraw version.`
 6. Toda API mutante mantiene la guarda de repositorio aunque la UI ya la haya
    deshabilitado.
 
@@ -623,7 +623,7 @@ Archivos principales:
 
 Trabajo:
 
-1. En `FingerInk:onScreenResize`, si hay overlay activo, no ejecutar
+1. En `JustDraw:onScreenResize`, si hay overlay activo, no ejecutar
    `rebuildBar()` para la barra independiente.
 2. Pedir a overlay que reconstruya geometría/barra y, al terminar, reasignar
    `self.bar = overlay.bar`.
@@ -688,7 +688,7 @@ luajit test.lua
 lua test.lua
 ```
 
-Desde `fingerink.koplugin/`, usando la skill instalada:
+Desde `justdraw.koplugin/`, usando la skill instalada:
 
 ```sh
 KOREADER_QA="$HOME/.codex/skills/koreader-simulator-qa/scripts/koreader_qa.sh"
@@ -700,8 +700,8 @@ KOREADER_QA="$HOME/.codex/skills/koreader-simulator-qa/scripts/koreader_qa.sh"
 Para conformance, desde el directorio del build KOReader:
 
 ```sh
-./luajit /ruta/absoluta/fingerink.koplugin/tests/conformance.lua
-./luajit /ruta/absoluta/fingerink.koplugin/tests/conformance.lua /ruta/a/juliet.epub
+./luajit /ruta/absoluta/justdraw.koplugin/tests/conformance.lua
+./luajit /ruta/absoluta/justdraw.koplugin/tests/conformance.lua /ruta/a/juliet.epub
 ```
 
 Registrar versión/commit real del runtime. Si no es v2026.07 exacto, marcar la

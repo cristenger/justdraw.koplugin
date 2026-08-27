@@ -1,9 +1,9 @@
-# FingerInk: plan de desarrollo para Kindle Scribe y stylus
+# JustDraw: plan de desarrollo para Kindle Scribe y stylus
 
 Fecha: 2026-08-23
 Auditado: 2026-08-23 (revisión de ingeniería, sin escribir código de producción)
 Feature ID: `FI-SCRIBE-STYLUS-001`
-Repositorio base: `fingerink.koplugin`, rama `main`, commit `300169f`
+Repositorio base: `justdraw`, rama `main`, commit `300169f`
 Rama de implementación sugerida: `codex/kindle-scribe-stylus`
 Alcance de entrega: un PR incremental contra `main`; no mezclar la rama no fusionada `upstream/claude/pdf-ink-annotations`
 Stack: plugin KOReader en Lua/LuaJIT, KOReader **v2026.07** o posterior para stylus, Kindle Scribe/Wacom, framebuffer e-ink `mxcfb`
@@ -69,7 +69,7 @@ Con las correcciones de §0.2 aplicadas, el plan es implementable. Sin la correc
 Requieren hardware o una decisión del autor antes de implementar:
 
 - **¿El digitalizador del Scribe emite `BTN_STYLUS`?** El código predice que el botón lateral, en un dispositivo no-SDL, activa `stylus_eraser_active` y reescribe `tool` a `ERASER` mientras se mantiene pulsado. Si el kernel del Scribe no emite `BTN_STYLUS`, el botón lateral simplemente no hace nada. Sólo verificable en un Scribe.
-- **¿La suite de la skill de QA debe vivir dentro del `.koplugin`?** Ponerla en `fingerink.koplugin/tests/` la hace auto-descubrible pero la empaqueta hacia el dispositivo (unos pocos KB). La alternativa es invocación explícita y perder la integración con la skill. §6.4 propone las dos entradas; el autor decide si acepta el peso.
+- **¿La suite de la skill de QA debe vivir dentro del `.koplugin`?** Ponerla en `justdraw.koplugin/tests/` la hace auto-descubrible pero la empaqueta hacia el dispositivo (unos pocos KB). La alternativa es invocación explícita y perder la integración con la skill. §6.4 propone las dos entradas; el autor decide si acepta el peso.
 - **¿Se declara compatibilidad con Kobo Elipsa/Sage?** El backend `stylus` explícito debería funcionar allí (esos paneles reportan `ABS_MT_TOOL_TYPE`), pero no hay hardware para probarlo. La recomendación es no declararlo y dejar la opción manual accesible.
 - **Percepción física de refresh y ghosting.** Sin cambios respecto al plan original: no se puede evaluar sin un Scribe.
 
@@ -77,7 +77,7 @@ Requieren hardware o una decisión del autor antes de implementar:
 
 ## 1. Resultado que debe entregar la implementación
 
-FingerInk debe conservar su funcionamiento actual con dedo en dispositivos como Kindle Paperwhite y añadir una ruta específica para stylus que funcione en Kindle Scribe sin parchear KOReader.
+JustDraw debe conservar su funcionamiento actual con dedo en dispositivos como Kindle Paperwhite y añadir una ruta específica para stylus que funcione en Kindle Scribe sin parchear KOReader.
 
 Cuando el modo efectivo sea stylus:
 
@@ -102,7 +102,7 @@ No incluir en este PR:
 - herramienta highlighter/color;
 - exportación o escritura dentro del PDF;
 - corrección del anclaje de EPUB, scroll continuo o reflow;
-- cambio del formato `fingerink_strokes`;
+- cambio del formato `justdraw_strokes`;
 - una modificación de `frontend/device/input.lua` o de cualquier archivo de KOReader;
 - optimización especulativa de refresh, simplificación de puntos o guardado con debounce antes de medir un Scribe real;
 - soporte certificado para todos los lectores con stylus. La implementación debe ser razonablemente genérica, pero la matriz de aceptación de este trabajo es Kindle Scribe.
@@ -115,12 +115,12 @@ No hay `AGENTS.md`, `CLAUDE.md`, reglas de proyecto, CI ni configuración de tes
 
 | Archivo | Responsabilidad actual | Impacto del cambio |
 | --- | --- | --- |
-| `fingerink.koplugin/main.lua` | Ciclo de vida, estado de contactos, toolbar, trazos, menú y persistencia | Cambio principal: modo de entrada, backend efectivo y estado stylus |
-| `fingerink.koplugin/ink_capture.lua` | Monkey patch temporal de `GestureDetector:feedEvent` y transformación de coordenadas | Cambio principal: backend dual, propiedad segura de callback/hook, contención de errores y detección de stylus |
-| `fingerink.koplugin/ink_bar.lua` | Barra nativa y reenvío de eventos al widget inferior | No debería requerir cambio de producción; sí cobertura de regresión |
-| `fingerink.koplugin/ink_render.lua` | Rasterización DDA sin asignación por punto | No tocar en este PR |
-| `fingerink.koplugin/ink_store.lua` | Trazos por página y hit test del borrador | No tocar en este PR |
-| `fingerink.koplugin/_meta.lua` | Nombre y descripción | Actualizar descripción para dedo y stylus |
+| `justdraw.koplugin/main.lua` | Ciclo de vida, estado de contactos, toolbar, trazos, menú y persistencia | Cambio principal: modo de entrada, backend efectivo y estado stylus |
+| `justdraw.koplugin/ink_capture.lua` | Monkey patch temporal de `GestureDetector:feedEvent` y transformación de coordenadas | Cambio principal: backend dual, propiedad segura de callback/hook, contención de errores y detección de stylus |
+| `justdraw.koplugin/ink_bar.lua` | Barra nativa y reenvío de eventos al widget inferior | No debería requerir cambio de producción; sí cobertura de regresión |
+| `justdraw.koplugin/ink_render.lua` | Rasterización DDA sin asignación por punto | No tocar en este PR |
+| `justdraw.koplugin/ink_store.lua` | Trazos por página y hit test del borrador | No tocar en este PR |
+| `justdraw.koplugin/_meta.lua` | Nombre y descripción | Actualizar descripción para dedo y stylus |
 | `README.md` | Instalación, uso, límites y comando de tests | Actualizar compatibilidad, modos y requisitos de versión |
 | `requirements.md` | Objetivos originales del Paperwhite | Ampliar sin eliminar compatibilidad con Paperwhite |
 | `spec.md` | Especificación declarada como fuente de verdad | Documentar las dos rutas y sus máquinas de estado |
@@ -130,11 +130,11 @@ No hay `AGENTS.md`, `CLAUDE.md`, reglas de proyecto, CI ni configuración de tes
 
 ### Funciones que se deben preservar
 
-- `FingerInk:setDrawing` sólo instala captura mientras el modo de dibujo está activo.
-- `FingerInk:onTouchFrame` mantiene la regla actual de un dedo dibuja y dos dedos pasan al lector en backend `finger`.
-- `FingerInk:onContactPoint` impide pintar sobre la barra.
-- `FingerInk:endStroke` agrega al store sólo al levantar el contacto.
-- `FingerInk:paintTo` sigue siendo la representación autoritativa.
+- `JustDraw:setDrawing` sólo instala captura mientras el modo de dibujo está activo.
+- `JustDraw:onTouchFrame` mantiene la regla actual de un dedo dibuja y dos dedos pasan al lector en backend `finger`.
+- `JustDraw:onContactPoint` impide pintar sobre la barra.
+- `JustDraw:endStroke` agrega al store sólo al levantar el contacto.
+- `JustDraw:paintTo` sigue siendo la representación autoritativa.
 - `InkBar:handleEvent` continúa reenviando únicamente los cuatro handlers que llegan por `UIManager:sendEvent`.
 - La barra siempre es visible cuando `drawing == true`.
 
@@ -143,7 +143,7 @@ No hay `AGENTS.md`, `CLAUDE.md`, reglas de proyecto, CI ni configuración de tes
 > 🆕 ADDED: el plan original listaba lo que hay que preservar pero no lo que ya está mal en las mismas funciones que va a tocar. Arreglarlos ahora es más barato que después, y el segundo es una pérdida de datos observable.
 
 1. **`Capture:remove` restaura incondicionalmente.** `Device.input.gesture_detector.feedEvent = self.original` sobrescribe lo que haya, aunque otro código haya encadenado su propio wrapper encima. Ver §5.4.
-2. **`FingerInk:teardown` pierde el trazo en vuelo.** No llama a `abortStroke` ni a `resetContacts`; al cerrar el documento con el lápiz apoyado el trazo se descarta en silencio y el estado de contactos se filtra al siguiente documento abierto en la misma sesión. `setDrawing(false)` sí lo hace bien; `teardown` debe hacer lo mismo.
+2. **`JustDraw:teardown` pierde el trazo en vuelo.** No llama a `abortStroke` ni a `resetContacts`; al cerrar el documento con el lápiz apoyado el trazo se descarta en silencio y el estado de contactos se filtra al siguiente documento abierto en la misma sesión. `setDrawing(false)` sí lo hace bien; `teardown` debe hacer lo mismo.
 3. **No hay `onResume`.** `onSuspend` llama a `setDrawing(false)`, lo cual es correcto, pero conviene documentar por qué no hace falta un `onResume` simétrico (§5.10).
 
 ### Tests disponibles
@@ -250,7 +250,7 @@ Consecuencia práctica que el plan original no explotaba: **la máscara de v2026
 
 > ✅ VERIFIED: **las cuatro fórmulas actuales de `Capture.toScreen` son correctas.** Comparadas una a una con `GestureDetector:translateCoordinates` ([gesturedetector.lua:1396-1421](https://github.com/koreader/koreader/blob/v2026.07.2/frontend/device/gesturedetector.lua#L1396)) y con los valores de `fb.DEVICE_ROTATED_*` (0/1/2/3, [framebuffer.lua:78-81](https://github.com/koreader/koreader-base/blob/6e4bc81af4e04f78d81677a323a780a71b29702a/ffi/framebuffer.lua#L78)):
 >
-> | modo | KOReader | FingerInk |
+> | modo | KOReader | JustDraw |
 > | --- | --- | --- |
 > | 1 CW | `(width - y), (x)` | `screen:getWidth() - y, x` |
 > | 2 UD | `(width - x), (height - y)` | `screen:getWidth() - x, screen:getHeight() - y` |
@@ -278,7 +278,7 @@ Si la fase posterior incorpora throttling, debe guardar una función estable y p
 
 ### 5.1 Modos persistidos
 
-Añadir `fingerink_input_mode` a `G_reader_settings` con estos valores:
+Añadir `justdraw_input_mode` a `G_reader_settings` con estos valores:
 
 | Valor | Resolución |
 | --- | --- |
@@ -359,7 +359,7 @@ La misma comprobación de identidad debe mejorar la retirada del backend `finger
 
 ### 5.5 Máquina de estado stylus
 
-Añadir a `FingerInk`:
+Añadir a `JustDraw`:
 
 ```lua
 self.input_mode = "auto" | "stylus" | "finger"
@@ -372,7 +372,7 @@ No reutilizar `n_contacts` para el lápiz. La palma se procesa después de que K
 
 > ⚠️ REVISED: las seis reglas se reescriben para que sean **por transición** y **idempotentes**, según el ciclo de vida de §4.2. Las reglas originales asumían que cada frame trae información nueva; con tablas persistentes eso no se cumple.
 
-Reglas de `FingerInk:onStylusEvent(slot)`. La primera línea copia escalares:
+Reglas de `JustDraw:onStylusEvent(slot)`. La primera línea copia escalares:
 
 ```lua
 local id, x, y, tool = slot.id, slot.x, slot.y, slot.tool
@@ -400,7 +400,7 @@ La función debe devolver siempre un booleano porque ese valor gobierna si KORea
 
 ### 5.6 Filtro táctil residual
 
-Crear `FingerInk:onStylusTouchFrame(slots)`. Puede reutilizar `contacts`, `n_contacts` y `passthrough` sólo para contactos residuales, pero nunca debe llamar a `onContactPoint`.
+Crear `JustDraw:onStylusTouchFrame(slots)`. Puede reutilizar `contacts`, `n_contacts` y `passthrough` sólo para contactos residuales, pero nunca debe llamar a `onContactPoint`.
 
 Reglas:
 
@@ -447,7 +447,7 @@ Conservar sin cambios:
 - pintura directa en `Screen.bb`;
 - un `refreshFast` o `refreshPartial` por segmento;
 - guardado mediante `onSaveSettings`;
-- sidecar `fingerink_strokes`.
+- sidecar `justdraw_strokes`.
 
 La primera prueba física debe establecer la línea base. Sólo abrir la fase de tuning si aparece uno de estos síntomas:
 
@@ -477,7 +477,7 @@ local function guard(self, fn, fail_value)
     return function(...)
         local ok, res = pcall(fn, ...)
         if ok then return res end
-        logger.err("FingerInk: input handler failed:", res)
+        logger.err("JustDraw: input handler failed:", res)
         self:disarm()          -- retira captura por identidad, idempotente
         return fail_value      -- callback: false. wrapper residual: true.
     end
@@ -488,7 +488,7 @@ Reglas concretas:
 
 1. **Valor de retorno seguro tras fallo.** El callback de stylus devuelve `false` (no dominar: el evento sigue su curso normal). El wrapper residual devuelve `true` (emitir: los gestos llegan al lector). En ambos casos el fallo degrada hacia “KOReader se comporta como si el plugin no estuviera”, nunca hacia “la entrada desaparece”.
 2. **Auto-desarme.** El primer error retira toda la captura por identidad (§5.4), pone `drawing = false`, aborta el trazo en vuelo y actualiza la barra. No reintentar.
-3. **Notificar una sola vez.** Una `Notification` al desarmarse, con un texto accionable (“Finger Ink: drawing stopped after an input error”). Nunca una por frame.
+3. **Notificar una sola vez.** Una `Notification` al desarmarse, con un texto accionable (“JustDraw: drawing stopped after an input error”). Nunca una por frame.
 4. **Reentrada.** `disarm()` puede invocarse desde dentro del propio wrapper que está desmontando. Debe ser idempotente y no debe asumir que `self.bar` existe.
 5. **El `pcall` no envuelve `original(gd_self, slots)`.** Llamar al `feedEvent` original es responsabilidad de KOReader y un error allí no es del plugin; protegerlo enmascararía bugs de core. Sólo se protege la lógica propia.
 
@@ -511,7 +511,7 @@ Consecuencias para el plugin:
 
 ## 6. Cambios por archivo
 
-### 6.1 `fingerink.koplugin/ink_capture.lua`
+### 6.1 `justdraw.koplugin/ink_capture.lua`
 
 Reemplazar la interfaz monolítica por una explícita, manteniendo el módulo singleton:
 
@@ -533,7 +533,7 @@ Detalles obligatorios:
 
 - `installFinger` conserva la llamada al detector original y vacía el array devuelto cuando `frame_handler` no permite emitir.
 - `installStylus` registra el callback y además instala el mismo tipo de wrapper para el residual táctil.
-- **Ambos instaladores envuelven los handlers recibidos con la guarda de §5.9** y usan `on_error` para avisar a `main.lua`. `Capture` no conoce a `FingerInk`; la política de desarme la pone quien instala.
+- **Ambos instaladores envuelven los handlers recibidos con la guarda de §5.9** y usan `on_error` para avisar a `main.lua`. `Capture` no conoce a `JustDraw`; la política de desarme la pone quien instala.
 - Guardar `input`, `gesture_detector`, `original_feed`, `feed_wrapper`, `stylus_callback`, `backend`, `active`.
 - Validar todo antes de la primera mutación.
 - Devolver `true, backend` o `false, reason`.
@@ -541,11 +541,11 @@ Detalles obligatorios:
 - `remove` debe ser idempotente y comprobar identidad antes de restaurar (§5.4).
 - Las constantes se resuelven **una vez, al instalar**, no en el momento de carga del módulo: `Device.input` puede no estar completamente inicializado cuando el plugin se requiere.
 
-### 6.2 `fingerink.koplugin/main.lua`
+### 6.2 `justdraw.koplugin/main.lua`
 
 Cambios concretos:
 
-1. Leer `fingerink_input_mode`, default `auto`.
+1. Leer `justdraw_input_mode`, default `auto`.
 2. Inicializar estado stylus (`input_backend`, `stylus_active`, `stylus_passthrough`).
 3. Añadir `resolveInputBackend()`:
    - `finger` siempre devuelve `finger`;
@@ -568,11 +568,11 @@ Mensajes de error mínimos:
 - `no_stylus_api`: “Stylus input requires KOReader v2026.07 or newer”.
 - `stylus_callback_busy`: “Another plugin is already using stylus input”.
 - `no_gesture_detector`: conservar el mensaje actual de imposibilidad de capturar touch.
-- `handler_error` (§5.9): “Finger Ink: drawing stopped after an input error”.
+- `handler_error` (§5.9): “JustDraw: drawing stopped after an input error”.
 
 No mostrar notificaciones por cada frame ni loguear coordenadas de todos los puntos. Como diagnóstico, loguear únicamente: backend seleccionado y por qué, transición tool/contact down, lift, conflicto de ownership, retirada de ownership y desarme por error.
 
-### 6.3 `fingerink.koplugin/_meta.lua`
+### 6.3 `justdraw.koplugin/_meta.lua`
 
 Cambiar la descripción para indicar dibujo con dedo o stylus. No renombrar el plugin ni el directorio.
 
@@ -582,10 +582,10 @@ Cambiar la descripción para indicar dibujo con dedo o stylus. No renombrar el p
 
 Estructura:
 
-- **`fingerink.koplugin/tests/run.lua`** — la suite real. Es lo que ejecuta `koreader_qa.sh test` (`(cd "$PLUGIN_DIR" && luajit tests/run.lua)`), con el directorio de trabajo en la carpeta del plugin. Al vivir bajo `$PLUGIN_DIR`, además entra en el barrido de sintaxis de LuaJIT.
+- **`justdraw.koplugin/tests/run.lua`** — la suite real. Es lo que ejecuta `koreader_qa.sh test` (`(cd "$PLUGIN_DIR" && luajit tests/run.lua)`), con el directorio de trabajo en la carpeta del plugin. Al vivir bajo `$PLUGIN_DIR`, además entra en el barrido de sintaxis de LuaJIT.
 - **`test.lua`** en la raíz — shim de una línea que carga el anterior, para que el comando documentado en el README siga funcionando desde la raíz del repositorio.
 
-El runner debe resolver `package.path` sin depender del directorio de trabajo, porque se invoca desde dos sitios distintos. Derivarlo del propio script (`arg[0]`) en lugar de asumir `./` o `fingerink.koplugin/`.
+El runner debe resolver `package.path` sin depender del directorio de trabajo, porque se invoca desde dos sitios distintos. Derivarlo del propio script (`arg[0]`) en lugar de asumir `./` o `justdraw.koplugin/`.
 
 Resto del patrón, tomado del test histórico `ddefe627:test.lua`:
 
@@ -611,9 +611,9 @@ No copiar los tests PDF de aquella rama.
 
 ### 6.6 Archivos que no se deben tocar
 
-- `fingerink.koplugin/ink_render.lua`;
-- `fingerink.koplugin/ink_store.lua`;
-- `fingerink.koplugin/ink_bar.lua`, salvo que un test revele una regresión real;
+- `justdraw.koplugin/ink_render.lua`;
+- `justdraw.koplugin/ink_store.lua`;
+- `justdraw.koplugin/ink_bar.lua`, salvo que un test revele una regresión real;
 - `demo.mp4`;
 - el checkout `/Users/christianstenger/koreader/koreader` y sus plugins instalados;
 - cualquier archivo de KOReader core;
@@ -632,7 +632,7 @@ Criterio de salida: baseline reproducible y sin modificar el checkout de KOReade
 
 ### Fase 1 — Crear tests que fallen
 
-Crear primero `fingerink.koplugin/tests/run.lua` con stubs para `Device.input`, GestureDetector, Screen, UIManager, widgets y settings. Añadir los casos de la sección 8. Al menos los tests de callback y los de contención de errores deben fallar contra el código actual antes de implementar.
+Crear primero `justdraw.koplugin/tests/run.lua` con stubs para `Device.input`, GestureDetector, Screen, UIManager, widgets y settings. Añadir los casos de la sección 8. Al menos los tests de callback y los de contención de errores deben fallar contra el código actual antes de implementar.
 
 Criterio de salida: `koreader_qa.sh test` ejecuta la suite (no imprime `SKIP`), los tests heredados de dedo siguen verdes y los tests stylus están rojos por ausencia de API interna del plugin.
 
@@ -674,13 +674,13 @@ Criterio de salida: documentación coincide con el código, versión mínima y l
 4. Probar el backend finger en el emulador.
 5. Probar la ruta stylus mediante stubs; el SDL/runtime local v2025.08 no tiene la API y no demuestra Wacom real.
 
-Criterio de salida: sin traceback, `Plugin loaded fingerink`, `RD loaded plugin fingerink`, barra operativa y dibujo con dedo conservado.
+Criterio de salida: sin traceback, `Plugin loaded justdraw`, `RD loaded plugin justdraw`, barra operativa y dibujo con dedo conservado.
 
 ### Fase 6 — Gate obligatorio en Kindle Scribe
 
 Instalar en un Scribe con KOReader v2026.07 o posterior. Deshabilitar Pencil, `stylus-annotations` y otros plugins de stylus durante la primera ronda.
 
-**Primer paso, antes de tocar el lápiz:** buscar en el log `We failed to auto-detect the proper input devices`. Si aparece, KOReader cayó al fallback de `touch_dev` y no abrió el digitalizador (§4.3); ningún trabajo del plugin puede arreglar eso y hay que reportarlo como problema de entorno, no de FingerInk.
+**Primer paso, antes de tocar el lápiz:** buscar en el log `We failed to auto-detect the proper input devices`. Si aparece, KOReader cayó al fallback de `touch_dev` y no abrió el digitalizador (§4.3); ningún trabajo del plugin puede arreglar eso y hay que reportarlo como problema de entorno, no de JustDraw.
 
 No declarar completada la compatibilidad Scribe antes de pasar la matriz física de la sección 9.
 
@@ -792,7 +792,7 @@ Ejecutar sobre un PDF fijo, primero en orientación normal y después tras rotac
 
 Criterios de aceptación física:
 
-- cero crashes o tracebacks de FingerInk;
+- cero crashes o tracebacks de JustDraw;
 - cero cambios de página causados por palma en modo stylus;
 - un dedo no crea tinta;
 - la palma no termina el stroke del lápiz;
@@ -812,14 +812,14 @@ git status --short
 KOREADER_QA=/Users/christianstenger/.claude/skills/koreader-simulator-qa/scripts/koreader_qa.sh
 KOREADER_RUNTIME=/Users/christianstenger/koreader/koreader/koreader-emulator-arm64-apple-darwin25.1.0-debug/koreader
 
-(cd fingerink.koplugin && "$KOREADER_QA" preflight)
-(cd fingerink.koplugin && "$KOREADER_QA" test)     # debe correr tests/run.lua, no imprimir SKIP
+(cd justdraw.koplugin && "$KOREADER_QA" preflight)
+(cd justdraw.koplugin && "$KOREADER_QA" test)     # debe correr tests/run.lua, no imprimir SKIP
 "$KOREADER_RUNTIME/luajit" test.lua                 # shim de raíz, misma suite
 lua test.lua                                        # cualquier Lua 5.1+, sin LuaJIT
 
 # Contrasta los stubs de la suite contra el Device real del runtime instalado.
 # UNCHECKABLE no es un pase: significa que este runtime no tiene esa API.
-PROBE="$PWD/fingerink.koplugin/tests/conformance.lua"
+PROBE="$PWD/justdraw.koplugin/tests/conformance.lua"
 (cd "$KOREADER_RUNTIME" && ./luajit "$PROBE")
 ```
 
@@ -829,15 +829,15 @@ Para una sesión visual aislada:
 KOREADER_SCREEN_WIDTH=1860 \
 KOREADER_SCREEN_HEIGHT=2480 \
 KOREADER_SCREEN_DPI=300 \
-KOREADER_PLUGIN_DIR="$PWD/fingerink.koplugin" \
+KOREADER_PLUGIN_DIR="$PWD/justdraw.koplugin" \
 "$KOREADER_QA" launch hidpi
 ```
 
 Abrir un PDF desde FileManager y exigir en el log:
 
 ```text
-Plugin loaded fingerink
-RD loaded plugin fingerink at plugins/fingerink.koplugin
+Plugin loaded justdraw
+RD loaded plugin justdraw at plugins/justdraw.koplugin
 ```
 
 Notas:
@@ -850,7 +850,7 @@ Notas:
 
 ## 11. Secuencia de commits sugerida
 
-1. `test: add executable FingerInk input regression harness`
+1. `test: add executable JustDraw input regression harness`
 2. `feat: add owned stylus capture backend with touch suppression`
 3. `feat: guard input handlers and disarm capture on error`
 4. `feat: add Scribe input modes and physical eraser handling`
@@ -906,7 +906,7 @@ En esos casos, conservar logs de transición (`tool`, `id`, slot, backend y vers
 
 La funcionalidad está terminada sólo cuando:
 
-- `fingerink.koplugin/tests/run.lua` existe, **se observa ejecutándose** bajo `koreader_qa.sh test` (no `SKIP`) y todas sus comprobaciones pasan con el LuaJIT de KOReader;
+- `justdraw.koplugin/tests/run.lua` existe, **se observa ejecutándose** bajo `koreader_qa.sh test` (no `SKIP`) y todas sus comprobaciones pasan con el LuaJIT de KOReader;
 - el shim `test.lua` de la raíz ejecuta la misma suite;
 - los Lua pasan la validación de sintaxis;
 - ReaderUI carga el plugin en una sesión aislada sin traceback;
@@ -1073,7 +1073,7 @@ What was verified: run_tests() solo ejecuta $PLUGIN_DIR/tests/run.lua (L153-157)
   sintaxis recorre find "$PLUGIN_DIR" -name '*.lua' (L150); entorno KO_HOME aislado por ejecucion;
   la skill prohibe explicitamente reclamar cobertura de dispositivo real.
 Version / availability constraints: Runtime local v2025.08-100-g1d66e440b, anterior al callback.
-Impact on the plan: Runner movido a fingerink.koplugin/tests/run.lua con shim en la raiz; §10 y
+Impact on the plan: Runner movido a justdraw.koplugin/tests/run.lua con shim en la raiz; §10 y
   §14 exigen observar que la suite corrio.
 Confidence: High. CORRIGE el plan original.
 ```

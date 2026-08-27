@@ -1,4 +1,4 @@
-# Finger Ink
+# JustDraw
 
 https://github.com/user-attachments/assets/66a1f825-9707-4755-bf09-310789dac2b5
 
@@ -37,14 +37,42 @@ and treat it as experimental.
 
 ## Install
 
-Copy `fingerink.koplugin` into KOReader's `plugins` directory. Over SSH:
+Copy `justdraw.koplugin` into KOReader's `plugins` directory. Over SSH:
 
 ```sh
-scp -r fingerink.koplugin root@<kindle>:/mnt/us/koreader/plugins/
+scp -r justdraw.koplugin root@<kindle>:/mnt/us/koreader/plugins/
 ```
 
-You should end up with `koreader/plugins/fingerink.koplugin/main.lua` — not a
-doubled `fingerink.koplugin/fingerink.koplugin/`. Restart KOReader.
+You should end up with `koreader/plugins/justdraw.koplugin/main.lua` — not a
+doubled `justdraw.koplugin/justdraw.koplugin/`. Restart KOReader.
+
+### Upgrading from FingerInk
+
+Stop KOReader and **rename or replace** the former `fingerink.koplugin`
+directory; do not leave the old and new plugin directories installed together.
+For example, on the device:
+
+```sh
+mv /mnt/us/koreader/plugins/fingerink.koplugin \
+   /mnt/us/koreader/plugins/justdraw.koplugin
+```
+
+Then copy the new JustDraw files into that directory and restart KOReader.
+Preferences are read from their former identifiers once and copied forward.
+Potentially large direct page ink is not duplicated: an upgraded document that
+only has `fingerink_strokes` keeps using that key in place, while a new document
+uses `justdraw_strokes`. A rollback to FingerInk therefore sees and edits the
+same history for upgraded documents. If both keys already exist, JustDraw uses
+the current key and leaves the legacy history untouched; it never merges them.
+
+Existing canvas and notebook databases are opened in place under their legacy
+filenames; new installations create the new filenames. This avoids moving an
+SQLite database separately from a pending `-wal` or `-shm` file. If both the
+JustDraw and FingerInk filenames exist for the same feature, JustDraw refuses to
+open either. With KOReader closed, move one complete database set to another
+directory: the `.sqlite3` file together with any matching `.sqlite3-wal` and
+`.sqlite3-shm` files. JustDraw never guesses which note history to keep and
+never merges databases automatically.
 
 ## Using it
 
@@ -60,7 +88,7 @@ tappable, including while drawing is on — that is the whole point of it.
 
 ### Input modes
 
-Top menu → More tools → Finger Ink → **Input mode**. Not changeable while
+Top menu → More tools → JustDraw → **Input mode**. Not changeable while
 drawing; press Stop first.
 
 - **Automatic** (default) — the stylus route on devices that report a pen
@@ -98,7 +126,7 @@ Ink is saved into the book's sidecar, per page, when KOReader flushes settings.
 
 ## Drawing sheets (EPUB and other reflowable books)
 
-Top menu → More tools → Finger Ink → **Drawing sheet** → *Open sheet here*.
+Top menu → More tools → JustDraw → **Drawing sheet** → *Open sheet here*.
 
 A blank sheet slides up from the bottom and is anchored to wherever you are in
 the book. **Tap the strip along its top edge** to cycle through 40%, 70% and
@@ -131,13 +159,21 @@ can open or remove them.
 
 ### Where sheets are stored
 
-In `settings/fingerink.sqlite3`, one database beside KOReader's own, not in the
+In `settings/justdraw.sqlite3`, one database beside KOReader's own, not in the
 book's `.sdr` folder. Two consequences worth knowing:
 
 - **Back up that file**, not only the `.sdr` folders. With WAL active, back it
   up with KOReader closed, or include the `-wal` and `-shm` files.
 - Copying a book to another device does **not** take its sheets along. Sync and
   export are not implemented.
+
+An installation upgraded from FingerInk may continue to use
+`settings/fingerink.sqlite3`. JustDraw selects that existing database only
+when `settings/justdraw.sqlite3` does not exist, so no notes are copied,
+merged or silently discarded during the rename. If both files exist, drawing
+sheets stay unavailable until KOReader is closed and one complete database set
+— main file plus matching `-wal` and `-shm` companions — is moved together to
+another directory.
 
 A book is identified by its checksum and size, so renaming or moving it keeps
 its sheets. If KOReader has not computed a checksum yet, sheets are unavailable
@@ -160,7 +196,7 @@ Books with many sheets also build and persist their page index in small
 per-tick batches. No final O(number of sheets) SQLite burst runs on the UI
 thread; only the last small batch prunes stale layout caches.
 
-If the database was created by a newer FingerInk schema, this version reopens
+If the database was created by a newer JustDraw schema, this version reopens
 it read-only. Existing sheets can still be viewed and hidden, but create,
 delete, pen, eraser and undo stay disabled; no journal setting or note row is
 written by that compatibility path.
@@ -169,11 +205,17 @@ written by that compatibility path.
 
 The notebook domain is implemented separately from books and drawing sheets:
 notebooks, pages, current-page state and chunked ink live in
-`settings/fingerink-notebooks.sqlite3`. It does not use book checksums,
+`settings/justdraw-notebooks.sqlite3`. It does not use book checksums,
 xpointers, document sidecars or the EPUB canvas database.
 
+An upgraded installation may instead keep using the existing
+`settings/fingerink-notebooks.sqlite3` for the same in-place safety rule. If
+both notebook filenames exist, the library names the conflict and remains
+closed until KOReader is stopped and one complete database set, including any
+matching `-wal` and `-shm` companions, is moved together to another directory.
+
 Open **Notebooks** from FileManager's **More tools** menu or from
-**More tools → Finger Ink** while reading. The full-screen library creates,
+**More tools → JustDraw** while reading. The full-screen library creates,
 opens, renames and deletes notebooks without requiring a document. Opening a
 row keeps the library underneath a full-screen editor, so leaving the notebook
 returns to the same library instead of rebuilding the whole navigation stack.
@@ -247,7 +289,7 @@ out of scope for this backend phase.
 
 FileManager → More tools → Notebooks: open the standalone notebook library.
 
-Reader top menu → More tools → Finger Ink: notebooks, start drawing, show/hide
+Reader top menu → More tools → JustDraw: notebooks, start drawing, show/hide
 the toolbar, put it on the left instead, input mode, pen width, refresh quality,
 stylus diagnostics, clear page, clear document.
 
@@ -343,7 +385,7 @@ since two-finger gestures keep working while drawing.
 
 ```sh
 luajit test.lua                       # from the repository root
-luajit tests/run.lua                  # from inside fingerink.koplugin/
+luajit tests/run.lua                  # from inside justdraw.koplugin/
 lua test.lua                          # any Lua 5.1+, no LuaJIT needed
 ```
 
@@ -356,7 +398,7 @@ against the real thing — run it from inside a KOReader build directory:
 
 ```sh
 cd /path/to/koreader-emulator-*/koreader
-./luajit /path/to/fingerink.koplugin/tests/conformance.lua
+./luajit /path/to/justdraw.koplugin/tests/conformance.lua
 ```
 
 It prints one line per assumption: `OK`, `MISMATCH`, or `UNCHECKABLE` when the
@@ -405,7 +447,7 @@ a migration before backup. Pass a book to that script and it also checks the
 xpointer API against a real rendered document:
 
 ```sh
-./luajit /path/to/fingerink.koplugin/tests/conformance.lua /path/to/book.epub
+./luajit /path/to/justdraw.koplugin/tests/conformance.lua /path/to/book.epub
 ```
 
 ## Docs

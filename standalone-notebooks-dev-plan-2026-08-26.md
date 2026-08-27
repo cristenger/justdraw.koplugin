@@ -18,7 +18,7 @@ Plugin host (main.lua)
 │   ├── tinta directa en PDF, sin cambios funcionales
 │   └── BookCanvasSession, anclada a libro/xpointer
 ├── NotebookController, sin dependencias de libro
-│   ├── NotebookRepository, fingerink-notebooks.sqlite3
+│   ├── NotebookRepository, justdraw-notebooks.sqlite3
 │   └── NotebookSession
 │       └── InkSurfaceSession
 │           ├── InkCanvasCache
@@ -35,7 +35,7 @@ Esta entrega no diseña ni implementa la biblioteca visual ni la ventana final d
 
 ### Objetivo
 
-Permitir crear cuadernos que no dependan de un libro, con páginas ordenadas, tinta persistente y navegación estable en un Kindle Scribe o dispositivo similar, reutilizando la ruta de lápiz ya validada por FingerInk.
+Permitir crear cuadernos que no dependan de un libro, con páginas ordenadas, tinta persistente y navegación estable en un Kindle Scribe o dispositivo similar, reutilizando la ruta de lápiz ya validada por JustDraw.
 
 ### Restricciones conocidas
 
@@ -75,17 +75,17 @@ No se encontraron `AGENTS.md`, `CLAUDE.md` ni reglas anidadas aplicables. La gu�
 
 | Archivo | Responsabilidad actual | Decisión |
 |---|---|---|
-| `fingerink.koplugin/main.lua` | Instancia KOReader, ReaderUI, entrada, barra, PDF y puente al canvas EPUB | Añadir una separación segura de host y delegar cuadernos; no reescribir la ruta lectora completa en este cambio |
-| `fingerink.koplugin/ink_canvas_session.lua` | Mezcla dominio de libro, overlay y sesión de superficie | Extraer la parte genérica a `ink_surface_session.lua`; conservar aquí libro, xpointer, índice y overlay |
-| `fingerink.koplugin/ink_canvas_cache.lua` | Un raster activo, carga incremental, grid y reparación | Reutilizar; aceptar una `surface` genérica manteniendo compatibilidad temporal con `canvas` |
-| `fingerink.koplugin/ink_canvas_queue.lua` | Cola durable, batching, rollback y bloqueo tras error | Reutilizar sin duplicar; generalizar sólo el nombre del objeto de superficie si hace falta |
-| `fingerink.koplugin/ink_canvas_codec.lua` | Codec versionado y chunked de puntos | Reutilizar sin modificar el formato |
-| `fingerink.koplugin/ink_spatial_grid.lua` | Índice espacial de una superficie activa | Reutilizar sin cambios funcionales |
-| `fingerink.koplugin/ink_canvas_transform.lua` | Escala de canvas y recorte de hoja EPUB | Generalizar con rectángulos separados de ajuste y recorte |
-| `fingerink.koplugin/ink_capture.lua` | Hook global de stylus/dedo y desarme diferido | Mantener como capa de bajo nivel; envolver con un propietario explícito |
-| `fingerink.koplugin/ink_contact_router.lua` | Enrutado específico barra/asa/hoja/lector | No reutilizar como router de cuaderno; sus destinos son propios de EPUB |
-| `fingerink.koplugin/ink_canvas_repository.lua` | Base de libros, canvases, trazos y layout | No cambiar su esquema; copiar sus patrones probados en un repositorio separado |
-| `fingerink.koplugin/ink_canvas_overlay.lua` | Hoja EPUB superpuesta con alturas 40/70/100 | No reutilizar para cuadernos |
+| `justdraw.koplugin/main.lua` | Instancia KOReader, ReaderUI, entrada, barra, PDF y puente al canvas EPUB | Añadir una separación segura de host y delegar cuadernos; no reescribir la ruta lectora completa en este cambio |
+| `justdraw.koplugin/ink_canvas_session.lua` | Mezcla dominio de libro, overlay y sesión de superficie | Extraer la parte genérica a `ink_surface_session.lua`; conservar aquí libro, xpointer, índice y overlay |
+| `justdraw.koplugin/ink_canvas_cache.lua` | Un raster activo, carga incremental, grid y reparación | Reutilizar; aceptar una `surface` genérica manteniendo compatibilidad temporal con `canvas` |
+| `justdraw.koplugin/ink_canvas_queue.lua` | Cola durable, batching, rollback y bloqueo tras error | Reutilizar sin duplicar; generalizar sólo el nombre del objeto de superficie si hace falta |
+| `justdraw.koplugin/ink_canvas_codec.lua` | Codec versionado y chunked de puntos | Reutilizar sin modificar el formato |
+| `justdraw.koplugin/ink_spatial_grid.lua` | Índice espacial de una superficie activa | Reutilizar sin cambios funcionales |
+| `justdraw.koplugin/ink_canvas_transform.lua` | Escala de canvas y recorte de hoja EPUB | Generalizar con rectángulos separados de ajuste y recorte |
+| `justdraw.koplugin/ink_capture.lua` | Hook global de stylus/dedo y desarme diferido | Mantener como capa de bajo nivel; envolver con un propietario explícito |
+| `justdraw.koplugin/ink_contact_router.lua` | Enrutado específico barra/asa/hoja/lector | No reutilizar como router de cuaderno; sus destinos son propios de EPUB |
+| `justdraw.koplugin/ink_canvas_repository.lua` | Base de libros, canvases, trazos y layout | No cambiar su esquema; copiar sus patrones probados en un repositorio separado |
+| `justdraw.koplugin/ink_canvas_overlay.lua` | Hoja EPUB superpuesta con alturas 40/70/100 | No reutilizar para cuadernos |
 
 ### Patrones que deben preservarse
 
@@ -103,11 +103,11 @@ No se encontraron `AGENTS.md`, `CLAUDE.md` ni reglas anidadas aplicables. La gu�
 
 ### Archivos que no deben tocarse en esta entrega
 
-- `fingerink.koplugin/ink_anchor.lua`
-- `fingerink.koplugin/ink_anchor_index.lua`
-- `fingerink.koplugin/ink_canvas_overlay.lua`, salvo que una prueba revele una regresión causada por el nuevo transform
-- `fingerink.koplugin/ink_contact_router.lua`
-- `fingerink.koplugin/ink_store.lua`, que pertenece a la tinta directa en PDF
+- `justdraw.koplugin/ink_anchor.lua`
+- `justdraw.koplugin/ink_anchor_index.lua`
+- `justdraw.koplugin/ink_canvas_overlay.lua`, salvo que una prueba revele una regresión causada por el nuevo transform
+- `justdraw.koplugin/ink_contact_router.lua`
+- `justdraw.koplugin/ink_store.lua`, que pertenece a la tinta directa en PDF
 - el esquema v1 de `ink_canvas_repository.lua`
 - planes históricos ya cerrados
 
@@ -148,7 +148,7 @@ La base de cuadernos no usará `ON DELETE CASCADE` en las relaciones grandes. Un
 
 ### 5.1 `InkSurfaceSession`
 
-Nuevo archivo: `fingerink.koplugin/ink_surface_session.lua`.
+Nuevo archivo: `justdraw.koplugin/ink_surface_session.lua`.
 
 Responsabilidad: mantener una sola superficie activa, su cache, su cola y las operaciones de tinta. No conoce libros, xpointers, FileManager, ReaderUI, overlays ni navegación entre páginas.
 
@@ -218,7 +218,7 @@ El nombre interno `canvas` puede mantenerse como alias durante la extracción, p
 
 ### 5.3 `InkInputController`
 
-Nuevo archivo: `fingerink.koplugin/ink_input_controller.lua`.
+Nuevo archivo: `justdraw.koplugin/ink_input_controller.lua`.
 
 Será un módulo singleton, igual que `ink_capture.lua`, porque `require` comparte el módulo aunque KOReader destruya FileManager y cree una nueva instancia en ReaderUI. `ink_capture.lua` sigue siendo el hook de bajo nivel.
 
@@ -300,9 +300,9 @@ La rotación debe soltar captura, abortar el contacto incompleto, guardar, recon
 
 ### 5.5 `NotebookRepository`
 
-Nuevo archivo: `fingerink.koplugin/ink_notebook_repository.lua`.
+Nuevo archivo: `justdraw.koplugin/ink_notebook_repository.lua`.
 
-Ruta: `DataStorage:getSettingsDir() .. "/fingerink-notebooks.sqlite3"`.
+Ruta: `DataStorage:getSettingsDir() .. "/justdraw-notebooks.sqlite3"`.
 
 Debe repetir los patrones de seguridad de `ink_canvas_repository.lua`, pero no compartir su esquema ni importar datos. No extraer todavía un helper SQLite común: modificar dos repositorios maduros a la vez aumenta el riesgo y no aporta comportamiento al usuario.
 
@@ -437,7 +437,7 @@ Cada lote es su propia transacción. El controlador agenda el siguiente con `UIM
 
 ### 5.6 `NotebookSession`
 
-Nuevo archivo: `fingerink.koplugin/ink_notebook_session.lua`.
+Nuevo archivo: `justdraw.koplugin/ink_notebook_session.lua`.
 
 Responsabilidad: un cuaderno abierto, una sola página activa y su `InkSurfaceSession`. No conoce widgets.
 
@@ -478,7 +478,7 @@ Una carga fallida deja la sesión en `load_failed` con metadata suficiente para 
 
 ### 5.7 `NotebookController`
 
-Nuevo archivo: `fingerink.koplugin/ink_notebook_controller.lua`.
+Nuevo archivo: `justdraw.koplugin/ink_notebook_controller.lua`.
 
 Responsabilidad: lifecycle de repositorio/sesión, operaciones de biblioteca y contrato con la UI posterior.
 
@@ -571,9 +571,9 @@ Cada fase debe terminar con suite verde. No avanzar acumulando una regresión pa
 
 Archivos:
 
-- `fingerink.koplugin/tests/support.lua`
-- `fingerink.koplugin/tests/run.lua`
-- nuevo `fingerink.koplugin/tests/notebook_host_spec.lua`
+- `justdraw.koplugin/tests/support.lua`
+- `justdraw.koplugin/tests/run.lua`
+- nuevo `justdraw.koplugin/tests/notebook_host_spec.lua`
 
 Tareas:
 
@@ -592,9 +592,9 @@ Aceptación:
 
 Archivos:
 
-- `fingerink.koplugin/main.lua`
-- `fingerink.koplugin/tests/main_canvas_spec.lua`
-- `fingerink.koplugin/tests/notebook_host_spec.lua`
+- `justdraw.koplugin/main.lua`
+- `justdraw.koplugin/tests/main_canvas_spec.lua`
+- `justdraw.koplugin/tests/notebook_host_spec.lua`
 
 Tareas:
 
@@ -615,12 +615,12 @@ Aceptación:
 
 Archivos:
 
-- nuevo `fingerink.koplugin/ink_surface_session.lua`
-- `fingerink.koplugin/ink_canvas_session.lua`
-- `fingerink.koplugin/ink_canvas_cache.lua`
-- `fingerink.koplugin/ink_canvas_queue.lua`
-- nuevo `fingerink.koplugin/tests/surface_session_spec.lua`
-- actualizar `fingerink.koplugin/tests/canvas_session_spec.lua`
+- nuevo `justdraw.koplugin/ink_surface_session.lua`
+- `justdraw.koplugin/ink_canvas_session.lua`
+- `justdraw.koplugin/ink_canvas_cache.lua`
+- `justdraw.koplugin/ink_canvas_queue.lua`
+- nuevo `justdraw.koplugin/tests/surface_session_spec.lua`
+- actualizar `justdraw.koplugin/tests/canvas_session_spec.lua`
 
 Tareas:
 
@@ -640,11 +640,11 @@ Aceptación:
 
 Archivos:
 
-- nuevo `fingerink.koplugin/ink_input_controller.lua`
-- `fingerink.koplugin/main.lua`
-- mantener `fingerink.koplugin/ink_capture.lua` salvo ajustes mínimos necesarios
-- nuevo `fingerink.koplugin/tests/input_controller_spec.lua`
-- actualizar `fingerink.koplugin/tests/capture_filter_spec.lua`
+- nuevo `justdraw.koplugin/ink_input_controller.lua`
+- `justdraw.koplugin/main.lua`
+- mantener `justdraw.koplugin/ink_capture.lua` salvo ajustes mínimos necesarios
+- nuevo `justdraw.koplugin/tests/input_controller_spec.lua`
+- actualizar `justdraw.koplugin/tests/capture_filter_spec.lua`
 
 Tareas:
 
@@ -664,11 +664,11 @@ Aceptación:
 
 Archivos:
 
-- `fingerink.koplugin/ink_canvas_transform.lua`
-- `fingerink.koplugin/ink_canvas_overlay.lua` sólo para adaptar parámetros si es necesario
-- `fingerink.koplugin/tests/canvas_geometry_spec.lua`
-- `fingerink.koplugin/tests/canvas_overlay_spec.lua`
-- nuevo `fingerink.koplugin/tests/notebook_geometry_spec.lua`
+- `justdraw.koplugin/ink_canvas_transform.lua`
+- `justdraw.koplugin/ink_canvas_overlay.lua` sólo para adaptar parámetros si es necesario
+- `justdraw.koplugin/tests/canvas_geometry_spec.lua`
+- `justdraw.koplugin/tests/canvas_overlay_spec.lua`
+- nuevo `justdraw.koplugin/tests/notebook_geometry_spec.lua`
 
 Tareas:
 
@@ -688,9 +688,9 @@ Aceptación:
 
 Archivos:
 
-- nuevo `fingerink.koplugin/ink_notebook_repository.lua`
-- nuevo `fingerink.koplugin/tests/notebook_repository_spec.lua`
-- `fingerink.koplugin/tests/conformance.lua`
+- nuevo `justdraw.koplugin/ink_notebook_repository.lua`
+- nuevo `justdraw.koplugin/tests/notebook_repository_spec.lua`
+- `justdraw.koplugin/tests/conformance.lua`
 
 Tareas:
 
@@ -728,11 +728,11 @@ Aceptación:
 
 Archivos:
 
-- nuevo `fingerink.koplugin/ink_notebook_session.lua`
-- nuevo `fingerink.koplugin/ink_notebook_controller.lua`
-- nuevo `fingerink.koplugin/tests/notebook_session_spec.lua`
-- nuevo `fingerink.koplugin/tests/notebook_controller_spec.lua`
-- `fingerink.koplugin/tests/notebook_scale_spec.lua`
+- nuevo `justdraw.koplugin/ink_notebook_session.lua`
+- nuevo `justdraw.koplugin/ink_notebook_controller.lua`
+- nuevo `justdraw.koplugin/tests/notebook_session_spec.lua`
+- nuevo `justdraw.koplugin/tests/notebook_controller_spec.lua`
+- `justdraw.koplugin/tests/notebook_scale_spec.lua`
 
 Tareas:
 
@@ -781,8 +781,8 @@ Aceptación:
 
 Archivos:
 
-- `fingerink.koplugin/main.lua`
-- `fingerink.koplugin/tests/notebook_host_spec.lua`
+- `justdraw.koplugin/main.lua`
+- `justdraw.koplugin/tests/notebook_host_spec.lua`
 - `README.md`
 - `decisions.md`
 
@@ -854,9 +854,9 @@ Desde la raíz del repositorio:
 git diff --check
 luajit test.lua
 lua test.lua
-KOREADER_PLUGIN_DIR=/Users/christianstenger/GitHub/fingerink.koplugin/fingerink.koplugin \
+KOREADER_PLUGIN_DIR=/Users/christianstenger/GitHub/justdraw/justdraw.koplugin \
   /Users/christianstenger/.codex/skills/koreader-simulator-qa/scripts/koreader_qa.sh preflight
-KOREADER_PLUGIN_DIR=/Users/christianstenger/GitHub/fingerink.koplugin/fingerink.koplugin \
+KOREADER_PLUGIN_DIR=/Users/christianstenger/GitHub/justdraw/justdraw.koplugin \
   /Users/christianstenger/.codex/skills/koreader-simulator-qa/scripts/koreader_qa.sh test
 ```
 
@@ -864,15 +864,15 @@ Conformance SQLite/KOReader desde el runtime:
 
 ```sh
 cd /Users/christianstenger/koreader/koreader/koreader-emulator-arm64-apple-darwin25.1.0-debug/koreader
-./luajit /Users/christianstenger/GitHub/fingerink.koplugin/fingerink.koplugin/tests/conformance.lua
-./luajit /Users/christianstenger/GitHub/fingerink.koplugin/fingerink.koplugin/tests/conformance.lua \
+./luajit /Users/christianstenger/GitHub/justdraw/justdraw.koplugin/tests/conformance.lua
+./luajit /Users/christianstenger/GitHub/justdraw/justdraw.koplugin/tests/conformance.lua \
   /Users/christianstenger/koreader/koreader/test/juliet.epub
 ```
 
 Smoke con geometría Scribe aproximada:
 
 ```sh
-KOREADER_PLUGIN_DIR=/Users/christianstenger/GitHub/fingerink.koplugin/fingerink.koplugin \
+KOREADER_PLUGIN_DIR=/Users/christianstenger/GitHub/justdraw/justdraw.koplugin \
 KOREADER_SCREEN_WIDTH=1860 KOREADER_SCREEN_HEIGHT=2480 KOREADER_SCREEN_DPI=300 \
   /Users/christianstenger/.codex/skills/koreader-simulator-qa/scripts/koreader_qa.sh smoke kindle-paperwhite
 ```
@@ -1041,7 +1041,7 @@ Detener la implementación y volver a diseño si ocurre cualquiera de estos caso
 | Cuadernos sin libro | Dominio `NotebookRepository`/`NotebookSession`, sin book/xpointer |
 | Disponible eventualmente desde FileManager y ReaderUI | Costura de host y activación diferida a la UI posterior |
 | Reutilizar tinta probada | `InkSurfaceSession` sobre Cache/Queue/Codec/Grid |
-| Base separada | `fingerink-notebooks.sqlite3`, schema/migraciones independientes |
+| Base separada | `justdraw-notebooks.sqlite3`, schema/migraciones independientes |
 | Una captura de stylus | `InkInputController` con lease única |
 | Geometría persistente | logical dimensions + fit/clip transform |
 | Muchos cuadernos/páginas | metadata-only, keyset, índices, un raster |

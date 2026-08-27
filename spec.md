@@ -1,9 +1,9 @@
-# spec.md — Finger Ink (source of truth)
+# spec.md — JustDraw (source of truth)
 
 ## Layout
 
 ```
-fingerink.koplugin/
+justdraw.koplugin/
   _meta.lua        plugin manifest
   main.lua         plugin object: state machine, menu, persistence, paintTo
   ink_bar.lua      the toolbar: a window of its own, or the overlay's child
@@ -41,7 +41,7 @@ and the capture layer:
 | Documents | any | reflowable only (EPUB and friends) |
 | Anchored to | page number | an xpointer |
 | Survives reflow | no | yes -- reflow moves the sheet, not the ink |
-| Stored in | the sidecar, `fingerink_strokes` | `fingerink.sqlite3` |
+| Stored in | the sidecar, `justdraw_strokes` | `justdraw.sqlite3` |
 | Coordinates | screen pixels | canvas units, 0..logical_w/h |
 | While drawing | all touch swallowed | only touch on the sheet |
 
@@ -49,9 +49,24 @@ Nothing about direct ink changed. Every canvas path is behind `canvas_open`,
 and with no sheet open the plugin behaves exactly as it did before the canvas
 existed.
 
+The FingerInk product rename is migration-safe. A missing `justdraw_*`
+setting falls back to its `fingerink_*` predecessor and is copied forward;
+large direct document ink is handled separately. A legacy-only document keeps
+using `fingerink_strokes` in place, a new document uses `justdraw_strokes`, and
+when both exist the current key wins without merging or overwriting the legacy
+history. If an ordinary edit empties the active history, its empty table remains
+as a tombstone so the inactive history cannot reappear; only confirmed Clear
+whole document removes both keys. New databases use `justdraw.sqlite3` and
+`justdraw-notebooks.sqlite3`, while an existing legacy database is opened in
+place if no current-named file exists. If both identities exist, the affected
+feature fails closed with `database_conflict`; it neither selects nor merges a
+history. Resolution moves the selected `.sqlite3`, `-wal`, and `-shm` set
+together while KOReader is closed. The plugin never renames a live SQLite
+database away from its WAL companions.
+
 ## Input capture
 
-Two backends, one installed at a time, chosen by `fingerink_input_mode`
+Two backends, one installed at a time, chosen by `justdraw_input_mode`
 (`auto` | `stylus` | `finger`, default `auto`, persisted in `G_reader_settings`).
 
 | Mode | Resolution |
@@ -370,7 +385,7 @@ stroke = { n = <point count>, w = <pen width px>, x1, y1, x2, y2, ... }
 ```
 
 Flat number array, two slots per point. No per-point table. Serialises
-directly into the document sidecar under `fingerink_strokes`, keyed by page:
+directly into the document sidecar under `justdraw_strokes`, keyed by page:
 
 ```lua
 pages = { [17] = { stroke, stroke }, [23] = { stroke } }
@@ -563,7 +578,7 @@ timers go with it.
 
 ### Persistence
 
-`DataStorage:getSettingsDir() .. "/fingerink.sqlite3"`, one database for every
+`DataStorage:getSettingsDir() .. "/justdraw.sqlite3"`, one database for every
 book, following the pattern Statistics established. Tables: `books`,
 `canvases`, `canvas_layout_cache`, `strokes`, `stroke_chunks`. Version in
 `PRAGMA user_version`, foreign keys on, WAL only where `Device:canUseWAL()`.
@@ -606,7 +621,7 @@ manual compaction of the database.
 
 ## Menu
 
-Top menu → Finger Ink:
+Top menu → JustDraw:
 
 - Start drawing (disabled while already on; **closes the menu**, because an
   open menu is unusable once single-finger taps are being swallowed)
@@ -626,5 +641,7 @@ Top menu → Finger Ink:
 Stop, tool and undo live on the toolbar, not in the menu — reaching them
 through the menu is exactly the thing that does not work while drawing.
 
-Dispatcher actions for Gesture Manager: `fingerink_toggle`, `fingerink_undo`,
-`fingerink_eraser`, `fingerink_bar`.
+Dispatcher actions retain the persisted FingerInk IDs `fingerink_toggle`,
+`fingerink_undo`, `fingerink_eraser`, and `fingerink_bar`. Their visible titles
+and implementation are JustDraw. Keeping these opaque IDs avoids invalidating
+existing Gesture Manager assignments or exposing duplicate legacy actions.

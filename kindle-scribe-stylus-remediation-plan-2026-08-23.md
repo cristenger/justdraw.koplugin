@@ -1,4 +1,4 @@
-# Plan de remediación: backend de stylus de FingerInk
+# Plan de remediación: backend de stylus de JustDraw
 
 > **Para ejecutores automáticos:** SUB-SKILL OBLIGATORIA: usar
 > `superpowers:subagent-driven-development` (recomendado) o
@@ -86,7 +86,7 @@ Heredadas del plan predecesor; se aplican a **todas** las tareas.
 
 - KOReader mínimo documentado para stylus: **v2026.07**. Ruta de dedo: v2026.03.
 - **No modificar ningún archivo del core de KOReader.**
-- **No cambiar el formato persistido** `fingerink_strokes`.
+- **No cambiar el formato persistido** `justdraw_strokes`.
 - No tocar: `ink_render.lua`, `ink_store.lua`, `demo.mp4`, el checkout
   `/Users/christianstenger/koreader/koreader` ni sus plugins instalados, ni la
   rama `upstream/claude/pdf-ink-annotations`.
@@ -189,12 +189,12 @@ la Etapa 2 lo convierte en requisito de seguridad, no de UX. Ver T7.
 
 | Archivo | Estado | Responsabilidad tras el cambio |
 | --- | --- | --- |
-| `fingerink.koplugin/main.lua` | Modificar | Etapa 1: latch por slot, reset de bandera, recuperación del punto perdido, diagnóstico. Etapa 2: `onStylusTouchFrame` se reduce a contabilidad de contactos |
-| `fingerink.koplugin/ink_bar.lua` | Modificar (**sólo Etapa 2**) | Pasa a ser el filtro de gestos: decide qué llega a la aplicación mientras se dibuja |
-| `fingerink.koplugin/ink_capture.lua` | Modificar (**sólo Etapa 2**) | Pierde `dropSuppressedContacts` y `drop_suppressed` |
-| `fingerink.koplugin/tests/support.lua` | Modificar | Orden de propagación correcto, shim `unpack`, `_window_stack` real, `sendEvent` fiel, `Button` que registra recepción |
-| `fingerink.koplugin/tests/run.lua` | Modificar | Tests nuevos por cada R; los de `touch_geom_latched` pasan a nivel de comportamiento |
-| `fingerink.koplugin/tests/conformance.lua` | **Crear** | Sonda que contrasta las suposiciones del arnés contra el `Device` real del runtime que haya |
+| `justdraw.koplugin/main.lua` | Modificar | Etapa 1: latch por slot, reset de bandera, recuperación del punto perdido, diagnóstico. Etapa 2: `onStylusTouchFrame` se reduce a contabilidad de contactos |
+| `justdraw.koplugin/ink_bar.lua` | Modificar (**sólo Etapa 2**) | Pasa a ser el filtro de gestos: decide qué llega a la aplicación mientras se dibuja |
+| `justdraw.koplugin/ink_capture.lua` | Modificar (**sólo Etapa 2**) | Pierde `dropSuppressedContacts` y `drop_suppressed` |
+| `justdraw.koplugin/tests/support.lua` | Modificar | Orden de propagación correcto, shim `unpack`, `_window_stack` real, `sendEvent` fiel, `Button` que registra recepción |
+| `justdraw.koplugin/tests/run.lua` | Modificar | Tests nuevos por cada R; los de `touch_geom_latched` pasan a nivel de comportamiento |
+| `justdraw.koplugin/tests/conformance.lua` | **Crear** | Sonda que contrasta las suposiciones del arnés contra el `Device` real del runtime que haya |
 | `.github/workflows/tests.yml` | **Crear** | CI: LuaJIT, suite + barrido de sintaxis |
 | `README.md` | Modificar | Retirar los límites que dejen de ser ciertos; añadir el modo diagnóstico |
 | `spec.md` | Modificar | Documentar la capa de supresión que quede |
@@ -229,11 +229,11 @@ Etapa 1 más T9 deja el plugin en un estado defendible y R3 documentado.
 ### Tarea T1: El latch geométrico pasa a ser por slot (R1)
 
 **Archivos:**
-- Modificar: `fingerink.koplugin/main.lua` (`resetContacts`, `onStylusTouchFrame`)
-- Test: `fingerink.koplugin/tests/run.lua`
+- Modificar: `justdraw.koplugin/main.lua` (`resetContacts`, `onStylusTouchFrame`)
+- Test: `justdraw.koplugin/tests/run.lua`
 
 **Interfaces:**
-- Consume: `self.contacts`, `self.n_contacts`, `self.passthrough`, `FingerInk:inBar`
+- Consume: `self.contacts`, `self.n_contacts`, `self.passthrough`, `JustDraw:inBar`
 - Produce: `self.contacts[slot]` deja de ser `true` en la ruta stylus y pasa a
   ser una de tres cadenas: `"new"` (contacto visto, aún sin coordenadas),
   `"bar"` (sus primeras coordenadas cayeron en la barra), `"page"` (fuera). La
@@ -269,7 +269,7 @@ end)
 - [ ] **Paso 2: ejecutarlo y verlo fallar**
 
 ```sh
-cd /Users/christianstenger/GitHub/fingerink.koplugin/fingerink.koplugin
+cd /Users/christianstenger/GitHub/justdraw/justdraw.koplugin
 ~/.claude/skills/koreader-simulator-qa/scripts/koreader_qa.sh test
 ```
 
@@ -336,7 +336,7 @@ Esperado: PASS, sin `SKIP`.
 - [ ] **Paso 6: commit**
 
 ```bash
-git add fingerink.koplugin/main.lua fingerink.koplugin/tests/run.lua
+git add justdraw.koplugin/main.lua justdraw.koplugin/tests/run.lua
 git commit -m "fix: latch the toolbar decision per contact, not per frame
 
 A palm resting off the toolbar answered for every later contact in the
@@ -349,11 +349,11 @@ way out of stylus drawing mode, which made this a lock-out."
 ### Tarea T2: La bandera por frame se limpia con el resto del estado (R4)
 
 **Archivos:**
-- Modificar: `fingerink.koplugin/main.lua` (`resetStylusState`)
-- Test: `fingerink.koplugin/tests/run.lua`
+- Modificar: `justdraw.koplugin/main.lua` (`resetStylusState`)
+- Test: `justdraw.koplugin/tests/run.lua`
 
 **Interfaces:**
-- Consume: `FingerInk:resetStylusState`, `Capture:fail`
+- Consume: `JustDraw:resetStylusState`, `Capture:fail`
 - Produce: nada nuevo. `resetStylusState` pasa a limpiar `stylus_frame_ui`.
 
 Orden que hay que respetar: en la rama de lift, `onStylusEvent` llama a
@@ -415,7 +415,7 @@ Esperado: PASS.
 - [ ] **Paso 5: commit**
 
 ```bash
-git add fingerink.koplugin/main.lua fingerink.koplugin/tests/run.lua
+git add justdraw.koplugin/main.lua justdraw.koplugin/tests/run.lua
 git commit -m "fix: clear the pen's per-frame flag when stylus state resets"
 ```
 
@@ -424,11 +424,11 @@ git commit -m "fix: clear the pen's per-frame flag when stylus state resets"
 ### Tarea T3: Recuperar el punto que la heurística de coordenadas rancias descarta (R5)
 
 **Archivos:**
-- Modificar: `fingerink.koplugin/main.lua` (`resetStylusState`, `onStylusEvent`, `onStylusPoint`)
-- Test: `fingerink.koplugin/tests/run.lua`
+- Modificar: `justdraw.koplugin/main.lua` (`resetStylusState`, `onStylusEvent`, `onStylusPoint`)
+- Test: `justdraw.koplugin/tests/run.lua`
 
 **Interfaces:**
-- Consume: `Capture.toScreen`, `FingerInk:onStylusPoint`, `FingerInk:endStroke`
+- Consume: `Capture.toScreen`, `JustDraw:onStylusPoint`, `JustDraw:endStroke`
 - Produce: dos campos nuevos de estado por secuencia:
   `self.stylus_inked` (booleano, true en cuanto la secuencia aplica un punto) y
   `self.stylus_tool` (la última herramienta *real* vista, es decir distinta de
@@ -490,7 +490,7 @@ del bloque `if x and y and not self.stylus_stale_xy then`:
 En `onStylusPoint`, marcar que la secuencia entintó:
 
 ```lua
-function FingerInk:onStylusPoint(x, y, tool)
+function JustDraw:onStylusPoint(x, y, tool)
     if self.stylus_suspended then return end
     if self:inBar(x, y) then
         self:endStroke()
@@ -536,7 +536,7 @@ falla. Revertir.
 - [ ] **Paso 6: commit**
 
 ```bash
-git add fingerink.koplugin/main.lua fingerink.koplugin/tests/run.lua
+git add justdraw.koplugin/main.lua justdraw.koplugin/tests/run.lua
 git commit -m "fix: recover the pen point the stale-coordinate guard discards
 
 The guard compares the contact-down frame against the previous lift, so a
@@ -549,8 +549,8 @@ sequence produced nothing, take the position from the lift frame."
 ### Tarea T4: Corregir la fidelidad del arnés de widgets (R9)
 
 **Archivos:**
-- Modificar: `fingerink.koplugin/tests/support.lua`
-- Test: `fingerink.koplugin/tests/run.lua`
+- Modificar: `justdraw.koplugin/tests/support.lua`
+- Test: `justdraw.koplugin/tests/run.lua`
 
 **Interfaces:**
 - Produce: `WidgetContainer:handleEvent` propaga a hijos primero;
@@ -706,7 +706,7 @@ Antes de esta tarea daba `254 passed, 1 failed`.
 - [ ] **Paso 7: commit**
 
 ```bash
-git add fingerink.koplugin/tests/support.lua fingerink.koplugin/tests/run.lua
+git add justdraw.koplugin/tests/support.lua justdraw.koplugin/tests/run.lua
 git commit -m "test: propagate widget events in KOReader's order
 
 The fake called its own handler before its children; the real
@@ -749,7 +749,7 @@ jobs:
         run: |
           set -e
           n=0
-          for f in $(find fingerink.koplugin -name '*.lua'); do
+          for f in $(find justdraw.koplugin -name '*.lua'); do
             luajit -b "$f" /dev/null
             n=$((n + 1))
           done
@@ -772,8 +772,8 @@ jobs:
 - [ ] **Paso 2: verificar el workflow en local**
 
 ```sh
-cd /Users/christianstenger/GitHub/fingerink.koplugin
-for f in $(find fingerink.koplugin -name '*.lua'); do lua -e "assert(loadfile('$f'))"; done
+cd /Users/christianstenger/GitHub/justdraw
+for f in $(find justdraw.koplugin -name '*.lua'); do lua -e "assert(loadfile('$f'))"; done
 lua test.lua | tail -3
 ```
 
@@ -785,7 +785,7 @@ En la sección `## Tests`, sustituir el bloque de comandos por:
 
 ```sh
 luajit test.lua                       # from the repository root
-luajit tests/run.lua                  # from inside fingerink.koplugin/
+luajit tests/run.lua                  # from inside justdraw.koplugin/
 lua test.lua                          # any Lua 5.1+, no LuaJIT needed
 ```
 
@@ -832,8 +832,8 @@ comportamiento real ya medido.
 ### Tarea T6: Spike — probar que la capa de widget ve lo que debe
 
 **Archivos:**
-- Modificar: `fingerink.koplugin/tests/support.lua` (montar la pila completa)
-- Test: `fingerink.koplugin/tests/run.lua` (sección nueva)
+- Modificar: `justdraw.koplugin/tests/support.lua` (montar la pila completa)
+- Test: `justdraw.koplugin/tests/run.lua` (sección nueva)
 
 **Interfaces:**
 - Consume: `UIManager:sendEvent` de T4, `InkBar:handleEvent`, `InkBar:onGesture`
@@ -917,7 +917,7 @@ la PUERTA B.
 - [ ] **Paso 4: commit**
 
 ```bash
-git add fingerink.koplugin/tests/support.lua fingerink.koplugin/tests/run.lua
+git add justdraw.koplugin/tests/support.lua justdraw.koplugin/tests/run.lua
 git commit -m "test: stand up the real window stack and prove the widget layer sees gestures"
 ```
 
@@ -935,13 +935,13 @@ git commit -m "test: stand up the real window stack and prove the widget layer s
 ### Tarea T7: Mover la supresión a `InkBar:onGesture` (R2, R3)
 
 **Archivos:**
-- Modificar: `fingerink.koplugin/ink_bar.lua` (`onGesture`)
-- Modificar: `fingerink.koplugin/main.lua` (`onTouchFrame`, `onStylusTouchFrame`, `stylusFrameResult`)
-- Modificar: `fingerink.koplugin/ink_capture.lua` (borrar `dropSuppressedContacts` y `drop_suppressed`)
-- Test: `fingerink.koplugin/tests/run.lua`
+- Modificar: `justdraw.koplugin/ink_bar.lua` (`onGesture`)
+- Modificar: `justdraw.koplugin/main.lua` (`onTouchFrame`, `onStylusTouchFrame`, `stylusFrameResult`)
+- Modificar: `justdraw.koplugin/ink_capture.lua` (borrar `dropSuppressedContacts` y `drop_suppressed`)
+- Test: `justdraw.koplugin/tests/run.lua`
 
 **Interfaces:**
-- Consume: `FingerInk.drawing`, `FingerInk.input_backend`, `FingerInk.passthrough`,
+- Consume: `JustDraw.drawing`, `JustDraw.input_backend`, `JustDraw.passthrough`,
   `InkBar:contains`
 - Produce: `InkBar:suppresses(ges)` → booleano. Es la única decisión de
   supresión que queda; `onGesture` la consulta.
@@ -1063,7 +1063,7 @@ non-pen contacts are down, and whether any of them started on the toolbar.
 Always returns true. Emptying feedEvent's return array is no longer how anything
 is suppressed.
 ]]
-function FingerInk:onStylusTouchFrame(slots)
+function JustDraw:onStylusTouchFrame(slots)
     if not self.passthrough and self:dialogOnTop() then
         self.passthrough = true
     end
@@ -1106,7 +1106,7 @@ function FingerInk:onStylusTouchFrame(slots)
 end
 ```
 
-Borrar `FingerInk:stylusFrameResult` por completo y sustituir cada
+Borrar `JustDraw:stylusFrameResult` por completo y sustituir cada
 `return self:stylusFrameResult(v)` de `onStylusEvent` por `return v`. Borrar
 `self.stylus_frame_ui` de `init` y de `resetStylusState`.
 
@@ -1155,8 +1155,8 @@ Inyectar las cuatro y confirmar que cada una rompe al menos un test:
 - [ ] **Paso 8: commit**
 
 ```bash
-git add fingerink.koplugin/ink_bar.lua fingerink.koplugin/main.lua \
-        fingerink.koplugin/ink_capture.lua fingerink.koplugin/tests/run.lua
+git add justdraw.koplugin/ink_bar.lua justdraw.koplugin/main.lua \
+        justdraw.koplugin/ink_capture.lua justdraw.koplugin/tests/run.lua
 git commit -m "refactor: suppress input at the widget layer, per gesture
 
 Emptying feedEvent's return array could not see hold or the deferred tap
@@ -1244,8 +1244,8 @@ git commit -m "docs: record the widget-layer suppression decision"
 **Ejecutar sólo si la Etapa 2 se aborta.**
 
 **Archivos:**
-- Modificar: `fingerink.koplugin/ink_capture.lua`
-- Test: `fingerink.koplugin/tests/run.lua`
+- Modificar: `justdraw.koplugin/ink_capture.lua`
+- Test: `justdraw.koplugin/tests/run.lua`
 
 **Interfaces:**
 - Produce: `Capture` gana `mute_timers` (booleano, true en la ruta de dedo) y
@@ -1340,7 +1340,7 @@ poner `self.mute_timers = true` en `installFinger` (la ruta de stylus sigue con
 - [ ] **Paso 5: commit**
 
 ```bash
-git add fingerink.koplugin/ink_capture.lua fingerink.koplugin/tests/run.lua README.md
+git add justdraw.koplugin/ink_capture.lua justdraw.koplugin/tests/run.lua README.md
 git commit -m "fix: neuter suppressed contacts' timers on the finger route"
 ```
 
@@ -1351,7 +1351,7 @@ git commit -m "fix: neuter suppressed contacts' timers on the finger route"
 ### Tarea T10: Sonda de conformidad de runtime (R8)
 
 **Archivos:**
-- Crear: `fingerink.koplugin/tests/conformance.lua`
+- Crear: `justdraw.koplugin/tests/conformance.lua`
 - Modificar: `README.md`, `kindle-scribe-stylus-dev-plan-2026-08-23.md` (§10)
 
 **Interfaces:**
@@ -1426,7 +1426,7 @@ io.write(string.format("\n%d claims, %d mismatches\n", #rows, bad))
 ```sh
 KO=/Users/christianstenger/koreader/koreader/koreader-emulator-arm64-apple-darwin25.1.0-debug/koreader
 cd "$KO" && ./luajit \
-  /Users/christianstenger/GitHub/fingerink.koplugin/fingerink.koplugin/tests/conformance.lua
+  /Users/christianstenger/GitHub/justdraw/justdraw.koplugin/tests/conformance.lua
 ```
 
 Esperado en v2025.08: **0 mismatches**, con `registerStylusCallback` y
@@ -1441,7 +1441,7 @@ advertencia de que `UNCHECKABLE` no es un pase.
 - [ ] **Paso 4: commit**
 
 ```bash
-git add fingerink.koplugin/tests/conformance.lua README.md \
+git add justdraw.koplugin/tests/conformance.lua README.md \
         kindle-scribe-stylus-dev-plan-2026-08-23.md
 git commit -m "test: contrast the harness's assumptions against the live runtime"
 ```
@@ -1451,12 +1451,12 @@ git commit -m "test: contrast the harness's assumptions against the live runtime
 ### Tarea T11: Modo diagnóstico para el gate físico (R6, §0.3, R5)
 
 **Archivos:**
-- Modificar: `fingerink.koplugin/main.lua` (menú, `onStylusEvent`)
+- Modificar: `justdraw.koplugin/main.lua` (menú, `onStylusEvent`)
 - Modificar: `README.md`
-- Test: `fingerink.koplugin/tests/run.lua`
+- Test: `justdraw.koplugin/tests/run.lua`
 
 **Interfaces:**
-- Produce: `FingerInk:diag(slot, sx, sy)`, `self.diag_until`, `self.diag_lines`.
+- Produce: `JustDraw:diag(slot, sx, sy)`, `self.diag_until`, `self.diag_lines`.
   Ítem de menú *Log stylus diagnostics (60 s)*.
 
 **Por qué existe:** hay una sola sesión de hardware disponible y tres preguntas
@@ -1504,23 +1504,23 @@ Logs digitizer numbers only: slot, tracking id, tool, and whether this frame's
 coordinates repeat the previous lift. No paths, no titles, nothing from the
 book. See the plan's stopping conditions.
 ]]
-function FingerInk:startDiagnostics()
+function JustDraw:startDiagnostics()
     self.diag_until = os.time() + DIAG_SECONDS
     self.diag_lines = 0
-    logger.info("FI-DIAG start", "pen_slot", Device.input.pen_slot,
+    logger.info("JUSTDRAW-DIAG start", "pen_slot", Device.input.pen_slot,
         "wacom", tostring(Device.input.wacom_protocol),
         "backend", tostring(self.input_backend))
 end
 
-function FingerInk:diag(slot, sx, sy)
+function JustDraw:diag(slot, sx, sy)
     if not self.diag_until then return end
     if self.diag_lines >= DIAG_MAX_LINES or os.time() > self.diag_until then
-        logger.info("FI-DIAG end", self.diag_lines, "lines")
+        logger.info("JUSTDRAW-DIAG end", self.diag_lines, "lines")
         self.diag_until = nil
         return
     end
     self.diag_lines = self.diag_lines + 1
-    logger.info("FI-DIAG", slot.slot, slot.id, tostring(slot.tool),
+    logger.info("JUSTDRAW-DIAG", slot.slot, slot.id, tostring(slot.tool),
         sx, sy, tostring(self.stylus_stale_xy))
 end
 ```
@@ -1545,7 +1545,7 @@ Añadir al menú, justo antes de *Clear this page*:
 - [ ] **Paso 5: commit**
 
 ```bash
-git add fingerink.koplugin/main.lua fingerink.koplugin/tests/run.lua README.md
+git add justdraw.koplugin/main.lua justdraw.koplugin/tests/run.lua README.md
 git commit -m "feat: add a bounded stylus diagnostic log for the hardware gate"
 ```
 

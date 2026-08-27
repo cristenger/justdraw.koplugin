@@ -1,4 +1,4 @@
-# requirements.md — Finger Ink
+# requirements.md — JustDraw
 
 ## Goal
 

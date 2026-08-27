@@ -1,4 +1,4 @@
-# decisions.md — Finger Ink
+# decisions.md — JustDraw
 
 ## ADR-1 — Hook `GestureDetector:feedEvent`, not the stylus callback *(superseded by ADR-11)*
 
@@ -170,7 +170,7 @@ Everything else is broadcast to every window already and would be delivered
 twice. `InkBar:onGesture` swallows gestures that land on the bar but miss every
 button, so its border and padding do not turn pages.
 
-`FingerInk:dialogOnTop` reports whether the window under the bar is something
+`JustDraw:dialogOnTop` reports whether the window under the bar is something
 other than ReaderUI. When it is, `onTouchFrame` latches passthrough for the
 contact sequence instead of inking, so any menu or dialog can always be
 dismissed. It re-latches per sequence, so drawing resumes on its own once the
@@ -358,7 +358,7 @@ carries no slot number.
 than a page. A reader who uses it seriously accumulates far more ink than the
 per-page PDF feature ever produces, and all of it belongs to one book.
 
-`fingerink_strokes` lives in the document sidecar, which is the obvious place
+`justdraw_strokes` lives in the document sidecar, which is the obvious place
 to put canvases too. It does not survive the volume. `DocSettings:flush()`
 serialises the *entire* settings table with `dump()` and rewrites the file, so
 one new stroke re-serialises every point in the book. Measured against
@@ -368,10 +368,10 @@ on every flush, and duplicated again in whatever metadata backups the reader
 has enabled.
 
 **Decision.** Canvases and their strokes live in
-`DataStorage:getSettingsDir() .. "/fingerink.sqlite3"` — the same global
+`DataStorage:getSettingsDir() .. "/justdraw.sqlite3"` — the same global
 location and the same `lua-ljsqlite3` pattern the Statistics plugin uses.
 Points are stored as chunked binary blobs, four bytes per point, and are read
-only for the canvas that is open. `fingerink_strokes` and `ink_store.lua` are
+only for the canvas that is open. `justdraw_strokes` and `ink_store.lua` are
 untouched: the PDF feature keeps its format.
 
 A book is keyed by `(partial_md5_checksum, file_size)`, not by path, so
@@ -382,7 +382,7 @@ The file is not put inside `.sdr`. `DocSettings.updateLocation` only knows
 about `metadata.lua`, the custom cover and custom metadata, so a companion file
 there would not reliably follow a move, copy or delete.
 
-**Consequences.** A reader's backup has to include `fingerink.sqlite3`, not
+**Consequences.** A reader's backup has to include `justdraw.sqlite3`, not
 just the book's `.sdr` folder — and with WAL on, either with KOReader closed or
 including the `-wal`/`-shm` files. Copying a book to another device no longer
 carries its canvases; sync and export stay out of scope.
@@ -539,7 +539,7 @@ feature. It would also leave FileManager unable to construct the plugin safely,
 because the original host assumed `document`, `view` and `doc_settings`.
 
 **Decision.** Standalone notebooks use
-`DataStorage:getSettingsDir() .. "/fingerink-notebooks.sqlite3"` and a headless
+`DataStorage:getSettingsDir() .. "/justdraw-notebooks.sqlite3"` and a headless
 `NotebookController → NotebookSession → InkSurfaceSession` stack. EPUB canvases
 compose the same `InkSurfaceSession`, but keep their existing repository,
 anchors, overlay and public behavior. `main.lua` has a document-free host seam;
@@ -667,6 +667,58 @@ O(number of notebooks), O(number of pages) and SQLite work in paint or contact
 callbacks. Real Scribe hardware must still validate latency, ghosting, palm
 feel and physical control ergonomics; emulator success does not close that
 gate.
+
+## ADR-20 — Rename the product without renaming existing data in place
+
+**Context.** KOReader identifies an external plugin from its `.koplugin`
+directory in current stable and development releases. Renaming the directory
+from `fingerink.koplugin` to `justdraw.koplugin` therefore changes the plugin
+identity. FingerInk also persisted preferences, direct document ink, Gesture
+Manager actions and two SQLite databases under its former name. A textual
+rename would make that state appear missing; moving a database without its
+`-wal` or `-shm` companion could lose committed-looking notes.
+
+**Decision.** The plugin directory, metadata, module identity, menu/UI copy,
+logs, documentation and every primary setting and database identity use
+`JustDraw` / `justdraw`. `ink_compat.lua` reads a missing current setting from
+its legacy key and copies it forward without deleting the source. Direct ink is
+the bounded-memory exception: a document with only `fingerink_strokes` keeps
+using that table in place, while a document with neither key starts with
+`justdraw_strokes`. If both exist, the current key is authoritative and the
+legacy table remains untouched; no merge occurs. Clearing direct ink explicitly
+deletes both keys so an inactive history cannot reappear. An upgraded document
+therefore remains editable across a temporary FingerInk rollback without
+duplicating its entire stroke table in the sidecar. If Undo, eraser or Clear
+page empties only the active history, an empty value is retained under that
+identity; deleting both identities remains exclusive to the confirmed Clear
+whole document action.
+
+Database files are not moved. A new install chooses `justdraw.sqlite3` and
+`justdraw-notebooks.sqlite3`; when that current file is absent and its legacy
+counterpart exists, the repository opens the legacy file in place. Existence
+is checked independently of readability, so a permissions failure cannot
+silently fork an empty history under the other name. If both files exist, the
+feature refuses to open either, reports the conflict, and performs no automatic
+merge. Resolution instructions require KOReader to be closed and one complete
+database set — main `.sqlite3` plus matching `-wal` and `-shm` companions — to
+be moved together to another directory.
+
+Gesture Manager action IDs and their event aliases remain `fingerink_*` /
+`FingerInk*`, because those opaque IDs are themselves persisted user data.
+Their visible titles and canonical handlers use JustDraw. Registering a second
+set of action IDs would both duplicate the actions in KOReader's picker and
+still leave old assignments dependent on the legacy set.
+
+**Consequences.** Updating does not hide drawings, notebooks or preferences,
+and does not perform an unbounded data copy on Kindle flash. Direct ink keeps
+one active sidecar table, so migration does not double its steady-state memory,
+serialization or file size. Ambiguous database histories require the user to
+choose which complete database set to retain while KOReader is closed. The old
+plugin directory
+must not remain installed beside the new one: KOReader would discover both as
+separate plugins before either can coordinate ownership. A previously disabled
+FingerInk plugin may appear enabled once under the new directory identity; that
+loader-level preference cannot be migrated by code that has not yet run.
 
 ## Deferred
 
