@@ -1698,10 +1698,22 @@ for _, spec in ipairs({
     "canvas_overlay_spec",
     "canvas_router_spec",
     "capture_filter_spec",
+    "input_controller_spec",
     "canvas_queue_spec",
+    "surface_session_spec",
     "canvas_session_spec",
     "main_canvas_spec",
     "canvas_scale_spec",
+    "notebook_geometry_spec",
+    "notebook_input_spec",
+    "notebook_repository_spec",
+    "notebook_session_spec",
+    "notebook_controller_spec",
+    "notebook_host_spec",
+    "notebook_scale_spec",
+    "notebook_ui_spec",
+    "notebook_library_spec",
+    "notebook_editor_spec",
 }) do
     dofile(tests_dir .. "/" .. spec .. ".lua")(ctx)
 end

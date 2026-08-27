@@ -28,11 +28,10 @@ local logger = require("logger")
 local _ = require("gettext")
 
 local Anchor = require("ink_anchor")
-local Cache = require("ink_canvas_cache")
 local Index = require("ink_anchor_index")
 local Overlay = require("ink_canvas_overlay")
-local Queue = require("ink_canvas_queue")
 local Repository = require("ink_canvas_repository")
+local SurfaceSession = require("ink_surface_session")
 local Transform = require("ink_canvas_transform")
 
 local Screen = Device.screen
@@ -84,6 +83,7 @@ function Session.new(opts)
         canvas = nil,
         cache_obj = nil,
         queue = nil,
+        surface_session = nil,
         overlay_widget = nil,
         page = nil,
         marks_here = {},
@@ -210,6 +210,7 @@ function Session:close(opts)
         self.overlay_widget = nil
         self.cache_obj = nil
         self.queue = nil
+        self.surface_session = nil
         self.canvas = nil
         self.next_seq = nil
         self.edited = false
@@ -341,51 +342,45 @@ function Session:openCanvas(canvas)
     if not transform then return nil, transform_err or "bad_geometry" end
 
     self.canvas = canvas
-    if self:isWritable() then
-        self.queue = Queue.new{
-            repository = self.repository,
-            schedule = self.scheduleIn,
-            unschedule = self.unschedule,
-            on_error = function(reason)
-                self.notify(MESSAGES.save_failed)
-                if self.canvas == canvas and self.plugin
-                    and self.plugin.onCanvasSaveFailed then
-                    self.plugin:onCanvasSaveFailed(canvas, reason)
-                end
-            end,
-            on_persisted = function(local_id, row_id)
-                if self.cache_obj then
-                    return self.cache_obj:markPersisted(local_id, row_id)
-                end
-                return nil, "no_cache"
-            end,
-        }
-    else
-        self.queue = nil
-        self.notify(MESSAGES.read_only)
-    end
-    self.cache_obj = Cache.new{
+    if not self:isWritable() then self.notify(MESSAGES.read_only) end
+    self.surface_session = SurfaceSession.new{
         repository = self.repository,
-        canvas = canvas,
+        surface = canvas,
         transform = transform,
+        writable = self:isWritable(),
         schedule = self.schedule,
+        scheduleIn = self.scheduleIn,
+        unschedule = self.unschedule,
         on_ready = function()
-            self:_syncNextSeq()
             if self.canvas == canvas and self.overlay_widget
                 and self.plugin and self.plugin.onCanvasReady then
                 self.plugin:onCanvasReady(canvas)
             end
         end,
-        on_error = function()
+        on_load_error = function()
             self.notify(MESSAGES.read_failed)
             if self.canvas == canvas and self.overlay_widget
                 and self.plugin and self.plugin.onCanvasLoadFailed then
                 self.plugin:onCanvasLoadFailed(canvas)
             end
         end,
+        on_save_error = function(reason)
+            self.notify(MESSAGES.save_failed)
+            if self.canvas == canvas and self.plugin
+                and self.plugin.onCanvasSaveFailed then
+                self.plugin:onCanvasSaveFailed(canvas, reason)
+            end
+        end,
+        on_save_recovered = function()
+            self.notify(MESSAGES.save_retried)
+            if self.plugin and self.plugin.onCanvasSaveRecovered then
+                self.plugin:onCanvasSaveRecovered(canvas)
+            end
+        end,
     }
-    local cache_ok, cache_err = self.cache_obj:open()
-    if cache_ok then self:_syncNextSeq() end
+    local cache_ok, cache_err = self.surface_session:open()
+    self.cache_obj = self.surface_session:cache()
+    self.queue = self.surface_session.queue
 
     self.overlay_widget = Overlay:new{
         plugin = self.plugin,
@@ -401,20 +396,13 @@ function Session:openCanvas(canvas)
     return self.overlay_widget, cache_ok and nil or cache_err
 end
 
-function Session:_syncNextSeq()
-    if not self.cache_obj then return end
-    local strokes = self.cache_obj:strokes()
-    local last = strokes[#strokes]
-    self.next_seq = (last and last.seq or 0) + 1
-end
-
 function Session:closeCanvas()
     if not self.canvas then return true end
-    if self.queue then
-        local ok, err = self.queue:close()
+    if self.surface_session then
+        local ok, err = self.surface_session:close()
         if not ok then return nil, err end
     end
-    if self.edited then
+    if self.edited or (self.surface_session and self.surface_session.edited) then
         -- This is ordering metadata, not ink durability. Do it only after the
         -- queue committed, and never keep a safely written canvas open merely
         -- because its recency marker could not be updated.
@@ -431,10 +419,8 @@ function Session:closeCanvas()
         UIManager:close(self.overlay_widget)
         self.overlay_widget = nil
     end
-    if self.cache_obj then
-        self.cache_obj:close()
-        self.cache_obj = nil
-    end
+    self.cache_obj = nil
+    self.surface_session = nil
     self.canvas = nil
     self.next_seq = nil
     return true
@@ -453,16 +439,14 @@ function Session:deleteCanvas(canvas)
     local ok, err = self.repository:deleteCanvas(canvas.id)
     if not ok then return nil, err end
     if self.canvas and self.canvas.id == canvas.id then
-        if self.queue then self.queue:discard() end
+        if self.surface_session then self.surface_session:close{ discard = true } end
         if self.overlay_widget then
             UIManager:close(self.overlay_widget)
             self.overlay_widget = nil
         end
-        if self.cache_obj then
-            self.cache_obj:close()
-            self.cache_obj = nil
-        end
+        self.cache_obj = nil
         self.queue = nil
+        self.surface_session = nil
         self.canvas = nil
         self.next_seq = nil
         self.edited = false
@@ -481,25 +465,17 @@ function Session:overlay()
 end
 
 function Session:cache()
-    return self.cache_obj
+    return self.surface_session and self.surface_session:cache() or self.cache_obj
 end
 
 function Session:loadFailed()
-    return self.cache_obj ~= nil and self.cache_obj:stateName() == "load_failed"
+    return self.surface_session ~= nil
+        and self.surface_session:stateName() == "load_failed"
 end
 
 function Session:retryLoad()
-    if not self.cache_obj then return nil, "no_canvas" end
-    -- A ready cache may have failed while repairing after an erase/undo, and
-    -- there may also be newly drawn strokes that exist only in Queue. Reloading
-    -- straight from SQLite would resurrect pending deletes and drop pending
-    -- inserts from the raster. Make the queue the durability barrier first;
-    -- on failure both representations remain available for another retry.
-    if self.queue and self.queue:pendingCount() > 0 then
-        local saved, save_err = self.queue:flush()
-        if not saved then return nil, save_err end
-    end
-    return self.cache_obj:retryOpen()
+    if not self.surface_session then return nil, "no_canvas" end
+    return self.surface_session:retryLoad()
 end
 
 function Session:transform()
@@ -515,125 +491,67 @@ Points are canvas coordinates. Nothing here touches the disk -- the queue
 decides when that happens.
 ]]
 function Session:addStroke(points, n, width, tool)
-    if not self.canvas then return nil, "no_canvas" end
-    if not self:isWritable() then return nil, "read_only" end
-    if not self.queue then return nil, "no_queue" end
-    if not self.cache_obj:isReady() then return nil, "loading" end
-
-    local seq = self.next_seq
-    if not seq then return nil, "no_seq" end
-
-    local local_id, err = self.queue:addStroke(self.canvas, {
-        seq = seq, width = width, tool = tool, points = points, n = n,
-    })
-    if not local_id then return nil, err end
-
-    local min_x, min_y = points[1], points[2]
-    local max_x, max_y = min_x, min_y
-    for i = 2, n do
-        local x, y = points[i * 2 - 1], points[i * 2]
-        if x < min_x then min_x = x elseif x > max_x then max_x = x end
-        if y < min_y then min_y = y elseif y > max_y then max_y = y end
-    end
-    self.cache_obj:addStroke({
-        id = local_id, seq = seq, width = width, tool = tool, point_count = n,
-        min_x = min_x, min_y = min_y, max_x = max_x, max_y = max_y,
-    }, points, n)
-    local row_id = self.queue:realId(local_id)
-    if row_id then
-        local marked, merr = self.cache_obj:markPersisted(local_id, row_id)
-        if not marked then return nil, merr end
-        self.queue:forgetReal(local_id, row_id)
-    end
-    self.next_seq = seq + 1
-    self.edited = true
-    return local_id
+    if not self.surface_session then return nil, "no_canvas" end
+    local id, err = self.surface_session:addStroke(points, n, width, tool)
+    if id then self.edited = true end
+    return id, err
 end
 
 --- Remove the topmost stroke under a canvas point. Returns the dirty region.
 function Session:beginErase()
-    if not self.cache_obj or not self.cache_obj:isReady() then return nil end
-    return self.cache_obj:beginErase()
+    return self.surface_session and self.surface_session:beginErase() or nil
 end
 
 function Session:endErase(ctx)
-    if self.cache_obj then self.cache_obj:endErase(ctx) end
+    if self.surface_session then self.surface_session:endErase(ctx) end
 end
 
 function Session:eraseAt(cx, cy, radius, ctx)
-    if not self.canvas or not self.cache_obj then return nil end
-    if not self.queue then return nil, "read_only" end
-    if not self.cache_obj:isReady() then
-        return nil, self.cache_obj:stateName()
-    end
-    local hit, herr = self.cache_obj:hitTest(cx, cy, radius, ctx)
-    if not hit then return nil, herr end
-    local accepted, err = self.queue:removeStroke(self.canvas, hit.id)
-    if not accepted then return nil, err end
-    local box, rerr = self.cache_obj:removeStroke(hit.id)
-    if not box then return nil, rerr end
-    self.edited = true
-    return box
+    if not self.surface_session then return nil end
+    local box, err = self.surface_session:eraseAt(cx, cy, radius, ctx)
+    if box then self.edited = true end
+    return box, err
 end
 
 --- Remove the last stroke drawn on this canvas. Returns the region to repaint,
 --- or nil when there was nothing to undo.
 function Session:undo()
-    if not self.canvas or not self.cache_obj then return nil end
-    if not self.queue then return nil, "read_only" end
-    if not self.cache_obj:isReady() then
-        return nil, self.cache_obj:stateName()
-    end
-    local strokes = self.cache_obj:strokes()
-    local last = strokes[#strokes]
-    if not last then return nil end
-    local accepted, err = self.queue:removeStroke(self.canvas, last.id)
-    if not accepted then return nil, err end
-    local box, rerr = self.cache_obj:removeStroke(last.id)
-    if not box then return nil, rerr end
-    self.edited = true
-    return box or true
+    if not self.surface_session then return nil end
+    local box, err = self.surface_session:undo()
+    if box then self.edited = true end
+    return box, err
 end
 
 --- Undo a stroke that was being drawn and never stored: the live segments are
 --- already in the raster, so the region has to be rebuilt from what was under
 --- them. Returns the region to repaint.
 function Session:repair(min_x, min_y, max_x, max_y, width)
-    if not self.cache_obj then return nil end
-    return self.cache_obj:repair{
-        min_x = min_x, min_y = min_y, max_x = max_x, max_y = max_y, width = width,
-    }
+    if not self.surface_session then return nil end
+    return self.surface_session:repair(min_x, min_y, max_x, max_y, width)
 end
 
 function Session:pendingWrites()
-    return self.queue and self.queue:pendingCount() or 0
+    return self.surface_session and self.surface_session:pendingWrites() or 0
 end
 
 --- The durable-save gate. Called from onSaveSettings, which KOReader runs
 --- before suspending and before closing the document.
 function Session:flush()
-    if not self.queue then return true end
-    return self.queue:flush()
+    if not self.surface_session then return true end
+    return self.surface_session:flush()
 end
 
 --- True while a write has failed and the work is still in memory. Editing is
 --- refused until a retry succeeds, so this has to be reachable from the menu.
 function Session:saveFailed()
-    return self.queue ~= nil and self.queue:isFailed()
+    return self.surface_session ~= nil and self.surface_session:saveFailed()
 end
 
 --- Try the failed write again. The operations are unchanged, so this is simply
 --- the same transaction a second time.
 function Session:retrySave()
-    if not self.queue then return true end
-    local ok, err = self.queue:retry()
-    if ok then
-        self.notify(MESSAGES.save_retried)
-        if self.plugin and self.plugin.onCanvasSaveRecovered then
-            self.plugin:onCanvasSaveRecovered(self.canvas)
-        end
-    end
-    return ok, err
+    if not self.surface_session then return true end
+    return self.surface_session:retrySave()
 end
 
 function Session:_transform(canvas, sheet_top)

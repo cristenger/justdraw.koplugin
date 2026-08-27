@@ -55,6 +55,7 @@ function Queue.new(opts)
         unschedule = opts.unschedule,
         on_error = opts.on_error,
         on_persisted = opts.on_persisted,
+        on_committed = opts.on_committed,
         max_ops = opts.max_ops or FLUSH_OPS,
         max_bytes = opts.max_bytes or FLUSH_BYTES,
         delay = opts.delay or FLUSH_DELAY,
@@ -204,6 +205,7 @@ function Queue:flush()
 
     local ops = self.ops
     local assigned = {}
+    local touched = {}
 
     local ok, err = self.repository:transaction(function()
         for i = 1, #ops do
@@ -215,6 +217,15 @@ function Queue:flush()
             else
                 local done, e = self.repository:deleteStroke(op.row_id)
                 if not done then return nil, e or "delete failed" end
+            end
+            if op.canvas and op.canvas.id ~= nil then
+                touched[op.canvas.id] = op.canvas
+            end
+        end
+        if type(self.repository.touchSurface) == "function" then
+            for _, surface in pairs(touched) do
+                local touched_ok, touch_err = self.repository:touchSurface(surface)
+                if not touched_ok then return nil, touch_err or "touch failed" end
             end
         end
         return true
@@ -260,6 +271,12 @@ function Queue:flush()
     self.bytes = 0
     self.failed = false
     self.error = nil
+    if self.on_committed then
+        local notified, notify_err = pcall(self.on_committed, #ops)
+        if not notified then
+            logger.err("FingerInk: post-commit callback failed:", notify_err)
+        end
+    end
     return true
 end
 

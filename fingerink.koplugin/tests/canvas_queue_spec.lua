@@ -53,6 +53,7 @@ return function(ctx)
             end,
             on_error = function(err) errors[#errors + 1] = err end,
             on_persisted = opts.on_persisted,
+            on_committed = opts.on_committed,
         }
         return queue, store, sched, { errors = errors, scheduled = scheduled,
                                       unscheduled = unscheduled }
@@ -113,6 +114,32 @@ return function(ctx)
         local queue, store = fixture{ max_ops = 4 }
         for i = 1, 4 do queue:addStroke(CANVAS, stroke(4, i)) end
         t:eq(store.calls.transaction, 1, "four strokes, one transaction")
+    end)
+
+    t:case("surface recency is touched once per committed batch", function()
+        local committed, touches = 0, 0
+        local queue, store = fixture{
+            max_ops = 3,
+            on_committed = function(count) committed = committed + count end,
+        }
+        function store:touchSurface(surface)
+            touches = touches + 1
+            t:eq(surface, CANVAS, "the batch reports its surface")
+            return true
+        end
+        for i = 1, 3 do queue:addStroke(CANVAS, stroke(4, i)) end
+        t:eq(touches, 1, "not one metadata write per stroke")
+        t:eq(committed, 3, "post-commit callback sees the durable batch")
+    end)
+
+    t:case("a failed recency update rolls back the entire ink batch", function()
+        local queue, store = fixture{ max_ops = 2 }
+        function store:touchSurface() return nil, "touch failed" end
+        queue:addStroke(CANVAS, stroke(4, 1))
+        queue:addStroke(CANVAS, stroke(4, 2))
+        t:eq(queue:isFailed(), true, "metadata failure is a save failure")
+        t:eq(queue:pendingCount(), 2, "same operations remain retryable")
+        t:eq(strokeCount(store), 0, "ink was rolled back with metadata")
     end)
 
     t:case("flushing an empty queue does nothing at all", function()

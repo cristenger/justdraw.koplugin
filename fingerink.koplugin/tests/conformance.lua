@@ -366,6 +366,351 @@ else
 end
 
 -- =====================================================================
+-- Standalone notebook database, against real SQLite
+-- =====================================================================
+
+if not sq3_ok then
+    claim("notebook database: SQLite driver is available", false, false,
+        "lua-ljsqlite3 did not load")
+else
+    local NotebookRepository = require("ink_notebook_repository")
+    local Codec = require("ink_canvas_codec")
+    local db_path = os.tmpname() .. ".fingerink-notebooks-conformance.sqlite3"
+    os.remove(db_path)
+
+    local notebook_now = 2000
+    local repo, open_err = NotebookRepository.open{
+        path = db_path, driver = SQ3, wal = false,
+        now = function() return notebook_now end,
+    }
+    claim("notebook database: the v1 schema is accepted by SQLite",
+        true, repo ~= nil, tostring(open_err or db_path))
+
+    if repo then
+        local conn = repo.conn
+        claim("notebook database: version and foreign keys are active", true,
+            tonumber(conn:rowexec("PRAGMA user_version;"))
+                == NotebookRepository.SCHEMA_VERSION
+                and tonumber(conn:rowexec("PRAGMA foreign_keys;")) == 1)
+
+        local notebook, first = repo:createNotebook{
+            title = "Conformance", logical_w = 1860, logical_h = 2480,
+            template_kind = "ruled",
+        }
+        claim("notebook database: create atomically returns notebook, page and state",
+            true, notebook ~= nil and first ~= nil
+                and notebook.current_page_id == first.id
+                and tonumber(conn:rowexec("SELECT count(*) FROM notebook_state;")) == 1)
+
+        local second = notebook and repo:appendPage(notebook.id, {
+            logical_w = 1860, logical_h = 2480, template_kind = "future-template",
+        })
+        local read_second = second and repo:getPage(second.id)
+        claim("notebook database: append consumes monotonic sort keys and tolerates future templates",
+            true, second ~= nil and second.sort_key == 2048
+                and read_second.template_kind == "blank",
+            second and tostring(second.sort_key) or "append failed")
+
+        local n = Codec.MAX_POINTS + 19
+        local points = {}
+        for i = 1, n do
+            points[#points + 1] = (i * 17) % 1861
+            points[#points + 1] = (i * 23) % 2481
+        end
+        local stroke_id = first and repo:addStroke(first, {
+            seq = 1, width = 4, tool = 1, points = points, n = n,
+        })
+        claim("notebook database: a multi-chunk stroke is written", true,
+            type(stroke_id) == "number", tostring(stroke_id))
+
+        if stroke_id then
+            local kind, bytes = conn:rowexec([[
+                SELECT typeof(points), length(points)
+                  FROM notebook_stroke_chunks
+                 WHERE stroke_id = ]] .. tostring(stroke_id) .. [[ AND chunk_no = 0;]])
+            claim("notebook database: binary point data survives embedded NUL bytes", true,
+                kind == "blob" and tonumber(bytes)
+                    == Codec.HEADER + 4 * Codec.MAX_POINTS,
+                tostring(kind) .. ", " .. tostring(bytes) .. " bytes")
+
+            local cursor = repo:openStrokeCursor(stroke_id)
+            local rows_seen, points_seen, cursor_err = 0, 0, nil
+            while cursor do
+                local row, err, done = cursor:next()
+                if err then cursor_err = err; break end
+                if done then break end
+                rows_seen = rows_seen + 1
+                points_seen = points_seen + row.point_count
+                    - (rows_seen > 1 and 1 or 0)
+            end
+            claim("notebook database: cursor streams all chunks and reports clean EOF",
+                true, rows_seen == Codec.chunkCount(n) and points_seen == n
+                    and cursor_err == nil,
+                tostring(rows_seen) .. " chunks, error = " .. tostring(cursor_err))
+
+            local metadata = repo:listStrokes(first.id)
+            claim("notebook database: stroke listings contain metadata but no point blobs",
+                true, metadata and #metadata == 1 and metadata[1].points == nil)
+
+            repo:deleteStroke(stroke_id)
+            claim("notebook database: interactive undo tombstones one row and leaves chunks for purge",
+                true, tonumber(conn:rowexec(
+                    "SELECT count(*) FROM notebook_strokes WHERE deleted_at IS NOT NULL;")) == 1
+                    and tonumber(conn:rowexec(
+                    "SELECT count(*) FROM notebook_stroke_chunks;")) == Codec.chunkCount(n))
+
+            local first_batch = repo:purgeDeletedBatch{
+                chunks = 1, strokes = 1, pages = 1, notebooks = 1,
+            }
+            claim("notebook database: one purge call respects its requested bounds",
+                true, first_batch and first_batch.chunks <= 1
+                    and first_batch.strokes <= 1 and first_batch.pages <= 1
+                    and first_batch.notebooks <= 1)
+            for _ = 1, Codec.chunkCount(n) + 4 do
+                local batch = repo:purgeDeletedBatch{
+                    chunks = 1, strokes = 1, pages = 1, notebooks = 1,
+                }
+                if not batch or batch.changed == 0 then break end
+            end
+            claim("notebook database: bounded purge resumes until tombstoned ink is gone",
+                true, tonumber(conn:rowexec(
+                    "SELECT count(*) FROM notebook_strokes WHERE id = "
+                    .. tostring(stroke_id))) == 0
+                    and tonumber(conn:rowexec(
+                    "SELECT count(*) FROM notebook_stroke_chunks WHERE stroke_id = "
+                    .. tostring(stroke_id))) == 0)
+        end
+
+        if second then
+            repo:selectCurrentPage(notebook.id, second.id)
+            local selected = repo:softDeletePage(notebook.id, second.id)
+            local refused, refuse_err = repo:softDeletePage(notebook.id, first.id)
+            claim("notebook database: deleting current page selects a neighbour and keeps the last",
+                true, selected and selected.id == first.id
+                    and refused == nil and refuse_err == "last_page")
+        end
+
+        local function planContains(sql, binds, needle)
+            local stmt = conn:prepare("EXPLAIN QUERY PLAN " .. sql)
+            if binds then stmt:bind(unpack(binds)) end
+            local found = false
+            while true do
+                local row = stmt:step()
+                if not row then break end
+                if tostring(row[4]):find(needle, 1, true) then found = true end
+            end
+            stmt:close()
+            return found
+        end
+        claim("notebook database: library lookup uses its composite index", true,
+            planContains([[
+                SELECT id FROM notebooks WHERE deleted_at IS NULL
+                 ORDER BY updated_at DESC, id DESC LIMIT ?1;]], { 50 },
+                "notebooks_active_recent"))
+        claim("notebook database: page lookup uses keyset index order", true,
+            planContains([[
+                SELECT id FROM notebook_pages
+                 WHERE notebook_id = ?1 AND deleted_at IS NULL
+                 ORDER BY sort_key, id LIMIT ?2;]], { notebook.id, 50 },
+                "pages_by_notebook"))
+        claim("notebook database: active-page strokes use their page index", true,
+            planContains([[
+                SELECT id FROM notebook_strokes
+                 WHERE page_id = ?1 AND deleted_at IS NULL ORDER BY seq;]],
+                { first.id }, "strokes_by_page"))
+        claim("notebook database: purge discovery starts at tombstone indexes", true,
+            planContains([[
+                SELECT p.id
+                  FROM notebooks n INDEXED BY notebooks_active_recent
+                  CROSS JOIN notebook_pages p INDEXED BY pages_by_notebook
+                    ON p.notebook_id = n.id
+                 WHERE n.deleted_at IS NOT NULL AND p.deleted_at IS NULL
+                 LIMIT ?1;]], { 8 }, "notebooks_active_recent")
+            and planContains([[
+                SELECT s.id
+                  FROM notebook_pages p INDEXED BY pages_deleted
+                  CROSS JOIN notebook_strokes s INDEXED BY strokes_by_page
+                    ON s.page_id = p.id
+                 WHERE p.deleted_at IS NOT NULL AND s.deleted_at IS NULL
+                 LIMIT ?1;]], { 32 }, "pages_deleted")
+            and planContains([[
+                SELECT c.rowid
+                  FROM notebook_strokes s INDEXED BY strokes_deleted
+                  CROSS JOIN notebook_stroke_chunks c ON c.stroke_id = s.id
+                 WHERE s.deleted_at IS NOT NULL LIMIT ?1;]],
+                { 64 }, "strokes_deleted")
+            and planContains([[
+                SELECT p.id
+                  FROM notebook_pages p INDEXED BY pages_deleted
+                 WHERE p.deleted_at IS NOT NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM notebook_state st
+                        WHERE st.current_page_id = p.id)
+                 LIMIT ?1;]], { 8 }, "state_by_current_page")
+            and planContains([[
+                SELECT n.id
+                  FROM notebooks n INDEXED BY notebooks_active_recent
+                 WHERE n.deleted_at IS NOT NULL LIMIT ?1;]],
+                { 1 }, "notebooks_active_recent"))
+
+        -- Populate a genuinely large page set in one setup transaction. The
+        -- operation under test remains the public bounded/keyset listing, not
+        -- the cost of manufacturing fixture rows one by one.
+        conn:exec([[
+            INSERT INTO notebooks
+                (title, page_count, next_sort_key, created_at, updated_at, deleted_at)
+            VALUES ('Scale', 10000, 10241024, 2500, 2500, NULL);
+        ]])
+        local scale_id = tonumber(conn:rowexec("SELECT last_insert_rowid();"))
+        conn:exec([[
+            WITH RECURSIVE seq(x) AS (
+                VALUES(1) UNION ALL SELECT x + 1 FROM seq WHERE x < 10000
+            )
+            INSERT INTO notebook_pages
+                (notebook_id, sort_key, logical_w, logical_h, template_kind,
+                 created_at, updated_at, deleted_at)
+            SELECT ]] .. tostring(scale_id) .. [[, x * 1024, 1860, 2480,
+                   'blank', 2500, 2500, NULL FROM seq;
+        ]])
+        conn:exec([[
+            INSERT INTO notebook_state (notebook_id, current_page_id)
+            SELECT ]] .. tostring(scale_id) .. [[, MIN(id)
+              FROM notebook_pages WHERE notebook_id = ]] .. tostring(scale_id) .. [[;
+        ]])
+        local scale_rows = repo:listPages(scale_id, { limit = 50 })
+        local scale_next = scale_rows and repo:listPages(scale_id, {
+            after_sort_key = scale_rows[#scale_rows].sort_key,
+            after_id = scale_rows[#scale_rows].id,
+            limit = 50,
+        })
+        claim("notebook database: 10,000 real pages remain bounded and keyset-paginated",
+            true, tonumber(conn:rowexec(
+                "SELECT count(*) FROM notebook_pages WHERE notebook_id = "
+                .. tostring(scale_id) .. ";")) == 10000
+                and scale_rows and #scale_rows == 50
+                and scale_next and #scale_next == 50
+                and scale_next[1].sort_key > scale_rows[#scale_rows].sort_key)
+
+        conn:exec([[
+            WITH RECURSIVE seq(x) AS (
+                VALUES(1) UNION ALL SELECT x + 1 FROM seq WHERE x < 5000
+            )
+            INSERT INTO notebooks
+                (title, page_count, next_sort_key, created_at, updated_at, deleted_at)
+            SELECT 'Library scale ' || x, 0, 1024, 20000 + x,
+                   20000 + x, NULL FROM seq;
+        ]])
+        local library_rows = repo:listNotebooks{ limit = 51 }
+        local library_next = library_rows and repo:listNotebooks{
+            after_updated_at = library_rows[#library_rows].updated_at,
+            after_id = library_rows[#library_rows].id,
+            limit = 51,
+        }
+        claim("notebook database: 5,000 real notebooks remain bounded and keyset-paginated",
+            true, tonumber(conn:rowexec(
+                "SELECT count(*) FROM notebooks WHERE title LIKE 'Library scale %';")) == 5000
+                and library_rows and #library_rows == 51
+                and library_next and #library_next == 51
+                and library_next[1].updated_at < library_rows[#library_rows].updated_at)
+
+        repo:close()
+        local writer = SQ3.open(db_path, "rw")
+        writer:exec("PRAGMA user_version="
+            .. tostring(NotebookRepository.SCHEMA_VERSION + 1) .. ";")
+        writer:close()
+        local future = NotebookRepository.open{
+            path = db_path, driver = SQ3, wal = false,
+        }
+        local write, write_err
+        if future then
+            write, write_err = future:createNotebook{
+                title = "No write", logical_w = 1, logical_h = 1,
+            }
+        end
+        claim("notebook database: a future schema opens read-only and writes nothing",
+            true, future and future.read_only and write == nil
+                and write_err == "read_only",
+            "future = " .. tostring(future) .. ", read_only = "
+                .. tostring(future and future.read_only) .. ", write_err = "
+                .. tostring(write_err))
+        if future then future:close() end
+    end
+
+    -- End-to-end domain lifecycle over a second real connection: create,
+    -- draw, append, switch, close, reopen with a new controller instance.
+    local lifecycle_path = os.tmpname() .. ".fingerink-notebook-lifecycle.sqlite3"
+    os.remove(lifecycle_path)
+    local lifecycle_now = 3000
+    local first_repo = NotebookRepository.open{
+        path = lifecycle_path, driver = SQ3, wal = false,
+        now = function() return lifecycle_now end,
+    }
+    lifecycle_now = 3001
+    local created = first_repo and first_repo:createNotebook{
+        title = "Lifecycle", logical_w = 1000, logical_h = 1400,
+    }
+    local NotebookController = require("ink_notebook_controller")
+    local first_controller = first_repo and NotebookController.new{
+        repository = first_repo,
+        schedule = function(fn) fn() end,
+        scheduleIn = function() end,
+        unschedule = function() end,
+    }
+    local first_session = created and first_controller:openNotebook(created.id)
+    local first_ink = first_session and first_session:surface():addStroke(
+        { 10, 10, 20, 20 }, 2, 4, 1)
+    local appended = first_session and first_session:appendPage()
+    local second_page = first_session and first_session:currentPage()
+    lifecycle_now = 3002
+    local second_ink = first_session and first_session:surface():addStroke(
+        { 30, 30, 40, 40 }, 2, 4, 1)
+    local first_closed = first_controller and first_controller:close()
+    local first_page_updated, notebook_updated
+    if first_repo and created then
+        first_page_updated = tonumber(first_repo.conn:rowexec(
+            "SELECT updated_at FROM notebook_pages WHERE id = "
+            .. tostring(created.current_page_id) .. ";"))
+        notebook_updated = tonumber(first_repo.conn:rowexec(
+            "SELECT updated_at FROM notebooks WHERE id = "
+            .. tostring(created.id) .. ";"))
+    end
+    if first_repo then first_repo:close() end
+
+    local second_repo = NotebookRepository.open{
+        path = lifecycle_path, driver = SQ3, wal = false,
+    }
+    local second_controller = second_repo and NotebookController.new{
+        repository = second_repo,
+        schedule = function(fn) fn() end,
+        scheduleIn = function() end,
+        unschedule = function() end,
+    }
+    local reopened = created and second_controller:openNotebook(created.id)
+    local reopened_strokes = reopened and second_repo:listStrokes(
+        reopened:currentPage().id)
+    claim("notebook lifecycle: a new controller restores current page and durable ink",
+        true, first_ink ~= nil and appended and second_ink ~= nil and first_closed
+            and reopened and second_page
+            and reopened:currentPage().id == second_page.id
+            and reopened_strokes and #reopened_strokes == 1,
+        "current page = " .. tostring(reopened and reopened:currentPage().id)
+            .. ", strokes = " .. tostring(reopened_strokes and #reopened_strokes))
+    claim("notebook lifecycle: committed ink updates page and library recency once per batch",
+        true, first_page_updated == 3001 and notebook_updated == 3002,
+        "first page = " .. tostring(first_page_updated)
+            .. ", notebook = " .. tostring(notebook_updated))
+    if second_controller then second_controller:close() end
+    if second_repo then second_repo:close() end
+    os.remove(lifecycle_path)
+    os.remove(lifecycle_path .. "-wal")
+    os.remove(lifecycle_path .. "-shm")
+
+    os.remove(db_path)
+    os.remove(db_path .. "-wal")
+    os.remove(db_path .. "-shm")
+end
+
+-- =====================================================================
 -- Anchors, against a real CreDocument
 --
 -- Needs a book, so pass one:

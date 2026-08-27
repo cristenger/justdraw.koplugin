@@ -65,7 +65,7 @@ local REPAIR_PAD = 4
 local ERASER_LRU_CHUNKS = 8
 
 --[[--
-  opts.repository  canvas store: listStrokes, openStrokeCursor, readStrokeChunk
+  opts.repository  canvas store: listStrokes, readStrokeChunk
   opts.canvas      the canvas row (id and logical geometry)
   opts.transform   an ink_canvas_transform
   opts.schedule    function(fn) -- UIManager:nextTick
@@ -79,7 +79,9 @@ local ERASER_LRU_CHUNKS = 8
 function Cache.new(opts)
     return setmetatable({
         repository = opts.repository,
-        canvas = opts.canvas,
+        -- `canvas` remains as an internal compatibility name while the same
+        -- cache starts serving standalone notebook pages.
+        canvas = opts.surface or opts.canvas,
         transform = opts.transform,
         schedule = opts.schedule,
         point_budget = opts.point_budget or DEFAULT_POINT_BUDGET,
@@ -192,7 +194,7 @@ function Cache:paintTo(dest)
     -- validates; the database and metadata remain untouched underneath.
     if not self.bb or self.state == "load_failed" then return end
     local r = self.transform:canvasRect()
-    dest:blitFrom(self.bb, r.x, r.y, 0, 0, r.w, r.h)
+    dest:blitFrom(self.bb, r.x, r.y, r.cache_x or 0, r.cache_y or 0, r.w, r.h)
 end
 
 -- ------------------------------------------------------------------ editing
@@ -586,8 +588,6 @@ function Cache:_fail(reason)
 end
 
 function Cache:_closeJob()
-    local job = self.current_job
-    if job and job.cursor then pcall(job.cursor.close, job.cursor) end
     self.current_job = nil
 end
 
@@ -604,9 +604,16 @@ function Cache:_openJob(m)
     local decoder, derr = Codec.newDecoder(self.canvas.logical_w,
         self.canvas.logical_h, m)
     if not decoder then return nil, derr end
-    local cursor, cerr = self.repository:openStrokeCursor(m.id)
-    if not cursor then return nil, cerr end
-    return { meta = m, decoder = decoder, cursor = cursor }
+    -- Never retain a SQLite statement across scheduler turns.  A keyed chunk
+    -- lookup owns and closes its statement within one call; this avoids
+    -- blocking writers on rollback-journal devices and holding old WAL
+    -- snapshots open on devices such as the Scribe.
+    return {
+        meta = m,
+        decoder = decoder,
+        next_chunk = 0,
+        chunk_count = Codec.chunkCount(m.point_count),
+    }
 end
 
 function Cache:_nextJobChunk(job)
@@ -631,16 +638,18 @@ function Cache:_nextJobChunk(job)
         return points, n
     end
 
-    local row, err, done = job.cursor:next()
-    if err then return nil, nil, err end
-    if done then
+    if job.next_chunk >= job.chunk_count then
         local ok, ferr = job.decoder:finish()
         if not ok then return nil, nil, ferr end
         return nil, nil, nil, true
     end
+    local row, err = self.repository:readStrokeChunk(
+        job.meta.id, job.next_chunk)
+    if not row then return nil, nil, err or "missing_chunk" end
     local points, n = job.decoder:push(row.chunk_no, row.point_count, row.points)
     if not points then return nil, nil, n end
     job.last_chunk_no = row.chunk_no
+    job.next_chunk = job.next_chunk + 1
     return points, n
 end
 

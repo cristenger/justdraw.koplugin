@@ -335,6 +335,10 @@ function support.newScreen(opts)
     screen.bb = support.newBlitbuffer(screen.w, screen.h)
     function screen:getWidth() return self.w end
     function screen:getHeight() return self.h end
+    function screen:scaleByDPI(value)
+        return math.floor(value * (opts.dpi or 160) / 160 + 0.5)
+    end
+    function screen:scaleBySize(value) return math.floor(value + 0.5) end
     function screen:getRotationMode() return self.rotation end
     function screen:refreshFast(x, y, w, h)
         self.refreshes[#self.refreshes + 1] = { "fast", x, y, w, h }
@@ -822,14 +826,45 @@ function support.newCanvasStore(canvases)
     end
 
     function store:readStrokeChunk(stroke_id, chunk_no)
-        local cursor, err = self:openStrokeCursor(stroke_id)
-        if not cursor then return nil, err end
-        while true do
-            local row, rerr, done = cursor:next()
-            if rerr then return nil, rerr end
-            if done then return nil, "missing_chunk" end
-            if row.chunk_no == chunk_no then cursor:close(); return row end
+        self.calls.stroke_read = self.calls.stroke_read + 1
+        if self.fail_stroke_cursor then return nil, self.fail_stroke_cursor end
+        local found, found_canvas_id
+        for canvas_id, list in pairs(self.strokes) do
+            for _, stroke in ipairs(list) do
+                if stroke.id == stroke_id then
+                    found, found_canvas_id = stroke, canvas_id
+                    break
+                end
+            end
+            if found then break end
         end
+        if not found then return nil, "empty" end
+        if self.fail_stroke_chunk == chunk_no then return nil, "chunk failed" end
+        local logical_w, logical_h = 1860, 2480
+        for _, canvas in ipairs(self.canvases) do
+            if canvas.id == found_canvas_id then
+                logical_w, logical_h = canvas.logical_w, canvas.logical_h
+                break
+            end
+        end
+        local first = chunk_no == 0 and 1
+            or chunk_no * (Codec.MAX_POINTS - 1) + 1
+        if first > found.n then return nil, "missing_chunk" end
+        local last = math.min(first + Codec.MAX_POINTS - 1, found.n)
+        local part = {}
+        for i = first, last do
+            part[#part + 1] = found.points[i * 2 - 1]
+            part[#part + 1] = found.points[i * 2]
+        end
+        local chunks, encode_err = Codec.encode(part, last - first + 1,
+            logical_w, logical_h)
+        if not chunks then return nil, encode_err end
+        self.calls.stroke_chunk = self.calls.stroke_chunk + 1
+        return {
+            chunk_no = chunk_no,
+            point_count = chunks[1].point_count,
+            points = chunks[1].points,
+        }
     end
 
     function store:addStroke(canvas, stroke)
@@ -934,6 +969,195 @@ function support.newCanvasStore(canvases)
     return store
 end
 
+-- ------------------------------------------------------ fake notebook store
+
+--- In-memory implementation of the notebook domain plus the generic stroke
+--- repository. It intentionally counts metadata and point operations
+--- separately so scale tests can prove that library/page navigation never
+--- opens stroke payloads.
+function support.newNotebookStore(opts)
+    opts = opts or {}
+    local pages = opts.pages or {
+        { id = 11, notebook_id = 1, sort_key = 1024,
+          logical_w = 1000, logical_h = 1400, template_kind = "blank" },
+    }
+    local store = support.newCanvasStore(pages)
+    store.notebooks = opts.notebooks or {
+        { id = 1, title = "Notebook", page_count = #pages,
+          next_sort_key = (#pages + 1) * 1024, current_page_id = pages[1].id,
+          created_at = 1, updated_at = 1 },
+    }
+    store.pages = pages
+    store.calls.list_notebooks = 0
+    store.calls.list_pages = 0
+    store.calls.select_page = 0
+    store.calls.purge = 0
+
+    local function activeNotebook(id)
+        for _, n in ipairs(store.notebooks) do
+            if n.id == id and not n.deleted_at then return n end
+        end
+    end
+    local function activePage(id)
+        for _, p in ipairs(store.pages) do
+            if p.id == id and not p.deleted_at then return p end
+        end
+    end
+    local function copyRow(row)
+        local copy = {}
+        for k, v in pairs(row) do copy[k] = v end
+        return copy
+    end
+
+    function store:listNotebooks(spec)
+        self.calls.list_notebooks = self.calls.list_notebooks + 1
+        spec = spec or {}
+        local limit = math.min(tonumber(spec.limit) or 50, 200)
+        local out = {}
+        for _, n in ipairs(self.notebooks) do
+            if not n.deleted_at then
+                out[#out + 1] = copyRow(n)
+                if #out >= limit then break end
+            end
+        end
+        return out
+    end
+
+    function store:getNotebook(id)
+        if self.fail_get_notebook then return nil, self.fail_get_notebook end
+        local n = activeNotebook(id)
+        return n and copyRow(n) or nil, n and nil or "not_found"
+    end
+
+    function store:listPages(notebook_id, spec)
+        self.calls.list_pages = self.calls.list_pages + 1
+        spec = spec or {}
+        local limit = math.min(tonumber(spec.limit) or 50, 200)
+        local out = {}
+        for _, p in ipairs(self.pages) do
+            if p.notebook_id == notebook_id and not p.deleted_at
+                and (not spec.after_sort_key
+                    or p.sort_key > spec.after_sort_key
+                    or p.sort_key == spec.after_sort_key and p.id > spec.after_id) then
+                out[#out + 1] = p
+                if #out >= limit then break end
+            end
+        end
+        table.sort(out, function(a, b)
+            return a.sort_key == b.sort_key and a.id < b.id
+                or a.sort_key < b.sort_key
+        end)
+        return out
+    end
+
+    function store:getPage(id)
+        if self.fail_get_page then return nil, self.fail_get_page end
+        local p = activePage(id)
+        return p or nil, p and nil or "not_found"
+    end
+
+    function store:selectCurrentPage(notebook_id, page_id)
+        self.calls.select_page = self.calls.select_page + 1
+        if self.fail_select_page then return nil, self.fail_select_page end
+        local n, p = activeNotebook(notebook_id), activePage(page_id)
+        if not n or not p or p.notebook_id ~= notebook_id then return nil, "not_found" end
+        n.current_page_id = page_id
+        return true
+    end
+
+    function store:previousPage(page)
+        local best
+        for _, p in ipairs(self.pages) do
+            if p.notebook_id == page.notebook_id and not p.deleted_at
+                and (p.sort_key < page.sort_key
+                    or p.sort_key == page.sort_key and p.id < page.id)
+                and (not best or p.sort_key > best.sort_key
+                    or p.sort_key == best.sort_key and p.id > best.id) then
+                best = p
+            end
+        end
+        return best
+    end
+
+    function store:nextPage(page)
+        local best
+        for _, p in ipairs(self.pages) do
+            if p.notebook_id == page.notebook_id and not p.deleted_at
+                and (p.sort_key > page.sort_key
+                    or p.sort_key == page.sort_key and p.id > page.id)
+                and (not best or p.sort_key < best.sort_key
+                    or p.sort_key == best.sort_key and p.id < best.id) then
+                best = p
+            end
+        end
+        return best
+    end
+
+    function store:appendPage(notebook_id, spec)
+        if self.fail_append then return nil, self.fail_append end
+        local n = activeNotebook(notebook_id)
+        if not n then return nil, "not_found" end
+        local page = {
+            id = 10 + #self.pages + 1, notebook_id = notebook_id,
+            sort_key = n.next_sort_key, logical_w = spec.logical_w,
+            logical_h = spec.logical_h, template_kind = spec.template_kind or "blank",
+        }
+        self.pages[#self.pages + 1] = page
+        n.next_sort_key = n.next_sort_key + 1024
+        n.page_count = n.page_count + 1
+        return page
+    end
+
+    function store:softDeletePage(notebook_id, page_id)
+        local n, p = activeNotebook(notebook_id), activePage(page_id)
+        if not n or not p then return nil, "not_found" end
+        if n.page_count <= 1 then return nil, "last_page" end
+        local selected = self:previousPage(p) or self:nextPage(p)
+        p.deleted_at = 1
+        n.page_count = n.page_count - 1
+        if n.current_page_id == p.id then n.current_page_id = selected.id end
+        return selected
+    end
+
+    function store:createNotebook(spec)
+        if self.fail_create_notebook then return nil, self.fail_create_notebook end
+        local id = #self.notebooks + 1
+        local page = {
+            id = 10 + #self.pages + 1, notebook_id = id, sort_key = 1024,
+            logical_w = spec.logical_w, logical_h = spec.logical_h,
+            template_kind = spec.template_kind or "blank",
+        }
+        local notebook = {
+            id = id, title = spec.title, page_count = 1,
+            next_sort_key = 2048, current_page_id = page.id,
+        }
+        self.notebooks[#self.notebooks + 1] = notebook
+        self.pages[#self.pages + 1] = page
+        return notebook, page
+    end
+
+    function store:renameNotebook(id, title)
+        local n = activeNotebook(id)
+        if not n then return nil, "not_found" end
+        n.title = title
+        return true
+    end
+
+    function store:softDeleteNotebook(id)
+        local n = activeNotebook(id)
+        if not n then return nil, "not_found" end
+        n.deleted_at = 1
+        return true
+    end
+
+    function store:purgeDeletedBatch()
+        self.calls.purge = self.calls.purge + 1
+        return { chunks = 0, strokes = 0, pages = 0, notebooks = 0, changed = 0 }
+    end
+
+    return store
+end
+
 --[[--
 A manual scheduler standing in for UIManager:nextTick.
 
@@ -980,6 +1204,10 @@ function support.install()
 
     local Device = { model = "Emulator", screen = support.newScreen(), input = support.newInput() }
     function Device:isSDL() return self._is_sdl == true end
+    function Device:hasKeys() return false end
+    function Device:hasDPad() return false end
+    function Device:hasKeyboard() return false end
+    function Device:isTouchDevice() return true end
     env.Device = Device
 
     local UIManager = { _window_stack = {}, shown = {}, dirty = {}, _queue = {} }
@@ -1012,7 +1240,14 @@ function support.install()
             if self._window_stack[i].widget == w then table.remove(self._window_stack, i) end
         end
     end
-    function UIManager:setDirty(w, mode) self.dirty[#self.dirty + 1] = { w, mode } end
+    function UIManager:setDirty(w, mode, region, dither)
+        if region ~= nil then
+            assert(type(region.openIntersectWith) == "function"
+                and type(region.combine) == "function",
+                "refresh region must be a Geom")
+        end
+        self.dirty[#self.dirty + 1] = { w, mode, region, dither }
+    end
     function UIManager:flush()
         local q = self._queue
         self._queue = {}
@@ -1037,6 +1272,18 @@ function support.install()
         o = self:extend(o)
         if o.init then o:init() end
         return o
+    end
+    function WidgetContainer:getSize()
+        if self.dimen then return self.dimen end
+        return self[1] and self[1]:getSize() or { x = 0, y = 0, w = 0, h = 0 }
+    end
+    function WidgetContainer:paintTo(bb, x, y)
+        if self[1] and self[1].paintTo then self[1]:paintTo(bb, x or 0, y or 0) end
+    end
+    function WidgetContainer:free()
+        for i = 1, #self do
+            if self[i] and self[i].free then self[i]:free() end
+        end
     end
     --- KOReader's dispatch order: numeric children first, in array order, and
     --- only then our own handler. c.f. WidgetContainer:handleEvent ->
@@ -1088,8 +1335,15 @@ function support.install()
     package.preload["device"] = function() return Device end
     package.preload["ui/uimanager"] = function() return UIManager end
     package.preload["logger"] = function() return logger end
-    package.preload["gettext"] = function() return function(s) return s end end
+    local gettext = setmetatable({
+        ngettext = function(single, plural, count)
+            return count == 1 and single or plural
+        end,
+    }, { __call = function(_, text) return text end })
+    package.preload["gettext"] = function() return gettext end
     env.Blitbuffer = support.newBlitbufferModule()
+    env.Blitbuffer.COLOR_LIGHT_GRAY = "light_gray"
+    env.Blitbuffer.COLOR_DARK_GRAY = "dark_gray"
     package.preload["ffi/blitbuffer"] = function() return env.Blitbuffer end
     env.WidgetContainer = WidgetContainer
     package.preload["ui/widget/container/widgetcontainer"] = function() return WidgetContainer end
@@ -1116,13 +1370,42 @@ function support.install()
     local Geom = {}
     Geom.__index = Geom
     function Geom:new(o) return setmetatable(o or {}, Geom) end
+    function Geom:copy()
+        return Geom:new{ x = self.x, y = self.y, w = self.w, h = self.h }
+    end
+    function Geom:intersectWith(other)
+        return self.x < other.x + other.w and other.x < self.x + self.w
+            and self.y < other.y + other.h and other.y < self.y + self.h
+    end
+    function Geom:openIntersectWith(other)
+        return self.x <= other.x + other.w and other.x <= self.x + self.w
+            and self.y <= other.y + other.h and other.y <= self.y + self.h
+    end
+    function Geom:combine(other)
+        local left, top = math.min(self.x, other.x), math.min(self.y, other.y)
+        local right = math.max(self.x + self.w, other.x + other.w)
+        local bottom = math.max(self.y + self.h, other.y + other.h)
+        return Geom:new{ x = left, y = top, w = right - left, h = bottom - top }
+    end
     package.preload["ui/geometry"] = function() return Geom end
 
     package.preload["ui/size"] = function()
         return {
             radius = { button = 4, window = 6 },
             border = { window = 2 },
-            padding = { small = 2, large = 8 },
+            padding = { default = 5, small = 2, large = 8, button = 2 },
+            item = { height_default = 30, height_big = 40, height_large = 50 },
+            span = { horizontal_default = 10, vertical_default = 2 },
+        }
+    end
+
+    local fake_now = 0
+    package.preload["ui/time"] = function()
+        return {
+            now = function() return fake_now end,
+            ms = function(value) return value * 1000 end,
+            s = function(value) return value * 1000000 end,
+            _set = function(value) fake_now = value end,
         }
     end
 
@@ -1132,6 +1415,8 @@ function support.install()
         o = setmetatable(o or {}, Button)
         o.texts = { o.text }
         o.seen = {}
+        if o.enabled == nil then o.enabled = true end
+        o.frame = { invert = false }
         return o
     end
     --- Records the offer and declines it. The stub has no hit rectangle of its
@@ -1142,8 +1427,14 @@ function support.install()
         return false
     end
     function Button:setText(text) self.text = text; self.texts[#self.texts + 1] = text end
-    function Button:getSize() return { w = self.width or 60, h = 30 } end
-    function Button:paintTo() end
+    function Button:getSize() return { w = self.width or 60, h = self.height or 30 } end
+    function Button:paintTo(_, x, y)
+        if self.enabled_func then self.enabled = self.enabled_func() and true or false end
+        self.dimen = { x = x or 0, y = y or 0, w = self.width or 60, h = self.height or 30 }
+    end
+    function Button:enable() self.enabled = true end
+    function Button:disable() self.enabled = false end
+    function Button:free() end
     package.preload["ui/widget/button"] = function() return Button end
 
     local function sizedContainer(name)
@@ -1178,6 +1469,113 @@ function support.install()
     end
     package.preload["ui/widget/container/framecontainer"] = function() return sizedContainer("frame") end
     package.preload["ui/widget/verticalgroup"] = function() return sizedContainer("vgroup") end
+
+    local HorizontalGroup = sizedContainer("hgroup")
+    function HorizontalGroup:getSize()
+        local w, h = 0, 0
+        for i = 1, #self do
+            local size = self[i]:getSize()
+            w = w + size.w
+            if size.h > h then h = size.h end
+        end
+        return { w = w, h = h }
+    end
+    function HorizontalGroup:paintTo(bb, x, y)
+        local offset = 0
+        for i = 1, #self do
+            self[i]:paintTo(bb, (x or 0) + offset, y or 0)
+            offset = offset + self[i]:getSize().w
+        end
+    end
+    package.preload["ui/widget/horizontalgroup"] = function() return HorizontalGroup end
+
+    local FocusManager = WidgetContainer:extend{}
+    package.preload["ui/widget/focusmanager"] = function() return FocusManager end
+
+    local GestureRange = {}
+    function GestureRange:new(o) return o or {} end
+    package.preload["ui/gesturerange"] = function() return GestureRange end
+
+    local BD = {
+        auto = function(text) return text end,
+        mirroredUILayout = function() return false end,
+    }
+    package.preload["ui/bidi"] = function() return BD end
+
+    local ffiUtil = {}
+    function ffiUtil.template(text, ...)
+        local args = { ... }
+        return (text:gsub("%%(%d+)", function(index)
+            return tostring(args[tonumber(index)] or "")
+        end))
+    end
+    package.preload["ffi/util"] = function() return ffiUtil end
+
+    local Font = {}
+    function Font:getFace(name, size) return { name = name, size = size or 20 } end
+    package.preload["ui/font"] = function() return Font end
+
+    local TextWidget = {}
+    TextWidget.__index = TextWidget
+    function TextWidget:new(o) return setmetatable(o or {}, TextWidget) end
+    function TextWidget:getSize()
+        return { w = math.min(self.max_width or 1000, #(self.text or "") * 9),
+            h = self.face and self.face.size or 20 }
+    end
+    function TextWidget:paintTo() end
+    function TextWidget:free() end
+    package.preload["ui/widget/textwidget"] = function() return TextWidget end
+
+    local VerticalSpan = {}
+    function VerticalSpan:new(o)
+        o = o or {}
+        function o:getSize() return { w = 0, h = self.width or 0 } end
+        function o:paintTo() end
+        function o:free() end
+        return o
+    end
+    package.preload["ui/widget/verticalspan"] = function() return VerticalSpan end
+
+    local TitleBar = {}
+    TitleBar.__index = TitleBar
+    function TitleBar:new(o) return setmetatable(o or {}, TitleBar) end
+    function TitleBar:getHeight() return 50 end
+    function TitleBar:getSize() return { w = Device.screen:getWidth(), h = 50 } end
+    function TitleBar:paintTo() end
+    function TitleBar:handleEvent() return false end
+    function TitleBar:free() end
+    package.preload["ui/widget/titlebar"] = function() return TitleBar end
+
+    local InputDialog = {}
+    function InputDialog:new(o)
+        o = o or {}
+        o._text = o.input or ""
+        function o:getInputText() return self._text end
+        function o:setInputText(text) self._text = text end
+        function o:handleEvent() return true end
+        return o
+    end
+    package.preload["ui/widget/inputdialog"] = function() return InputDialog end
+
+    local MultiInputDialog = {}
+    function MultiInputDialog:new(o)
+        o = o or {}
+        o._values = {}
+        for i = 1, #(o.fields or {}) do o._values[i] = o.fields[i].text or "" end
+        function o:getFields() return self._values end
+        function o:addWidget(widget) self.added_widget = widget end
+        function o:handleEvent() return true end
+        return o
+    end
+    package.preload["ui/widget/multiinputdialog"] = function() return MultiInputDialog end
+
+    local RadioButtonTable = {}
+    function RadioButtonTable:new(o)
+        o = o or {}
+        function o:getSize() return { w = self.width or 400, h = 50 } end
+        return o
+    end
+    package.preload["ui/widget/radiobuttontable"] = function() return RadioButtonTable end
 
     local Event = {}
     function Event:new(name, ...)
@@ -1234,6 +1632,10 @@ function support.newPlugin(FingerInk, env, opts)
     -- turns pages when a gesture it should never have seen reaches it.
     local ui = {
         doc_settings = doc_settings,
+        -- ReaderUI always exposes a document, including fixed-layout books.
+        -- Most input tests do not need a reflowable document, so use a small
+        -- inert one unless the caller supplies the EPUB fake below.
+        document = opts.document or { file = opts.file or "/books/test.pdf" },
         menu = { registerToMainMenu = function() end },
         handleEvent = function(_, event)
             env.reader_events[#env.reader_events + 1] = event.handler
@@ -1243,7 +1645,6 @@ function support.newPlugin(FingerInk, env, opts)
     -- The reflowable-document surface. Absent by default, so every existing
     -- test still describes a plugin with no canvas session at all.
     if opts.document then
-        ui.document = opts.document
         ui.rolling = opts.rolling ~= false and {} or nil
         -- In the document's settings, where ReaderUI puts it, not on ReaderUI.
         doc_settings.data.partial_md5_checksum = opts.partial_md5 or "test-md5"
@@ -1261,6 +1662,19 @@ function support.newPlugin(FingerInk, env, opts)
     env.UIManager._window_stack = { { widget = ui } }
     local plugin = FingerInk:new{ ui = ui, view = view }
     return plugin
+end
+
+--- Build the exact shape FileManager gives a non-document-only plugin: only
+--- `ui` and its menu, with no document, view or doc_settings conveniences.
+--- FingerInk remains document-only in production for now, so tests instantiate
+--- this host explicitly through the future activation seam.
+function support.newFileManagerPlugin(FingerInk, env)
+    local ui = {
+        menu = { registerToMainMenu = function() end },
+        handleEvent = function() return true end,
+    }
+    env.UIManager._window_stack = { { widget = ui } }
+    return FingerInk:new{ ui = ui }
 end
 
 return support

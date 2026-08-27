@@ -38,6 +38,17 @@ function Stack.below(widget)
     end
 end
 
+--- Return the topmost non-toast window above `widget`, if one exists.
+function Stack.above(widget)
+    local stack = UIManager._window_stack
+    local above
+    for i = #stack, 1, -1 do
+        local w = stack[i].widget
+        if w == widget then return above end
+        if not above and not w.toast then above = w end
+    end
+end
+
 --[[--
 Pass an input event on to the window underneath, if this is one of the events
 that would otherwise stop here.

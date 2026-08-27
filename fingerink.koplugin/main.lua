@@ -28,7 +28,10 @@ local _ = require("gettext")
 
 local CanvasSession = require("ink_canvas_session")
 local Capture = require("ink_capture")
+local InputController = require("ink_input_controller")
 local InkBar = require("ink_bar")
+local NotebookController = require("ink_notebook_controller")
+local NotebookInput = require("ink_notebook_input")
 local Render = require("ink_render")
 local Router = require("ink_contact_router")
 local Stack = require("ink_stack")
@@ -70,22 +73,36 @@ local INPUT_ERRORS = {
 
 local FingerInk = WidgetContainer:extend{
     name = "fingerink",
-    is_doc_only = true,
+    is_doc_only = false,
 }
 
 -- ---------------------------------------------------------------- lifecycle
 
 function FingerInk:init()
+    -- FileManager only passes `ui`; ReaderUI additionally exposes document,
+    -- view and doc_settings. Keep notebook construction document-free so the
+    -- same library can be opened safely from either host.
+    self.is_docless = self.ui.document == nil
+    self.notebooks = nil
+    self.notebook_input = nil
+    self.notebook_ui = nil
+    self.screen_resize_serial = 0
+    self.screen_resize_pending = false
     self.drawing = false
     self.eraser = false
     self.bar = nil
     self.pen_width = G_reader_settings:readSetting("fingerink_pen_width") or PEN_MEDIUM
     self.live_fast = G_reader_settings:readSetting("fingerink_live_fast") ~= false
     self.bar_side = G_reader_settings:readSetting("fingerink_bar_side") or "right"
+    self.notebook_rail_side = G_reader_settings:readSetting("fingerink_notebook_rail_side")
+    if self.notebook_rail_side ~= "left" and self.notebook_rail_side ~= "right" then
+        self.notebook_rail_side = "right"
+    end
 
     local mode = G_reader_settings:readSetting(MODE_KEY)
     self.input_mode = INPUT_MODES[mode] and mode or "auto"
     self.input_backend = nil
+    self.input_lease = nil
 
     self.contacts = {}
     self.n_contacts = 0
@@ -121,15 +138,113 @@ function FingerInk:init()
     --- driver at all, so it hands one in.
     self.canvas_repository = nil
 
+    self.ui.menu:registerToMainMenu(self)
+    if self.is_docless then return end
+
     self.store = Store.new(self.ui.doc_settings:readSetting(SETTING_KEY))
 
     self:registerDispatcher()
-    self.ui.menu:registerToMainMenu(self)
     self.view:registerViewModule("fingerink", self)
 
     if G_reader_settings:readSetting("fingerink_bar_shown") ~= false then
         UIManager:nextTick(function() self:setBarShown(true) end)
     end
+end
+
+--- Return the headless notebook domain without opening its SQLite database.
+function FingerInk:notebookController()
+    if self.notebooks then return self.notebooks end
+    self.notebook_input = NotebookInput.new{
+        get_mode = function() return self.input_mode end,
+        get_pen_width = function() return self.pen_width end,
+        get_eraser = function() return self.eraser end,
+        on_error = function(reason) self:notify(reason or "input_failed") end,
+    }
+    local adapter = self.notebook_input
+    self.notebooks = NotebookController.new{
+        require_viewport = true,
+        schedule = function(fn) UIManager:nextTick(fn) end,
+        scheduleIn = function(delay, fn) UIManager:scheduleIn(delay, fn) end,
+        unschedule = function(fn) UIManager:unschedule(fn) end,
+        notify = function(text) self:notify(text) end,
+        before_open = function(_, controller)
+            return self:prepareNotebookHandoff(controller)
+        end,
+        session_opts = {
+            capture_spec = function(session, page, transform)
+                return adapter:captureSpec(session, page, transform)
+            end,
+            abort_contact = function(session) return adapter:abort(session) end,
+        },
+    }
+    return self.notebooks
+end
+
+function FingerInk:notebookUI()
+    if self.notebook_ui then return self.notebook_ui end
+    local NotebookUI = require("ink_notebook_ui")
+    self.notebook_ui = NotebookUI.new{
+        plugin = self,
+        controller = self:notebookController(),
+    }
+    return self.notebook_ui
+end
+
+function FingerInk:openNotebookLibrary()
+    return self:notebookUI():openLibrary()
+end
+
+function FingerInk:setNotebookRailSide(side)
+    if side ~= "left" and side ~= "right" then return nil, "bad_side" end
+    if self.notebook_rail_side == side then return true end
+    self.notebook_rail_side = side
+    G_reader_settings:saveSetting("fingerink_notebook_rail_side", side)
+    return true
+end
+
+function FingerInk:prepareNotebookHandoff(controller)
+    if self.canvas_open then
+        local closed, close_err = self:closeCanvas()
+        if not closed then return nil, close_err end
+    end
+    local lease = self.input_lease
+    if lease and lease:hasActiveContact() then return nil, "contact_active" end
+    if lease then
+        if not self.is_docless and self.drawing then
+            self:setDrawing(false)
+            if self.input_lease then return nil, "release_failed" end
+        else
+            local released, release_err = lease:release()
+            if not released then return nil, release_err end
+            self.input_lease = nil
+        end
+    end
+    local owner = InputController:activeOwner()
+    if owner and owner ~= controller then return nil, "already_installed" end
+    return true
+end
+
+-- Public UI seam: visual code supplies only regions and
+-- repaint policy. Hardware input and persistence stay below it.
+function FingerInk:configureNotebookInteraction(opts)
+    local controller = self:notebookController()
+    opts = opts or {}
+    local configured, configure_err = controller:configureInteraction{
+        viewport_provider = opts.viewport_provider,
+        transform_factory = opts.transform_factory,
+        fit_rect = opts.fit_rect,
+        clip_rect = opts.clip_rect,
+        align_x = opts.align_x,
+        align_y = opts.align_y,
+        on_page_ready = opts.on_page_ready,
+        on_dirty_box = opts.on_dirty_box,
+        on_state_changed = opts.on_state_changed,
+        on_durable_change = opts.on_durable_change,
+        on_library_changed = opts.on_library_changed,
+    }
+    if not configured then return nil, configure_err end
+    self.notebook_input:configure(opts)
+    return true
 end
 
 function FingerInk:registerDispatcher()
@@ -160,7 +275,7 @@ get one -- a canvas anchored by xpointer means nothing in a fixed layout, and
 `anchor_kind = 'page'` is reserved for when it does.
 ]]
 function FingerInk:onReaderReady(config)
-    if self.session or not self.ui.rolling or not self.ui.document then return end
+    if self.is_docless or self.session or not self.ui.rolling or not self.ui.document then return end
 
     -- The checksum lives in the document's settings, not on ReaderUI, which
     -- computes it there on its way to emitting this event
@@ -212,7 +327,16 @@ function FingerInk:onCloseWidget()
 end
 
 function FingerInk:onSuspend()
-    self:setDrawing(false)
+    if self.notebooks then self.notebooks:onSuspend() end
+    if not self.is_docless then self:setDrawing(false) end
+end
+
+function FingerInk:onResume()
+    if self.notebooks then
+        local resumed, resume_err = self.notebooks:onResume()
+        if not resumed then logger.warn("FingerInk: notebook resume failed:", resume_err) end
+    end
+    if self.notebook_ui then self.notebook_ui:onResume() end
 end
 
 --[[--
@@ -222,6 +346,25 @@ leaving it dangling loses it silently and leaks contact state into whatever
 document is opened next in the same session.
 ]]
 function FingerInk:teardown()
+    self.screen_resize_serial = self.screen_resize_serial + 1
+    self.screen_resize_pending = false
+    if self.notebook_ui then
+        local closed, close_err = self.notebook_ui:shutdown()
+        if not closed then
+            logger.warn("FingerInk: notebook UI close failed during teardown:", close_err)
+        end
+        self.notebook_ui = nil
+        self.notebooks = nil
+        self.notebook_input = nil
+    elseif self.notebooks then
+        local closed, close_err = self.notebooks:shutdown()
+        if not closed then
+            logger.warn("FingerInk: notebook close failed during teardown:", close_err)
+        end
+        self.notebooks = nil
+        self.notebook_input = nil
+    end
+    if self.is_docless then return end
     -- Before the session goes: abortStroke reaches the sheet's stroke through
     -- it, and an unfinished stroke is not in any store yet.
     self:abortStroke()
@@ -231,7 +374,8 @@ function FingerInk:teardown()
         self.router = nil
         self.canvas_open = false
     end
-    Capture:remove()
+    if self.input_lease then self.input_lease:release() end
+    self.input_lease = nil
     self:resetContacts()
     self:resetStylusState()
     self.input_backend = nil
@@ -250,6 +394,13 @@ The durable-save gate for canvas ink.
 document closed. Saving in `onSuspend` would already be too late.
 ]]
 function FingerInk:onSaveSettings()
+    if self.notebooks then
+        local saved, save_err = self.notebooks:onFlushSettings()
+        if not saved then
+            logger.warn("FingerInk: SaveSettings notebook flush failed:", save_err)
+        end
+    end
+    if self.is_docless then return end
     if self.session then
         local saved, save_err = self.session:flush()
         if not saved then
@@ -274,7 +425,19 @@ function FingerInk:rebuildBar()
     UIManager:nextTick(function() self:setBarShown(true) end)
 end
 
-function FingerInk:onScreenResize()
+function FingerInk:_applyScreenResize()
+    if self.notebook_ui then
+        local resized, resize_err = self.notebook_ui:onScreenResize()
+        if not resized then
+            logger.warn("FingerInk: notebook UI resize failed:", resize_err)
+        end
+    elseif self.notebooks then
+        local resized, resize_err = self.notebooks:onScreenResize()
+        if not resized then
+            logger.warn("FingerInk: notebook resize failed:", resize_err)
+        end
+    end
+    if self.is_docless then return end
     local overlay = self.session and self.session:overlay()
     if overlay then
         overlay:onScreenResize()
@@ -284,8 +447,27 @@ function FingerInk:onScreenResize()
     end
 end
 
+function FingerInk:onScreenResize()
+    -- A real ScreenResize/SetDimensions after rotation supersedes the deferred
+    -- SetRotationMode reconciliation below.
+    self.screen_resize_serial = self.screen_resize_serial + 1
+    self.screen_resize_pending = false
+    return self:_applyScreenResize()
+end
+
 function FingerInk:onSetRotationMode()
-    self:onScreenResize()
+    if self.screen_resize_pending then return end
+    self.screen_resize_pending = true
+    self.screen_resize_serial = self.screen_resize_serial + 1
+    local serial = self.screen_resize_serial
+    -- FileManager changes Screen dimensions after broadcasting SetRotationMode
+    -- to plugin children. Reconcile on the next tick, when the host has applied
+    -- the rotation. A subsequent ScreenResize invalidates this callback.
+    UIManager:nextTick(function()
+        if not self.screen_resize_pending or self.screen_resize_serial ~= serial then return end
+        self.screen_resize_pending = false
+        self:_applyScreenResize()
+    end)
 end
 
 -- ----------------------------------------------------------- canvas events
@@ -461,7 +643,8 @@ function FingerInk:disarmInput(err)
     logger.err("FingerInk: disarming input capture after a handler error:", err)
     self.drawing = false
     self.input_backend = nil
-    Capture:remove()
+    if self.input_lease then self.input_lease:release() end
+    self.input_lease = nil
     self:abortStroke()
     self:resetContacts()
     self:resetStylusState()
@@ -499,22 +682,29 @@ function FingerInk:setDrawing(on)
         end
         if not self.bar then self:setBarShown(true) end
 
-        local ok
+        local lease
         if backend == "stylus" then
-            ok, reason = Capture:installStylus(
-                function(slot) return self:onStylusEvent(slot) end,
-                function(slots) return self:onStylusTouchFrame(slots) end,
-                function(err) self:disarmInput(err) end)
+            lease, reason = InputController:acquire(self, {
+                backend = "stylus",
+                stylus_handler = function(slot) return self:onStylusEvent(slot) end,
+                frame_handler = function(slots) return self:onStylusTouchFrame(slots) end,
+                has_active_contact = function() return self.stylus_active end,
+                on_error = function(err) self:disarmInput(err) end,
+            })
         else
-            ok, reason = Capture:installFinger(
-                function(slots) return self:onTouchFrame(slots) end,
-                function(err) self:disarmInput(err) end)
+            lease, reason = InputController:acquire(self, {
+                backend = "finger",
+                frame_handler = function(slots) return self:onTouchFrame(slots) end,
+                has_active_contact = function() return self.n_contacts > 0 end,
+                on_error = function(err) self:disarmInput(err) end,
+            })
         end
         -- Drawing only goes on after a complete install, never before.
-        if not ok then
+        if not lease then
             return self:reportInputFailure(reason)
         end
 
+        self.input_lease = lease
         self.input_backend = backend
         self.drawing = true
         if self.router then self.router:setBackend(backend) end
@@ -522,7 +712,8 @@ function FingerInk:setDrawing(on)
         self:notePenUnavailable(backend)
     else
         self:abortStroke()
-        Capture:remove()
+        if self.input_lease then self.input_lease:release() end
+        self.input_lease = nil
         self:resetContacts()
         self:resetStylusState()
         self.input_backend = nil
@@ -553,17 +744,26 @@ function FingerInk:notePenUnavailable(backend)
 end
 
 function FingerInk:setInputMode(mode)
-    if not INPUT_MODES[mode] or mode == self.input_mode then return end
+    if not INPUT_MODES[mode] or mode == self.input_mode then return true end
     -- The menu item is disabled while drawing, but the guard belongs here:
     -- swapping backends inside a live contact sequence tears down capture
     -- mid-stroke, and the menu is not the only possible caller.
     if self.drawing then
         logger.warn("FingerInk: refusing to change input mode while drawing")
-        return
+        return nil, "contact_active"
     end
-    self.input_mode = mode
-    G_reader_settings:saveSetting(MODE_KEY, mode)
+    local function apply()
+        self.input_mode = mode
+        G_reader_settings:saveSetting(MODE_KEY, mode)
+    end
+    if self.notebooks and self.notebooks:activeSession() then
+        local changed, change_err = self.notebooks:reconfigureInput(apply)
+        if not changed then return nil, change_err end
+    else
+        apply()
+    end
     logger.info("FingerInk: input mode set to", mode)
+    return true
 end
 
 function FingerInk:setEraser(on)
@@ -1287,14 +1487,17 @@ function FingerInk:_deferCanvasCaptureStop(canvas, repair_live_stroke)
     if not (self.canvas_open and active and canvas and active.id == canvas.id) then
         return
     end
-    if not self.drawing and not Capture.active then
+    if not self.drawing and not self.input_lease then
         local overlay = self.session and self.session:overlay()
         if self.bar then self.bar:update(false) end
         if overlay then UIManager:setDirty(overlay, "ui") end
         return
     end
     local generation = self.drawing_generation or 0
-    Capture:removeDeferred(function()
+    local lease = self.input_lease
+    if not lease then return end
+    lease:releaseDeferred(function()
+        if self.input_lease == lease then self.input_lease = nil end
         if (self.drawing_generation or 0) ~= generation then return end
         local still_active = self.session and self.session:activeCanvas()
         if not (self.canvas_open and still_active and still_active.id == canvas.id) then
@@ -1379,6 +1582,11 @@ end
 
 function FingerInk:closeCanvas()
     if not self.canvas_open then return end
+    -- Keep the visible sheet, its retry queue and ReaderUI capture intact if
+    -- durability refuses the transition. Only dismantle the surface after the
+    -- same explicit save gate used by document lifecycle events succeeds.
+    local durable, durable_err = self.session:flush()
+    if not durable then return nil, durable_err end
     self:abortCanvasStroke()
     self:setDrawing(false)
     local ok, err = self.session:closeCanvas()
@@ -1855,10 +2063,22 @@ function FingerInk:canvasMenu()
 end
 
 function FingerInk:addToMainMenu(menu_items)
+    if self.is_docless then
+        menu_items.fingerink_notebooks = {
+            text = _("Notebooks"),
+            sorting_hint = "more_tools",
+            callback = function() self:openNotebookLibrary() end,
+        }
+        return
+    end
     menu_items.fingerink = {
         text = _("Finger Ink"),
         sorting_hint = "more_tools",
         sub_item_table = {
+            {
+                text = _("Notebooks"),
+                callback = function() self:openNotebookLibrary() end,
+            },
             {
                 -- Deliberately closes the menu: turning drawing on swallows
                 -- single-finger taps, so an open menu would be unusable.

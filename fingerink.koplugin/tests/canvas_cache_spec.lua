@@ -115,13 +115,13 @@ return function(ctx)
         t:eq(#dest.blits, 0, "a partial raster is not presented as complete ink")
     end)
 
-    t:case("a cursor that cannot close does not declare the sheet ready", function()
+    t:case("scheduler batches use keyed reads rather than retained cursors", function()
         local cache, store, sched = fixture{ strokes = { bar(10, 10) } }
-        store.fail_stroke_cursor_close = "cursor close failed"
+        store.openStrokeCursor = function() error("cache retained a cursor", 0) end
         cache:open()
         sched:drain()
-        t:eq(cache:stateName(), "load_failed", "cursor lifetime failure is visible")
-        t:eq(cache:isReady(), false, "no complete generation was announced")
+        t:eq(cache:stateName(), "ready", "keyed statement closed in its call")
+        t:eq(cache:isReady(), true, "no cursor survived a scheduler turn")
     end)
 
     t:case("corrupt stroke metadata fails closed before reaching the grid", function()
