@@ -530,6 +530,144 @@ A finger already resting when the pen lands is cancelled: the single deliberate
 exception to the latch, because a hand turning the page mid-stroke is the
 failure the stylus route exists to prevent.
 
+## ADR-18 — Standalone notebooks are a separate bounded domain
+
+**Context.** A notebook has no book identity or text anchor. Reusing the EPUB
+canvas tables would make every operation carry meaningless book fields and
+would couple library scale, migrations and deletion policy to an unrelated
+feature. It would also leave FileManager unable to construct the plugin safely,
+because the original host assumed `document`, `view` and `doc_settings`.
+
+**Decision.** Standalone notebooks use
+`DataStorage:getSettingsDir() .. "/fingerink-notebooks.sqlite3"` and a headless
+`NotebookController → NotebookSession → InkSurfaceSession` stack. EPUB canvases
+compose the same `InkSurfaceSession`, but keep their existing repository,
+anchors, overlay and public behavior. `main.lua` has a document-free host seam;
+the plugin is discoverable in FileManager with `is_doc_only = false`, while its
+document-only initialization still returns before touching ReaderUI fields.
+
+Only one surface and one input lease may be active. A page switch first rejects
+an active contact, releases capture, aborts unfinished ink and flushes. It frees
+the old raster only after the flush succeeds, loads the destination in bounded
+ticks, persists `current_page_id` only after that raster reaches `ready`, and
+only then reacquires capture. The process-wide lease sits above `ink_capture`,
+so a stale FileManager instance cannot remove a newer ReaderUI hook.
+
+The notebook has its own hardware-neutral input adapter, not a second widget
+state machine. It converts pen, physical eraser and the compatibility finger
+route into logical surface operations, converting screen-sized nib and eraser
+preferences once at contact start. Coordinate-less downs remain unclassified
+and fail closed until fresh geometry arrives; any contact already forwarded to
+GestureDetector is explicitly retired if capture is aborted. Automatic mode selects the modern route
+only when KOReader exposes both `registerStylusCallback` and
+`wacom_protocol`; callback availability by itself is not proof that the current
+device has a pen. A ReaderUI notebook opening preflights repository metadata and
+geometry, durably closes any open EPUB sheet and frees its raster before it
+stops book Draw and takes the single lease. A preflight or EPUB flush failure
+does not open the notebook. Closing it does not silently restore the prior mode.
+
+Ordering is append-only in v1. `next_sort_key` makes page append O(1), while
+library and page traversal use capped keyset queries. Lists never fetch stroke
+or chunk payloads. A notebook page keeps logical dimensions and is aspect-fit
+into separate fit/clip rectangles, so rotation changes the transform and
+raster, never stored coordinates.
+
+The visual layer supplies those rectangles through a controller viewport
+provider, and the production host refuses to capture without it. The same
+contract supplies touch and stylus overlay pass-through; an overlay that
+appears mid-contact cancels live pen ink without returning a half-contact to
+GestureDetector. Dirty notifications expose clipped screen coordinates and a
+separate cache-source rectangle. Rotation without a current viewport is refused, and every candidate
+transform is validated before the old raster is closed (and, for append,
+before the page row is inserted), including a non-empty page/clip intersection. Invalid window geometry therefore cannot
+destroy the last usable page or manufacture an invisible blank one.
+
+Deletion is deliberately two-stage and has no large `ON DELETE CASCADE`.
+Notebook and page actions write tombstones and adjust their small metadata
+transactionally. Stroke Undo also tombstones its single metadata row: deleting
+the row physically would either violate its chunk foreign keys or synchronously
+walk every chunk of a very long stroke. A resumable leaf-first purger removes
+at most a bounded number of chunks, then strokes, pages and notebooks per call.
+Dedicated tombstone indexes start each discovery at deleted rows, and a reverse
+`notebook_state(current_page_id)` index keeps the page-reference safety check
+local instead of scanning the library state. It never loops to empty the trash
+inside one callback and never runs `VACUUM` from an interactive path. The
+controller schedules one batch per KOReader tick and pauses it during first
+paint, save failure or an active contact. A committed ink batch also touches
+page and notebook recency once inside the same transaction; stylus samples do
+not generate metadata writes.
+
+**Consequences.** A library with thousands of pages does not imply thousands
+of rasters, point decodes or writes in one tick. A failed COMMIT preserves the
+active cache and queue for retry and prevents page navigation. A failed
+destination load leaves the last ready page in `notebook_state`; deleting the
+current page is committed only after its neighbour has loaded successfully.
+
+Current-page writes participate in the same durable gate as stroke writes:
+navigation, append, resize and normal close cannot move past either failure.
+Suspend releases capture and Resume reacquires it only in a healthy state. A
+callback failure remains `input_failed` across resume and navigation until a
+deliberate retry, instead of retaining or silently recreating a dead lease.
+Read-only future schemas navigate in memory without current-page writes and
+reject append/delete before disturbing the active view. Persisted stroke chunks
+are fetched by keyed statements that close within one scheduler turn, so no
+read cursor or WAL snapshot is retained between ticks. On an unavoidable host teardown, cleanup is stronger than the
+normal close gate: the process-wide callback and database are always released;
+only after reporting a final COMMIT failure may the in-memory retry queue be
+discarded.
+
+The databases are intentionally not unified and migrations remain separate.
+Backup/export/sync, trash restoration, page reordering and the visible notebook
+features outside v1 are future work. KOReader cannot veto every external process
+close after a failed COMMIT, so that residual lifecycle limit remains visible
+rather than being disguised as durability.
+
+## ADR-19 — Notebook UI uses two bounded full-screen windows
+
+**Context.** A standalone notebook must be reachable without ReaderUI, keep pen
+capture away from the library, expose a separate action target for every row,
+and remain usable on e-ink screens with different DPI and physical sizes. A
+single list/editor widget would blur lifecycle ownership and make it easy for a
+covered library to query or repaint while ink is active.
+
+**Decision.** FileManager and ReaderUI both open one coordinator-owned,
+full-screen library. The library is a `FocusManager` rather than a `Menu`: each
+row has an independent **Actions** target, it loads metadata through keyset
+batches capped at 50, and an error while fetching a later batch keeps the
+current rows visible. Opening a row delays every input side effect until the
+editor has published valid viewport and pass-through regions.
+
+The full-screen editor is stacked above, and the library below is only marked
+stale while covered. Returning closes the notebook through its durable domain
+gate first, then removes the editor and refreshes the library once. Rotation
+rebuilds the editor immediately but defers the covered library's layout. A
+generation token makes scheduled work from a closed window inert.
+
+The editor owns a bounded paper viewport, an information strip and a left/right
+control rail. Physical targets use `Screen:scaleByDPI` with a 10 mm goal;
+handedness is a user preference independent of bidirectional text layout. The
+paper transform owns aspect fit and clipping, so UI chrome never becomes ink
+space. The rail, error band and modal area are published to both touch and
+stylus routing before they are shown. A short guard after stylus lift prevents
+the same physical pen action from also activating a touch control.
+
+Paint and stylus callbacks use only the session's cached snapshot. Page
+neighbour availability is refreshed when a page becomes ready, not queried from
+the drawing path. Live ink blits the changed cache source rectangle and requests
+a matching regional fast refresh; state and chrome use UI/full refreshes. The
+v1 information strip omits Saved/Not saved instead of scheduling repeated
+status refreshes after short commit batches. Save, load and input failures
+remain explicit retry surfaces, and the editor cannot close around a failed
+durability gate.
+
+**Consequences.** Opening the library acquires no digitizer callback and
+allocates no page raster. At scale, the visible library holds at most one
+bounded metadata batch and the editor holds one page raster. The design avoids
+O(number of notebooks), O(number of pages) and SQLite work in paint or contact
+callbacks. Real Scribe hardware must still validate latency, ghosting, palm
+feel and physical control ergonomics; emulator success does not close that
+gate.
+
 ## Deferred
 
 - Scroll view mode (`paintTo` offset and page identity both change).

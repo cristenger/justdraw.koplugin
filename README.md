@@ -165,11 +165,91 @@ it read-only. Existing sheets can still be viewed and hidden, but create,
 delete, pen, eraser and undo stay disabled; no journal setting or note row is
 written by that compatibility path.
 
+## Standalone notebooks
+
+The notebook domain is implemented separately from books and drawing sheets:
+notebooks, pages, current-page state and chunked ink live in
+`settings/fingerink-notebooks.sqlite3`. It does not use book checksums,
+xpointers, document sidecars or the EPUB canvas database.
+
+Open **Notebooks** from FileManager's **More tools** menu or from
+**More tools → Finger Ink** while reading. The full-screen library creates,
+opens, renames and deletes notebooks without requiring a document. Opening a
+row keeps the library underneath a full-screen editor, so leaving the notebook
+returns to the same library instead of rebuilding the whole navigation stack.
+
+The editor presents a bounded paper viewport and a physical control rail. Pen
+input is captured only over the paper; the rail, error banner and dialogs stay
+interactive. Rail placement is an explicit left/right preference and does not
+change with the book language. Controls and rows target at least 10 mm using
+KOReader's DPI scaling, subject to the available screen geometry.
+
+The backend is designed for large libraries and dense pages:
+
+- notebook and page lists are metadata-only, keyset-paginated and capped;
+- one open page owns one raster, and changing page frees the previous raster;
+- strokes load in bounded chunk/point batches;
+- each persisted chunk is fetched by key and its SQLite statement is closed
+  inside that scheduler turn; no long-stroke cursor or WAL snapshot survives
+  between ticks;
+- a hardware-neutral input adapter maps the existing pen, physical eraser and
+  finger-compatibility routes onto the active page; Automatic selects stylus
+  only when KOReader exposes both the callback API and a Wacom device flag.
+  Nib width and eraser reach are converted from screen pixels to logical page
+  units once per contact;
+- ReaderUI validates the database, initial page and viewport before handing
+  its single process-wide input lease to the notebook. An open EPUB sheet is
+  flushed and its raster freed first; a failed flush keeps its retry surface
+  and prevents the notebook from opening. Closing a notebook deliberately
+  does not restart book drawing;
+- page order is append-only in v1, with an O(1) `next_sort_key` counter;
+- deleting a notebook, page or stroke first writes a small tombstone;
+- a controller-owned leaf-first purge runs one bounded batch per scheduler
+  turn, pauses during load, save failure or pen contact, never runs `VACUUM`,
+  and never cascades a large tree in one UI tick;
+- every committed ink batch updates page/library recency once, not once per
+  stylus sample or stroke;
+- stroke and current-page metadata failures keep the queue/cache alive, block
+  navigation, resize, editing and normal close, and remain retryable;
+- suspend releases capture and resume reacquires it only when there is no
+  pending input error. `input_failed` survives resume, page navigation and page
+  creation until `retryInput` is invoked explicitly;
+- future-schema read-only databases can navigate pages entirely in memory;
+  current-page state, append and deletion perform zero writes;
+- a forced host teardown always releases the global callback and closes SQLite;
+  if its final COMMIT fails, only then is the in-memory retry queue discarded.
+
+The UI supplies the controller with the actual page viewport, paint
+invalidation, touch pass-through and stylus-overlay regions without accessing
+SQLite or `ink_capture` directly. Dirty callbacks receive a clipped screen
+destination box plus a separate cache-source box. A control or modal inside
+the page is declared through `stylus_passthrough`; if it appears mid-stroke,
+live ink is repaired and the pen remains suppressed until lift. Resize or open
+without a viewport, and explicit fit/clip rectangles with no visible
+intersection, are rejected instead of treating screen chrome as paper.
+
+The library loads metadata in capped keyset batches of 50. Page navigation uses
+cached neighbour flags, while ink and page data keep the bounded scheduling,
+single-raster ownership and durability gates described below. UI state reads
+do not issue SQLite queries during paint or stylus callbacks.
+
+The v1 information strip intentionally omits a **Saved/Not saved** label. Ink
+remains protected by the same durable close and navigation gates, but avoiding
+that label also avoids a timer and repeated chrome refreshes after short ink
+batches on e-ink hardware.
+
+As with drawing sheets, back up the database with KOReader closed, or include
+its WAL sidecars. Notebook export, sync, trash restoration, page reordering,
+templates beyond their stored identifier, and multi-page thumbnails remain
+out of scope for this backend phase.
+
 ## Menu and gestures
 
-Top menu → More tools → Finger Ink: start drawing, show/hide the toolbar, put
-it on the left instead, input mode, pen width, refresh quality, stylus
-diagnostics, clear page, clear document.
+FileManager → More tools → Notebooks: open the standalone notebook library.
+
+Reader top menu → More tools → Finger Ink: notebooks, start drawing, show/hide
+the toolbar, put it on the left instead, input mode, pen width, refresh quality,
+stylus diagnostics, clear page, clear document.
 
 ### The pen does nothing
 
@@ -220,6 +300,10 @@ since two-finger gestures keep working while drawing.
   do not have it.
 - **Sheets are for reflowable books only.** In a PDF or another fixed layout
   the menu entry is greyed out; draw on the page instead.
+- **Standalone notebook ergonomics still require the physical Scribe gate.**
+  The emulator and automated suites verify discovery, geometry, lifecycle,
+  persistence and routing, but not Wacom latency, palm feel, e-ink ghosting or
+  whether the resize-independent control rail is comfortable on real hardware.
 - **You cannot draw over the text on a sheet.** The sheet is blank paper: the
   pen inks on it and does nothing over the book itself.
 - **Opening a sheet is refused while a book is still being indexed.** On a book
