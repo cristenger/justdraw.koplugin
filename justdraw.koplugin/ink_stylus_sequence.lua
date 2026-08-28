@@ -110,6 +110,7 @@ function Sequence.new(spec)
         on_finish = spec.on_finish or trueCallback,
         on_abort = spec.on_abort or trueCallback,
         on_contact_end = spec.on_contact_end or trueCallback,
+        on_pending_finish = spec.on_pending_finish,
         on_domain_error = spec.on_domain_error,
         drop_contact = spec.drop_contact,
 
@@ -583,6 +584,15 @@ function Sequence:_beginAndProcess(slot, id, tool, x, y, timev, reason)
     return self:_observeGeometry(x, y, timev, "begin", true)
 end
 
+--[[--
+Close a contact whose geometry was never proven.
+
+The host may pass `on_pending_finish(kind)` to hear the outcome: "dot" for a
+contact that still delivered its single lift point, "discard" for one that
+never had a position. A contact that was handed to the UI reports neither --
+a tap ending as a tap is not a collapse. Called after the outcome is fully
+decided, so it can never influence it.
+]]
 function Sequence:_finishPending(target_state, reason, x, y, timev)
     local status, a, b = self.geometry_on_lift(
         self.geometry, x, y, timev)
@@ -612,6 +622,13 @@ function Sequence:_finishPending(target_state, reason, x, y, timev)
         error("invalid stylus geometry onLift result: " .. tostring(status), 2)
     end
 
+    if self.on_pending_finish then
+        if trace_reason == "pending_dot" then
+            self.on_pending_finish("dot")
+        elseif trace_reason == "pending_discard" then
+            self.on_pending_finish("discard")
+        end
+    end
     self:_endPhysical(target_state, reason, false)
     return true, decision, trace_reason
 end

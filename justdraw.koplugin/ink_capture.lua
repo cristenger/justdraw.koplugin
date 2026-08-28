@@ -56,6 +56,14 @@ local Capture = {
     -- tool value. See eraserToolSource.
     eraser_by_button = 0,
     eraser_by_tool = 0,
+
+    -- How many contacts ended without ever proving their geometry: finished as
+    -- a single dot, or discarded with no position at all. The axis policy
+    -- collapses a contact that never moves one axis away from the previous
+    -- boundary (ADR-22), and "my underline came out a dot" is not diagnosable
+    -- from a log without these two numbers.
+    collapsed_dots = 0,
+    collapsed_discards = 0,
 }
 
 -- ------------------------------------------------------------ capability
@@ -90,6 +98,7 @@ function Capture:resolveTools(input)
     self.TOOL_ERASER      = pick(input.TOOL_TYPE_ERASER, TOOL_TYPE_ERASER)
     self.TOOL_HIGHLIGHTER = pick(input.TOOL_TYPE_HIGHLIGHTER, TOOL_TYPE_HIGHLIGHTER)
     self:resetEraserCounts()
+    self:resetCollapsedCounts()
 end
 
 --[[--
@@ -232,6 +241,33 @@ end
 function Capture:resetEraserCounts()
     self.eraser_by_button = 0
     self.eraser_by_tool = 0
+end
+
+--[[--
+A contact ended without ever proving its geometry.
+
+`kind` is "dot" when it still delivered its single lift point (an underline
+that came out a dot -- the collapse a reader will actually report) and
+"discard" when it never had a position to deliver. Counted once per contact by
+the sequence's pending-finish callback; contacts handed to the UI are not
+counted, because a tap ending as a tap is not a collapse.
+]]
+function Capture:noteCollapsedContact(kind)
+    if kind == "dot" then
+        self.collapsed_dots = self.collapsed_dots + 1
+    elseif kind == "discard" then
+        self.collapsed_discards = self.collapsed_discards + 1
+    end
+    return kind
+end
+
+function Capture:collapsedCounts()
+    return self.collapsed_dots, self.collapsed_discards
+end
+
+function Capture:resetCollapsedCounts()
+    self.collapsed_dots = 0
+    self.collapsed_discards = 0
 end
 
 --[[--

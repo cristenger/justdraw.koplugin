@@ -596,6 +596,29 @@ return function(ctx)
         t:check(session ~= nil, "the surface stayed usable throughout")
     end)
 
+    t:case("a collapsed contact is counted on the notebook surface too", function()
+        local Capture = require("ink_capture")
+        local session, _, _, spec = fixture("stylus")
+        Capture:resetCollapsedCounts()
+
+        -- Only X ever moves, so the geometry is never proven and the contact
+        -- finishes as its single lift dot.
+        spec.stylus_handler{ slot = 4, id = 1, x = 10, y = 10, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 1, x = 60, y = 10, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 1, x = 120, y = 10, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 120, y = 10, tool = 0 }
+        local dots, discards = Capture:collapsedCounts()
+        t:eq(dots, 1, "the collapse is visible from this surface as well")
+        t:eq(discards, 0, "and is not a discard")
+
+        spec.stylus_handler{ slot = 4, id = 2, x = 200, y = 200, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 2, x = 260, y = 250, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 260, y = 250, tool = 0 }
+        dots = Capture:collapsedCounts()
+        t:eq(dots, 1, "a proven stroke adds nothing")
+        t:check(session ~= nil, "the surface stayed usable throughout")
+    end)
+
     t:case("finger compatibility draws one contact and filters it", function()
         local session, _, _, spec = fixture("finger")
         t:eq(spec.backend, "finger", "legacy route selected")

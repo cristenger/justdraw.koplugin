@@ -981,6 +981,10 @@ function JustDraw:buildStylusMachine(input)
         on_finish = function(reason) return self:onStylusFinish(reason) end,
         on_abort = function(reason) return self:onStylusAbort(reason) end,
         on_contact_end = function(reason) return self:onStylusContactEnd(reason) end,
+        -- Increments two integers; cannot raise inside the raw callback.
+        on_pending_finish = function(kind)
+            Capture:noteCollapsedContact(kind)
+        end,
         on_domain_error = function(reason, phase)
             logger.warn("JustDraw: stylus contact reported", reason, phase)
         end,
@@ -1390,6 +1394,7 @@ function JustDraw:diagnosticReport()
         callback_taken = self:stylusCallbackIsForeign(input),
     }
     r.eraser_by_button, r.eraser_by_tool = Capture:eraserCounts()
+    r.collapsed_dots, r.collapsed_discards = Capture:collapsedCounts()
 
     -- The first unmet precondition, in the order the user can act on them.
     if r.mode == "finger" then
@@ -1423,6 +1428,11 @@ function JustDraw:diagnosticLines()
         -- that stuck value, not at a plugin decision.
         "Erases by held pen button: " .. tostring(r.eraser_by_button)
             .. "   by tool value: " .. tostring(r.eraser_by_tool),
+        -- A contact that never proves its geometry finishes as at most a dot
+        -- (ADR-22). "My underline came out a point" is this line being
+        -- non-zero; a hand-drawn stroke wobbles enough that it never is.
+        "Contacts that collapsed to a dot: " .. tostring(r.collapsed_dots)
+            .. "   discarded: " .. tostring(r.collapsed_discards),
     }
     if r.blocker then lines[#lines + 1] = "" ; lines[#lines + 1] = r.blocker end
     return lines, r

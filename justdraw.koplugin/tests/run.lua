@@ -683,6 +683,46 @@ t:case("an erase contact is counted once, by where the tool came from", function
     t:eq(by_tool, 1, "an ink contact adds nothing")
 end)
 
+--[[--
+The collapse ADR-22 accepts is now counted, so a log can confirm it.
+
+A contact that never moves one axis away from the previous boundary finishes as
+a single dot. That is the documented trade-off of the axis policy -- and "my
+underline came out a point" is not diagnosable from a log unless something
+counts it happening.
+]]
+t:case("a contact that collapses to a dot is counted, a stroke is not", function()
+    local p = drawingPlugin()
+    local bus = support.newSlotBus()
+    Capture:resetCollapsedCounts()
+
+    -- A contact that only ever moves X: its Y never differs from the boundary
+    -- the contact-down frame presented, so it finishes as one dot.
+    p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 1 }))
+    p:onStylusEvent(bus:set(4, { x = 200, y = 100 }))
+    p:onStylusEvent(bus:set(4, { x = 300, y = 100 }))
+    p:onStylusEvent(bus:set(4, { id = -1 }))
+    local dots, discards = Capture:collapsedCounts()
+    t:eq(dots, 1, "the axis-collapsed contact counted as a dot")
+    t:eq(discards, 0, "it had a position, so it is not a discard")
+    t:eq(#p.store:get(1), 1, "and its single dot was still delivered")
+
+    -- An ordinary two-axis stroke proves its geometry and counts nothing.
+    p:onStylusEvent(bus:set(4, { id = 4, x = 400, y = 400, tool = 1 }))
+    p:onStylusEvent(bus:set(4, { x = 500, y = 460 }))
+    p:onStylusEvent(bus:set(4, { id = -1 }))
+    dots, discards = Capture:collapsedCounts()
+    t:eq(dots, 1, "a proven stroke adds nothing")
+
+    -- A contact on the toolbar is the UI's tap, not a collapse.
+    local bar = p.bar.dimen
+    p:onStylusEvent(bus:set(4, { id = 4, x = bar.x + 5, y = bar.y + 5, tool = 1 }))
+    p:onStylusEvent(bus:set(4, { id = -1 }))
+    dots, discards = Capture:collapsedCounts()
+    t:eq(dots, 1, "a passed contact is not a collapse")
+    t:eq(discards, 0, "on either count")
+end)
+
 t:case("a re-render with nothing on the glass changes nothing", function()
     local p = drawingPlugin()
     local bus = support.newSlotBus()

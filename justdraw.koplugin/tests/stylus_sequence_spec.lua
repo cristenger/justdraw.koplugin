@@ -81,6 +81,7 @@ return function(ctx)
                 order("end:" .. reason)
                 return true
             end,
+            on_pending_finish = opts.on_pending_finish,
             on_domain_error = opts.on_domain_error or function(reason, phase)
                 log.errors[#log.errors + 1] = { reason = reason, phase = phase }
             end,
@@ -924,6 +925,49 @@ return function(ctx)
         collectgarbage("collect")
         collectgarbage("collect")
         t:eq(weak[1], nil, "slot table is collectible after feed")
+    end)
+
+    --[[--
+    The pending-finish callback names the two collapse outcomes and nothing else.
+
+    A contact whose geometry is never proven ends as at most a dot (ADR-22).
+    The host hears "dot" when the lift still delivered its single point and
+    "discard" when nothing was ever delivered; a contact that was handed to
+    the UI reports neither, because a tap ending as a tap is not a collapse.
+    ]]
+    t:case("pending finish reports dot and discard, and only those", function()
+        local outcomes = {}
+        local seq = harness{
+            geometry = pendingGeometry(true),
+            on_pending_finish = function(kind) outcomes[#outcomes + 1] = kind end,
+        }
+        seq:feed{ slot = 4, id = 1, x = 100, y = 100, tool = 1 }
+        seq:feed{ slot = 4, id = -1, x = 100, y = 100 }
+        t:eq(outcomes[1], "dot", "an unproven contact with a position is a dot")
+        t:eq(#outcomes, 1, "reported once")
+
+        local discard_seq = harness{
+            geometry = pendingGeometry(false),
+            on_pending_finish = function(kind) outcomes[#outcomes + 1] = kind end,
+        }
+        discard_seq:feed{ slot = 4, id = 2, x = 50, y = 50, tool = 1 }
+        discard_seq:feed{ slot = 4, id = -1 }
+        t:eq(outcomes[2], "discard", "one with no position is a discard")
+
+        local passed = harness{
+            geometry = pendingGeometry(true),
+            classify = function() return "pass" end,
+            on_pending_finish = function(kind) outcomes[#outcomes + 1] = kind end,
+        }
+        passed:feed{ slot = 4, id = 3, x = 10, y = 10, tool = 1 }
+        passed:feed{ slot = 4, id = -1, x = 10, y = 10 }
+        t:eq(#outcomes, 2, "a contact handed to the UI reports nothing")
+
+        -- And a sequence with no callback takes the same path unharmed.
+        local silent = harness{ geometry = pendingGeometry(true) }
+        silent:feed{ slot = 4, id = 4, x = 20, y = 20, tool = 1 }
+        t:eq(silent:feed{ slot = 4, id = -1, x = 20, y = 20 }, true,
+            "the callback is optional")
     end)
 
     t:case("function diagnostics start a new delta epoch after reset", function()

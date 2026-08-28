@@ -753,6 +753,10 @@ function Adapter:_buildStylusMachine(input)
         on_finish = function(reason) return self:_finishStylusInk(reason) end,
         on_abort = function(reason) return self:_abortStylusInk(reason) end,
         on_contact_end = function(reason) return self:_stylusContactEnd(reason) end,
+        -- Increments two integers; cannot raise inside the raw callback.
+        on_pending_finish = function(kind)
+            Capture:noteCollapsedContact(kind)
+        end,
         on_domain_error = function(reason)
             if self.on_domain_error then
                 self.on_domain_error(reason, self.active_session)
