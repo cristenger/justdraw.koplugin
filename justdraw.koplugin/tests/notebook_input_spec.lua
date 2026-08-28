@@ -13,15 +13,16 @@ return function(ctx)
         local session = Session.new{
             repository = store,
             schedule = function(fn) fn() end,
-            scheduleIn = function() end,
-            unschedule = function() end,
+            scheduleIn = opts.scheduleIn or function() end,
+            unschedule = opts.unschedule or function() end,
             fit_rect = opts.fit_rect or { x = 0, y = 0, w = 1000, h = 1400 },
             clip_rect = opts.clip_rect or opts.fit_rect
                 or { x = 0, y = 0, w = 1000, h = 1400 },
         }
         session:open(1)
         local dirties, dirty_boxes, errors, edits = 0, {}, {}, 0
-        local edit_saw_contact = {}
+        local edit_saw_contact, physical_ends = {}, {}
+        local domain_errors = {}
         local adapter
         adapter = Adapter.new{
             get_mode = function() return mode or "stylus" end,
@@ -31,6 +32,8 @@ return function(ctx)
             stylus_passthrough = opts.stylus_passthrough,
             now = opts.now,
             control_guard = opts.control_guard,
+            max_open_points = opts.max_open_points,
+            max_contact_samples = opts.max_contact_samples,
             on_dirty = function(box, kind, _, _, source)
                 dirties = dirties + 1
                 dirty_boxes[#dirty_boxes + 1] = {
@@ -41,16 +44,55 @@ return function(ctx)
                 edits = edits + 1
                 edit_saw_contact[#edit_saw_contact + 1] = adapter:hasActiveContact(session)
             end,
+            on_physical_contact_end = function(_, reason)
+                physical_ends[#physical_ends + 1] = reason
+                if opts.on_physical_contact_end then
+                    opts.on_physical_contact_end(session, reason)
+                end
+            end,
             on_error = function(reason) errors[#errors + 1] = reason end,
+            on_domain_error = function(reason, active_session)
+                domain_errors[#domain_errors + 1] = {
+                    reason = reason, session = active_session,
+                }
+                if opts.on_domain_error then
+                    opts.on_domain_error(reason, active_session)
+                end
+            end,
+            get_stylus_trace = opts.get_stylus_trace,
         }
         local spec = adapter:captureSpec(session, session:currentPage(),
             session:surface():transform())
         return session, store, adapter, spec,
             function() return dirties end, errors, dirty_boxes,
-            function() return edits end, edit_saw_contact
+            function() return edits end, edit_saw_contact, physical_ends,
+            domain_errors
     end
 
     t:describe("ink_notebook_input / hardware-neutral surface adapter")
+
+    t:case("capture lifecycle resets diagnostic contact history", function()
+        local Trace = require("ink_stylus_trace")
+        local trace = Trace.new{
+            source = "notebook", now = function() return 0 end,
+            emit = function() end,
+        }
+        trace:deltas(4, 4, 1, 10, 10, 100)
+        local _, _, adapter = fixture("stylus", {
+            get_stylus_trace = function() return trace end,
+        })
+        local dx, dy, dt = trace:deltas(4, 4, 1, 900, 700, 500)
+        t:eq(dx, nil, "new lease has no inherited x delta")
+        t:eq(dy, nil, "new lease has no inherited y delta")
+        t:eq(dt, nil, "new lease has no inherited time delta")
+
+        trace:deltas(4, 4, 1, 910, 710, 510)
+        adapter:abort()
+        dx, dy, dt = trace:deltas(4, 4, 1, 20, 30, 900)
+        t:eq(dx, nil, "abort begins another diagnostic epoch")
+        t:eq(dy, nil, "abort drops prior coordinates")
+        t:eq(dt, nil, "abort drops prior timestamp")
+    end)
 
     t:case("stylus points become one queued logical stroke", function()
         local session, _, adapter, spec, dirties, _, _, edits, edit_contacts = fixture("stylus")
@@ -66,6 +108,207 @@ return function(ctx)
         t:eq(edits(), 1, "one lightweight capability update follows the stroke")
         t:eq(edit_contacts[1], false, "capabilities update only after lift bookkeeping")
         t:eq(adapter:hasActiveContact(session), false, "lift clears gate")
+    end)
+
+    t:case("a valid live-raster token prevents repaint on stylus lift", function()
+        local session, _, _, spec = fixture("stylus")
+        local cache = session:surface():cache()
+        spec.stylus_handler{ slot = 4, id = 1, x = 10, y = 10, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 1, x = 20, y = 20, tool = 1 }
+        local before = #cache:buffer().writes
+        spec.stylus_handler{ slot = 4, id = -1, x = 20, y = 20, tool = 0 }
+        t:eq(#cache:buffer().writes, before,
+            "registration does not rasterize the finished stroke again")
+        t:eq(#cache:strokes(), 1, "metadata is still registered")
+    end)
+
+    t:case("a stale live-raster token repaints once and publishes coverage", function()
+        local session, _, _, spec, _, _, dirty_boxes = fixture("stylus")
+        local cache = session:surface():cache()
+        spec.stylus_handler{ slot = 4, id = 1, x = 10, y = 10, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 1, x = 20, y = 20, tool = 1 }
+        cache.generation = cache.generation + 1
+        local before_writes, before_dirty = #cache:buffer().writes, #dirty_boxes
+        spec.stylus_handler{ slot = 4, id = -1, x = 20, y = 20, tool = 0 }
+        t:check(#cache:buffer().writes > before_writes,
+            "generation mismatch falls back to rasterizing the stroke")
+        t:eq(#dirty_boxes, before_dirty + 1,
+            "fallback coverage is returned to the visible host")
+        t:eq(dirty_boxes[#dirty_boxes].kind, "ink", "fallback remains live ink")
+    end)
+
+    t:case("queue backpressure repairs live ink and recovers automatically", function()
+        local session, _, adapter, spec, _, errors = fixture("stylus")
+        local surface = session:surface()
+        spec.stylus_handler{ slot = 4, id = 1, x = 10, y = 10, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 10, y = 10, tool = 0 }
+        surface.queue.hard_ops = 1
+
+        spec.stylus_handler{ slot = 4, id = 2, x = 30, y = 30, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 2, x = 40, y = 40, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 40, y = 40, tool = 0 }
+        t:eq(errors[1], "queue_backpressure", "transient rejection is classified")
+        t:eq(#errors, 1, "one congestion episode reports once")
+        t:eq(surface.queue:isFailed(), false, "backpressure is not a save failure")
+        t:eq(surface:pendingWrites(), 1, "the admitted stroke remains queued")
+        t:eq(#surface:cache():strokes(), 1, "rejected live ink was repaired")
+        t:eq(adapter:hasActiveContact(session), false, "physical lift clears ownership")
+
+        t:eq(surface:flush(), true, "urgent work can commit without Retry")
+        spec.stylus_handler{ slot = 4, id = 3, x = 50, y = 50, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 50, y = 50, tool = 0 }
+        t:eq(surface:pendingWrites(), 1, "the next contact is accepted automatically")
+        t:eq(#surface:cache():strokes(), 2, "recovery keeps the durable stroke")
+    end)
+
+    t:case("mid-contact backpressure stays owned through urgent commit and lift", function()
+        local scheduler = support.newScheduler()
+        local session, _, adapter, spec, _, errors, _, _, _, physical_ends =
+            fixture("stylus", {
+                schedule = function(fn) scheduler:schedule(fn) end,
+                scheduleIn = function(delay, fn) scheduler:scheduleIn(delay, fn) end,
+                unschedule = function(fn) scheduler:unschedule(fn) end,
+            })
+        local surface = session:surface()
+        spec.stylus_handler{ slot = 4, id = 1, x = 10, y = 10, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 10, y = 10, tool = 0 }
+        surface.queue.hard_ops = 1
+        local ends_before = #physical_ends
+
+        spec.stylus_handler{ slot = 4, id = 2, x = 30, y = 30, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 2, x = 40, y = 40, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 2, x = 1200, y = 40, tool = 1 }
+        t:eq(errors[#errors], "queue_backpressure", "logical finish is rejected")
+        t:eq(#surface:cache():strokes(), 1, "rejected live stroke is repaired")
+        t:eq(adapter:hasActiveContact(session), true,
+            "physical ownership survives the logical finish")
+        t:eq(#physical_ends, ends_before, "no physical end is invented")
+        t:eq(surface:pendingWrites(), 1, "admitted operation remains queued")
+
+        scheduler:drain()
+        t:eq(surface:pendingWrites(), 0, "urgent commit drains on the next tick")
+        t:eq(adapter:hasActiveContact(session), true,
+            "commit does not release the still-supported pen")
+        t:eq(#physical_ends, ends_before, "commit is not a contact boundary")
+
+        spec.stylus_handler{ slot = 4, id = -1, x = 1200, y = 40, tool = 0 }
+        t:eq(adapter:hasActiveContact(session), false, "physical lift clears ownership")
+        t:eq(#physical_ends, ends_before + 1, "one boundary is published at lift")
+        spec.stylus_handler{ slot = 4, id = 3, x = 60, y = 60, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 60, y = 60, tool = 0 }
+        t:eq(surface:pendingWrites(), 1, "next contact recovers without Retry")
+    end)
+
+    t:case("oversized operation repairs ink and requests domain teardown", function()
+        local session, _, _, spec, _, errors, _, _, _, _, domain_errors =
+            fixture("stylus")
+        local surface = session:surface()
+        surface.queue.max_single_op_bytes = 0
+        spec.stylus_handler{ slot = 4, id = 1, x = 10, y = 10, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 10, y = 10, tool = 0 }
+        t:eq(errors[1], "operation_too_large", "visible error is classified")
+        t:eq(domain_errors[1], nil, "teardown waits for residual filtering")
+        local kept = spec.frame_handler{
+            { slot = 0, id = 8, x = 20, y = 20, tool = 0 },
+        }
+        t:eq(#kept, 0, "same-frame palm is filtered before teardown")
+        t:eq(domain_errors[1].reason, "operation_too_large",
+            "fatal seam requests deferred release")
+        t:eq(domain_errors[1].session, session, "release is bound to this session")
+        t:eq(#surface:cache():strokes(), 0, "live ink is repaired")
+        t:eq(surface.queue:isFailed(), false, "SQLite failure latch remains clear")
+    end)
+
+    t:case("fatal stylus teardown waits for the complete SYN pipeline", function()
+        local Capture = require("ink_capture")
+        local Replay = require("input_replay")
+        local input = ctx.reset{ wacom_protocol = true }
+        local session, _, _, spec = fixture("stylus", {
+            on_domain_error = function()
+                Capture:removeDeferred()
+            end,
+        })
+        session:surface().queue.max_single_op_bytes = 0
+        local installed = Capture:installStylus(
+            spec.stylus_handler, spec.frame_handler)
+        t:eq(installed, true, "real capture pipeline installed")
+        local callback = input.stylus_callback
+        local replay = Replay.new{
+            mode = "integration", input = input, capture = Capture,
+        }
+        replay:set(4, { id = 1, x = 10, y = 10, tool = Capture.TOOL_PEN })
+        replay:syn()
+
+        replay:set(4, { id = -1, x = 10, y = 10, tool = Capture.TOOL_FINGER })
+        replay:set(5, { id = 2, x = 30, y = 30, tool = Capture.TOOL_PEN })
+        replay:set(0, { id = 9, x = 20, y = 20, tool = Capture.TOOL_FINGER })
+        local _, _, dominated = replay:syn()
+        t:eq(#dominated, 2, "all stylus slots remain dominated through the frame")
+        t:eq(#input.gesture_detector.last_slots, 0,
+            "same-frame palm never reaches GestureDetector")
+        t:eq(Capture.active, false, "capture becomes inert after filtering")
+        t:eq(input.stylus_callback, callback,
+            "callback remains registered until the safe tick")
+        ctx.env.UIManager:flush()
+        t:eq(input.stylus_callback, nil, "safe tick removes the callback")
+    end)
+
+    t:case("point budget repairs the whole stroke and owns through lift", function()
+        local session, _, adapter, spec, _, errors, _, _, _, physical_ends =
+            fixture("stylus", { max_open_points = 2 })
+        spec.stylus_handler{ slot = 4, id = 1, x = 10, y = 10, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 1, x = 20, y = 20, tool = 1 }
+        t:eq(spec.stylus_handler{
+            slot = 4, id = 1, x = 30, y = 30, tool = 1,
+        }, true, "over-budget sample stays dominated")
+        t:eq(errors[1], "point_budget", "the bounded reason is reported")
+        t:eq(session:surface():pendingWrites(), 0, "no prefix is persisted")
+        t:eq(#session:surface():cache():strokes(), 0, "live prefix is repaired")
+        t:eq(adapter:hasActiveContact(session), true,
+            "lifecycle remains blocked until the physical boundary")
+        spec.stylus_handler{ slot = 4, id = -1, x = 30, y = 30, tool = 0 }
+        t:eq(physical_ends[1], "owner_lift", "one physical end is published")
+        t:eq(adapter:hasActiveContact(session), false, "lift clears the gate")
+
+        spec.stylus_handler{ slot = 4, id = 2, x = 40, y = 40, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 40, y = 40, tool = 0 }
+        t:eq(session:surface():pendingWrites(), 1, "the next contact rearms normally")
+    end)
+
+    t:case("sample budget closes eraser work without rolling accepted deletes back", function()
+        local session, _, adapter, spec, _, errors = fixture("stylus", {
+            max_contact_samples = 2,
+        })
+        spec.stylus_handler{ slot = 4, id = 1, x = 10, y = 10, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 1, x = 20, y = 20, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 20, y = 20, tool = 0 }
+        spec.stylus_handler{ slot = 4, id = 2, x = 15, y = 15, tool = 2 }
+        spec.stylus_handler{ slot = 4, id = 2, x = 16, y = 16, tool = 2 }
+        spec.stylus_handler{ slot = 4, id = 2, x = 17, y = 17, tool = 2 }
+        t:eq(errors[1], "sample_budget", "orphaned eraser contact is bounded")
+        t:eq(#session:surface():cache():strokes(), 0,
+            "erasures accepted before the cap remain applied")
+        t:eq(adapter.erase_ctx, nil, "erase context closes exactly at the cap")
+        t:eq(adapter:hasActiveContact(session), true, "ownership remains until lift")
+        spec.stylus_handler{ slot = 4, id = -1, x = 17, y = 17, tool = 0 }
+        t:eq(adapter:hasActiveContact(session), false, "lift rearms input")
+    end)
+
+    t:case("physical contact boundaries publish even without an edit", function()
+        local _, _, adapter, spec, _, _, _, edits, _, physical_ends =
+            fixture("stylus", {
+                stylus_passthrough = function(x) return x >= 400 end,
+            })
+        spec.stylus_handler{ slot = 4, id = 1, x = 450, y = 10, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 450, y = 10, tool = 0 }
+        t:eq(edits(), 0, "a control tap did not edit paper")
+        t:eq(#physical_ends, 1, "passthrough lift still publishes a boundary")
+        t:eq(physical_ends[1], "owner_lift", "boundary reason is stable")
+
+        spec.stylus_handler{ slot = 4, id = 2, tool = 1 }
+        adapter:abort()
+        t:eq(#physical_ends, 2, "external teardown publishes once")
+        t:eq(physical_ends[2], "external_abort", "teardown reason is distinct")
     end)
 
     t:case("two stylus dots at the same coordinate are both retained", function()
@@ -138,13 +381,96 @@ return function(ctx)
     end)
 
     t:case("a residual palm delays capability refresh until every contact lifts", function()
-        local _, _, _, spec, _, _, _, edits = fixture("stylus")
+        local _, _, _, spec, _, _, _, edits, _, physical_ends = fixture("stylus")
         spec.stylus_handler{ slot = 4, id = 1, x = 10, y = 10, tool = 1 }
         spec.frame_handler{ { slot = 0, id = 2, x = 20, y = 20, tool = 0 } }
         spec.stylus_handler{ slot = 4, id = -1, x = 10, y = 10, tool = 0 }
         t:eq(edits(), 0, "palm keeps controls gated")
+        t:eq(#physical_ends, 0, "stylus lift is not aggregate zero while palm remains")
         spec.frame_handler{ { slot = 0, id = -1, x = 20, y = 20, tool = 0 } }
         t:eq(edits(), 1, "last lift publishes the new capabilities")
+        t:eq(#physical_ends, 1, "only aggregate zero publishes the boundary")
+        t:eq(physical_ends[1], "residual_lift", "the final residual owns the boundary")
+    end)
+
+    t:case("aggregate residual and finger lifts rearm editor quality cleanup", function()
+        local Editor = require("ink_notebook_editor")
+        local Geom = require("ui/geometry")
+        for _, case in ipairs({
+            { mode = "stylus", down = function(spec)
+                spec.frame_handler{
+                    { slot = 0, id = 2, x = 20, y = 20, tool = 0 },
+                }
+            end, lift = function(spec)
+                spec.frame_handler{
+                    { slot = 0, id = -1, x = 20, y = 20, tool = 0 },
+                }
+            end },
+            { mode = "finger", down = function(spec)
+                spec.frame_handler{
+                    { slot = 0, id = 2, x = 1200, y = 20, tool = 0 },
+                }
+            end, lift = function(spec)
+                spec.frame_handler{
+                    { slot = 0, id = -1, x = 1200, y = 20, tool = 0 },
+                }
+            end },
+        }) do
+            ctx.reset()
+            local editor
+            local session, _, adapter, spec, _, _, _, edits =
+                fixture(case.mode, {
+                    on_physical_contact_end = function(active, reason)
+                        editor:onPhysicalContactEnd(active, reason)
+                    end,
+                })
+            local scheduler = support.newScheduler()
+            local controller = {
+                activeSession = function() return session end,
+                uiSnapshot = function()
+                    return {
+                        state = "ready", writable = true, can_ink = true,
+                        can_navigate = true, can_close = true,
+                        has_previous = false, has_next = false, page_count = 1,
+                        can_undo = true, pending_writes = 0,
+                    }
+                end,
+            }
+            editor = Editor:new{
+                controller = controller,
+                notebook = { id = 1, title = "Notes", page_count = 1 },
+                get_live_fast = function() return true end,
+                has_active_contact = function()
+                    return adapter:hasActiveContact(session)
+                end,
+                quality_schedule_in = function(delay, action)
+                    scheduler:scheduleIn(delay, action)
+                end,
+                quality_unschedule = function(action)
+                    scheduler:unschedule(action)
+                end,
+            }
+            local transform = session:surface():transform()
+            local paper = editor.layout_geometry.paper_rect
+            editor:onDirty(Geom:new{
+                    x = paper.x + 10, y = paper.y + 10, w = 8, h = 8,
+                }, "ink", session, transform,
+                { x = 10, y = 10, w = 8, h = 8 })
+            editor:onEditChanged(session)
+            case.down(spec)
+            scheduler:advance(0.35)
+            t:eq(editor.quality_waiting_for_contact_end, true,
+                case.mode .. " contact owns the expired cleanup")
+            local edits_before_lift = edits()
+            case.lift(spec)
+            t:eq(edits(), edits_before_lift,
+                case.mode .. " contact made no edit")
+            t:eq(scheduler:pending(), 1,
+                case.mode .. " aggregate zero transition rearms cleanup")
+            scheduler:advance(0.35)
+            t:eq(ctx.env.UIManager.dirty[#ctx.env.UIManager.dirty][2], "partial",
+                case.mode .. " cleanup completes after lift")
+        end
     end)
 
     t:case("control touch stays guarded for 300 ms after stylus lift", function()

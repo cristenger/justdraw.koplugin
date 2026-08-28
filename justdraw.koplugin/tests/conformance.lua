@@ -20,7 +20,9 @@ require("setupkoenv")
 local this = debug.getinfo(1, "S").source:sub(2)
 local tests_dir = this:match("^(.*)[/\\][^/\\]*$") or "."
 local plugin_dir = tests_dir:match("^(.*)[/\\][^/\\]*$") or "."
-package.path = plugin_dir .. "/?.lua;" .. package.path
+package.path = plugin_dir .. "/?.lua;" .. tests_dir .. "/?.lua;" .. package.path
+
+local ConformancePolicy = require("conformance_policy")
 
 local DataStorage = require("datastorage")
 local LuaSettings = require("luasettings")
@@ -64,6 +66,10 @@ claim("Input exports the TOOL_TYPE_* constants",
     Input.TOOL_TYPE_FINGER == 0 and Input.TOOL_TYPE_PEN == 1
       and Input.TOOL_TYPE_ERASER == 2 and Input.TOOL_TYPE_HIGHLIGHTER == 3,
     "TOOL_TYPE_PEN = " .. tostring(Input.TOOL_TYPE_PEN))
+
+claim("Input:routeStylusEvents exists",
+    type(Input.routeStylusEvents) == "function",
+    type(Input.routeStylusEvents) == "function")
 
 claim("registerStylusCallback and unregisterStylusCallback exist",
     type(Input.registerStylusCallback) == "function",
@@ -109,6 +115,7 @@ claim("WidgetContainer offers events to children before itself",
 
 do
     local BB = require("ffi/blitbuffer")
+    local Render = require("ink_render")
     local WHITE, BLACK = BB.COLOR_WHITE, BB.COLOR_BLACK
     local canvas = BB.new(100, 100, BB.TYPE_BB8)
     canvas:fill(WHITE)
@@ -137,6 +144,35 @@ do
         true, canvas:getPixel(60, 60) == WHITE and canvas:getPixel(99, 99) == WHITE)
 
     canvas:free()
+
+    -- Exercise the production renderer against the real FFI buffer as well as
+    -- the recording fake used by the unit suite. A regression that moves the
+    -- DDA clip after iteration would make this crossing effectively unbounded;
+    -- a regression that forwards raw coordinates could wrap or escape here.
+    local rendered = BB.new(32, 32, BB.TYPE_BB8)
+    rendered:fill(WHITE)
+    local painted, left, top, right, bottom = Render.segment(
+        rendered, -1e9, 16, 1e9, 16, 3, BLACK)
+    claim("Render.segment clips an extreme crossing on a real BlitBuffer",
+        true, painted and left == 0 and right == 32
+            and top >= 0 and bottom <= 32 and bottom > top
+            and rendered:getPixel(0, 16) == BLACK
+            and rendered:getPixel(31, 16) == BLACK
+            and rendered:getPixel(0, 0) == WHITE
+            and rendered:getPixel(31, 31) == WHITE,
+        string.format("painted=%s coverage=%s,%s..%s,%s",
+            tostring(painted), tostring(left), tostring(top),
+            tostring(right), tostring(bottom)))
+
+    local overflow, overflow_left, overflow_top,
+        overflow_right, overflow_bottom = Render.segment(
+            rendered, -1e308, 8, 1e308, 8, 3, BLACK)
+    claim("Render.segment rejects overflow arithmetic on a real BlitBuffer",
+        true, overflow == false and overflow_left == nil
+            and overflow_top == nil and overflow_right == nil
+            and overflow_bottom == nil,
+        "no invalid geometry reaches the FFI paint boundary")
+    rendered:free()
 end
 
 -- =====================================================================
@@ -893,10 +929,12 @@ else
     end
 end
 
-local bad = 0
 for _, r in ipairs(rows) do
     io.write(string.format("%-12s %-56s %s\n", r[1], r[2], r[3]))
-    if r[1] == "MISMATCH" then bad = bad + 1 end
 end
-io.write(string.format("\n%d claims, %d mismatches\n", #rows, bad))
+local strict = os.getenv("JUSTDRAW_CONFORMANCE_STRICT_STYLUS") == "1"
+local bad, strict_uncheckable = ConformancePolicy.countFailures(rows, strict)
+io.write(string.format("\n%d claims, %d failures", #rows, bad))
+if strict then io.write(string.format(" (%d required stylus claims uncheckable)", strict_uncheckable)) end
+io.write("\n")
 os.exit(bad == 0 and 0 or 1)

@@ -18,6 +18,7 @@ local ButtonDialog = require("ui/widget/buttondialog")
 local ConfirmBox = require("ui/widget/confirmbox")
 local Device = require("device")
 local Dispatcher = require("dispatcher")
+local Geom = require("ui/geometry")
 local InfoMessage = require("ui/widget/infomessage")
 local Notification = require("ui/widget/notification")
 local UIManager = require("ui/uimanager")
@@ -33,10 +34,12 @@ local InputController = require("ink_input_controller")
 local InkBar = require("ink_bar")
 local NotebookController = require("ink_notebook_controller")
 local NotebookInput = require("ink_notebook_input")
+local Limits = require("ink_limits")
 local Render = require("ink_render")
 local Router = require("ink_contact_router")
 local Stack = require("ink_stack")
 local Store = require("ink_store")
+local StylusTrace = require("ink_stylus_trace")
 
 local Screen = Device.screen
 local INK = Blitbuffer.COLOR_BLACK
@@ -46,16 +49,25 @@ local ERASER_RADIUS = 18
 local SUSPENDED = -1   -- draw_slot sentinel: ignore this contact until it lifts
 
 local INPUT_MODES = { auto = true, stylus = true, finger = true }
+local function updateLiveRasterToken(stroke, box, cache, generation)
+    if stroke.live_raster_complete == false then return end
+    if not box or not cache or generation == nil then
+        stroke.live_raster_complete = false
+        return
+    end
+    if stroke.raster_cache == nil then
+        stroke.raster_cache = cache
+        stroke.raster_generation = generation
+        stroke.live_raster_complete = true
+    elseif stroke.raster_cache ~= cache
+        or stroke.raster_generation ~= generation then
+        stroke.live_raster_complete = false
+    end
+end
 
 -- The margin flag that says "there is a sheet anchored here". Drawn on the
 -- edge opposite the toolbar, so the two never overlap.
 local MARK_W, MARK_H = 6, 28
-
--- Bounded twice on purpose. The only thing worse than no data from a hardware
--- session is a log that filled the device and got truncated at the interesting
--- part.
-local DIAG_SECONDS = 60
-local DIAG_MAX_LINES = 500
 
 -- Reasons Capture can refuse, mapped to something a user can act on.
 local INPUT_ERRORS = {
@@ -118,9 +130,16 @@ function JustDraw:init()
     self.stylus_inked = false
     self.stylus_tool = nil
     self.stylus_lift_x, self.stylus_lift_y = nil, nil
+    self.max_open_points = Limits.MAX_OPEN_POINTS
+    self.max_contact_samples = Limits.MAX_CONTACT_SAMPLES
+    self.stylus_sample_count = 0
+    self.stylus_budget_notified = false
+    self.trace_route_reason = nil
 
-    self.diag_until = nil
-    self.diag_lines = 0
+    self.stylus_trace = nil
+    self.trace_event_ordinal = 0
+    self.trace_frame_ordinal = 0
+    self.trace_source = nil
     self.pen_notice_shown = false
 
     -- The EPUB canvas. Everything about it stays nil until a reflowable
@@ -132,6 +151,11 @@ function JustDraw:init()
     self.canvas_erase_ctx = nil
     self.canvas_erase_x, self.canvas_erase_y = nil, nil
     self.canvas_stroke = nil
+    self.canvas_backpressure_notified = false
+    self.canvas_backpressure_notice_pending = false
+    self.stroke_budget_notice_pending = false
+    self.canvas_pending_repaint = nil
+    self.canvas_pending_capture_stop = nil
     --- Left nil in production, where the session opens its own connection.
     --- The suite runs under a bare interpreter that cannot load the SQLite
     --- driver at all, so it hands one in.
@@ -162,6 +186,17 @@ function JustDraw:notebookController()
         get_pen_width = function() return self.pen_width end,
         get_eraser = function() return self.eraser end,
         on_error = function(reason) self:notify(reason or "input_failed") end,
+        on_domain_error = function(reason, session)
+            if reason ~= "operation_too_large" or not session
+                or type(session.failInputDeferred) ~= "function" then
+                return
+            end
+            local ok, err = session:failInputDeferred(reason)
+            if not ok then
+                logger.err("JustDraw notebooks: input teardown failed:", err)
+            end
+        end,
+        get_stylus_trace = function() return self:activeStylusTrace("notebook") end,
     }
     local adapter = self.notebook_input
     self.notebooks = NotebookController.new{
@@ -379,6 +414,7 @@ function JustDraw:teardown()
         self.session = nil
         self.router = nil
         self.canvas_open = false
+        self.canvas_pending_repaint = nil
     end
     if self.input_lease then self.input_lease:release() end
     self.input_lease = nil
@@ -477,11 +513,13 @@ function JustDraw:onScreenResize()
     -- SetRotationMode reconciliation below.
     self.screen_resize_serial = self.screen_resize_serial + 1
     self.screen_resize_pending = false
+    self:resetStylusTraceContactHistory()
     return self:_applyScreenResize()
 end
 
 function JustDraw:onSetRotationMode()
     if self.screen_resize_pending then return end
+    self:resetStylusTraceContactHistory()
     self.screen_resize_pending = true
     self.screen_resize_serial = self.screen_resize_serial + 1
     local serial = self.screen_resize_serial
@@ -613,6 +651,34 @@ function JustDraw:notify(text)
     UIManager:show(Notification:new{ text = text })
 end
 
+function JustDraw:notifyCanvasBackpressure()
+    if self.canvas_backpressure_notice_pending then return end
+    self.canvas_backpressure_notice_pending = true
+    local generation = self.drawing_generation or 0
+    local active = self.session and self.session:activeCanvas()
+    local canvas_id = active and active.id
+    UIManager:nextTick(function()
+        self.canvas_backpressure_notice_pending = false
+        local current = self.session and self.session:activeCanvas()
+        if (self.drawing_generation or 0) ~= generation
+            or not self.canvas_open or not current or current.id ~= canvas_id then
+            return
+        end
+        self:notify(_("Stroke was not saved because the write queue is busy. Try again."))
+    end)
+end
+
+function JustDraw:notifyStrokeBudget()
+    if self.stroke_budget_notice_pending then return end
+    self.stroke_budget_notice_pending = true
+    local generation = self.drawing_generation or 0
+    UIManager:nextTick(function()
+        self.stroke_budget_notice_pending = false
+        if (self.drawing_generation or 0) ~= generation then return end
+        self:notify(_("Stroke stopped because the pen contact did not end. Lift the pen and try again."))
+    end)
+
+end
 function JustDraw:currentPage()
     return self.view.state.page or 1
 end
@@ -665,6 +731,7 @@ call — Capture disarming and the handler disarming again — stays silent.
 ]]
 function JustDraw:disarmInput(err)
     if not self.drawing and self.input_backend == nil then return end
+    self:resetStylusTraceContactHistory()
     logger.err("JustDraw: disarming input capture after a handler error:", err)
     self.drawing = false
     self.input_backend = nil
@@ -696,6 +763,10 @@ function JustDraw:setDrawing(on)
         end
     end
 
+    -- Reusing Wacom's fixed slot/id after a lease replacement is a new
+    -- diagnostic epoch even when the old lease never observed a physical
+    -- lift. Never let trace deltas bridge that boundary.
+    self:resetStylusTraceContactHistory()
     self.drawing_generation = (self.drawing_generation or 0) + 1
 
     if on then
@@ -812,6 +883,10 @@ function JustDraw:resetContacts()
     self.n_contacts = 0
     self.passthrough = false
     self.draw_slot = nil
+    -- Every caller reaches this only after capture has been released or made
+    -- inert. The frame wrapper cannot observe later physical lifts, so contact
+    -- ownership ends with the lease and reused slots must start unclassified.
+    if self.router then self.router:reset() end
 end
 
 --- Per-sequence pen state. `stylus_lift_x/y` deliberately survives, because it
@@ -825,6 +900,9 @@ function JustDraw:resetStylusState()
     self.stylus_stale_xy = false
     self.stylus_inked = false
     self.stylus_tool = nil
+    self.stylus_sample_count = 0
+    self.stylus_budget_notified = false
+    self.trace_route_reason = nil
 end
 
 function JustDraw:onJustDrawToggle()
@@ -846,7 +924,11 @@ passthrough latch. Since ADR-13 what reaches the app is decided per gesture in
 InkBar:suppresses, so this always returns true.
 ]]
 function JustDraw:onTouchFrame(slots)
-    if self.canvas_open then return self:routeCanvasFinger(slots) end
+    if self.canvas_open then
+        local kept = self:routeCanvasFinger(slots)
+        self:_flushPendingCanvasCaptureStop()
+        return kept
+    end
 
     if not self.passthrough and self:dialogOnTop() then
         -- Latches for the whole contact sequence, and re-latches on the next
@@ -964,12 +1046,17 @@ false makes it open a fresh contact mid-stroke and emit a spurious tap on lift,
 and false to true strands a contact that never sees its lift, leaving a pending
 hold timer that blocks the slot until the next dropContacts().
 ]]
-function JustDraw:onStylusEvent(slot)
+function JustDraw:_routeLegacyStylusEvent(slot)
     local id, x, y, tool = slot.id, slot.x, slot.y, slot.tool
-    if self.diag_until then self:diag(slot, x, y) end
 
     -- Hover before this slot ever carried a tracking id. Consume, change nothing.
     if id == nil then return true end
+
+    if id >= 0 and self.canvas_pending_capture_stop then
+        self.stylus_suspended = true
+        self.stylus_dominated = true
+        return true
+    end
 
     if id >= 0 then
         if not self.stylus_active then
@@ -980,6 +1067,8 @@ function JustDraw:onStylusEvent(slot)
             if self.router and self.canvas_open then self.router:penContact(nil, nil) end
             self.stylus_passthrough = self:dialogOnTop()
             self.stylus_geom_latched = self.stylus_passthrough
+            self.stylus_sample_count = 0
+            self.stylus_budget_notified = false
             self.stylus_dominated = false
             self.stylus_suspended = false
             -- Coordinates are sticky. A contact-down frame that only carried
@@ -990,6 +1079,21 @@ function JustDraw:onStylusEvent(slot)
                 and x == self.stylus_lift_x and y == self.stylus_lift_y
         end
         if self.stylus_passthrough then return false end
+
+        if self.stylus_sample_count >= (self.max_contact_samples or Limits.MAX_CONTACT_SAMPLES) then
+            if not self.stylus_suspended then
+                self:abortStroke()
+                self.stylus_suspended = true
+                self.trace_route_reason = "sample_budget"
+                if not self.stylus_budget_notified then
+                    self.stylus_budget_notified = true
+                    self:notifyStrokeBudget()
+                end
+            end
+            self.stylus_dominated = true
+            return true
+        end
+        self.stylus_sample_count = self.stylus_sample_count + 1
 
         -- Remember the last tool that was not the TOOL_TYPE_FINGER a pen slot
         -- reports on its way out of proximity. The lift frame often carries
@@ -1052,6 +1156,90 @@ function JustDraw:onStylusEvent(slot)
     if self.router then self.router:penUp() end
     self:resetStylusState()
     return not was_passthrough
+end
+--- Describe the existing host FSM without retaining KOReader's mutable slot.
+function JustDraw:_legacyStylusTraceState()
+    if self.stylus_passthrough then return "active_pass" end
+    if self.stylus_suspended then return "suspended" end
+    if self.stylus_active then
+        if not self.stylus_geom_latched then return "geometry_pending" end
+        if self.stylus_inked then return "active_draw" end
+        return "active_block"
+    end
+    return "idle"
+end
+
+local function legacyTraceDelivery(state)
+    return state ~= "active_pass" and state ~= "forwarded_wait_lift"
+end
+
+function JustDraw:_recordLegacyStylusTrace(trace, slot_number, id, tool,
+        x, y, timev, before_state, before_delivery, delivery, decision, reason)
+    self.trace_event_ordinal = self.trace_event_ordinal + 1
+    local dx, dy, dt = trace:deltas(slot_number, id, tool, x, y, timev)
+    trace:record(self.trace_event_ordinal, self.trace_frame_ordinal + 1,
+        slot_number, id, tool, x, y, timev,
+        before_state, self:_legacyStylusTraceState(),
+        before_delivery, delivery, decision, reason, dx, dy, dt)
+end
+
+--- Trace the current production route until a Scribe recording selects a
+--- geometry policy for InkStylusSequence. With Diagnostics off this is one
+--- nil check plus the existing host call and allocates no per-sample tables.
+function JustDraw:onStylusEvent(slot)
+    local trace = self:activeStylusTrace(self:diagnosticSource())
+    if not trace then return self:_routeLegacyStylusEvent(slot) end
+
+    local slot_number, id = slot.slot, slot.id
+    local x, y, tool, timev = slot.x, slot.y, slot.tool, slot.timev
+    local before_state = self:_legacyStylusTraceState()
+    local before_delivery = legacyTraceDelivery(before_state)
+    local dialog_before = self:dialogOnTop()
+    self.trace_route_reason = nil
+    local delivery = self:_routeLegacyStylusEvent(slot)
+    local after_state = self:_legacyStylusTraceState()
+    local decision, reason
+    if id == nil then
+        decision, reason = "discard", "hover"
+    elseif id < 0 then
+        if before_state == "idle" then
+            decision, reason = "discard", "late_lift"
+        elseif before_state == "geometry_pending" then
+            decision = "lift"
+            reason = x ~= nil and y ~= nil and "pending_dot" or "pending_discard"
+        else
+            decision, reason = "lift", "owner_lift"
+        end
+    elseif delivery == false then
+        decision, reason = "pass", "route_pass"
+    elseif after_state == "geometry_pending" then
+        decision, reason = "pending", "geometry_pending"
+    elseif after_state == "suspended" then
+        if self.trace_route_reason == "point_budget"
+            or self.trace_route_reason == "sample_budget" then
+            decision, reason = "abort_budget", self.trace_route_reason
+        else
+            decision = "suspend"
+            reason = dialog_before and "abort_suspend" or "finish_suspend"
+        end
+    elseif after_state == "active_draw" then
+        decision = before_state == "active_draw" and "append" or "begin"
+        reason = "accepted"
+    elseif after_state == "active_block" then
+        decision, reason = "accept", "route_block"
+    else
+        decision, reason = "accept", "route_draw"
+    end
+    self:_recordLegacyStylusTrace(trace, slot_number, id, tool, x, y, timev,
+        before_state, before_delivery, delivery, decision, reason)
+    return delivery
+end
+
+function JustDraw:_afterLegacyStylusFrame()
+    local trace = self:activeStylusTrace(self:diagnosticSource())
+    if not trace then return end
+    trace:afterFrame()
+    self.trace_frame_ordinal = self.trace_frame_ordinal + 1
 end
 
 --[[--
@@ -1126,42 +1314,67 @@ function JustDraw:diagnosticLines()
     return lines, r
 end
 
---- Put the report on screen. On a device the log is not always reachable, and
---- this is the answer to a question the user is asking right now.
-function JustDraw:showDiagnostics()
-    local lines = self:startDiagnostics()
-    UIManager:show(InfoMessage:new{ text = table.concat(lines, "\n") })
+function JustDraw:diagnosticSource()
+    if self.canvas_open then return "epub_canvas" end
+    return "direct"
 end
 
---[[--
-One bounded diagnostic session, for reporting hardware problems.
-
-Digitizer numbers only: slot, tracking id, tool, the screen position, and
-whether this frame's raw coordinates repeated the previous lift. No paths, no
-titles, nothing from the book. See the plan's stopping conditions.
-]]
-function JustDraw:startDiagnostics()
+function JustDraw:startDiagnostics(source, opts)
+    source = source or self:diagnosticSource()
+    opts = opts or {}
+    if self.stylus_trace and self.stylus_trace:isActive() then
+        self.stylus_trace:stop("reset")
+    end
     local lines = self:diagnosticLines()
     for i = 1, #lines do
         if lines[i] ~= "" then logger.info("JUSTDRAW-DIAG", lines[i]) end
     end
-
-    self.diag_until = os.time() + DIAG_SECONDS
-    self.diag_lines = 0
-    logger.info("JUSTDRAW-DIAG start, per-event log armed")
+    local emit = opts.emit or function(line) logger.info(line) end
+    self.stylus_trace = StylusTrace.new{
+        source = source,
+        emit = emit,
+        now = opts.now,
+        duration_seconds = opts.duration_seconds,
+        max_events = opts.max_events,
+    }
+    self.trace_event_ordinal = 0
+    self.trace_frame_ordinal = 0
+    self.trace_source = source
+    emit("JUSTDRAW-STYLUS trace_start source=" .. source)
     return lines
 end
 
-function JustDraw:diag(slot, sx, sy)
-    if not self.diag_until then return end
-    if self.diag_lines >= DIAG_MAX_LINES or os.time() > self.diag_until then
-        logger.info("JUSTDRAW-DIAG end", self.diag_lines, "lines")
-        self.diag_until = nil
-        return
+function JustDraw:activeStylusTrace(source)
+    local trace = self.stylus_trace
+    if not trace or not trace:isActive() then
+        self.stylus_trace = nil
+        return nil
     end
-    self.diag_lines = self.diag_lines + 1
-    logger.info("JUSTDRAW-DIAG", slot.slot, slot.id, tostring(slot.tool),
-        sx, sy, tostring(self.stylus_stale_xy))
+    if source and trace.source ~= source then return nil end
+    return trace
+end
+
+function JustDraw:resetStylusTraceContactHistory()
+    local trace = self.stylus_trace
+    if trace and type(trace.resetContactHistory) == "function" then
+        trace:resetContactHistory()
+    end
+end
+
+--- Warn before coordinates enter the local log, then show the capability report.
+function JustDraw:showDiagnostics(source)
+    local dialog
+    dialog = ConfirmBox:new{
+        text = _("Pen coordinates will be written to the local KOReader log for up to 60 seconds. JustDraw does not upload them; shared logs may contain them."),
+        ok_text = _("Start"),
+        ok_callback = function()
+            UIManager:close(dialog)
+            local lines = self:startDiagnostics(source)
+            UIManager:show(InfoMessage:new{ text = table.concat(lines, "\n") })
+        end,
+    }
+    UIManager:show(dialog)
+    return dialog
 end
 
 --[[--
@@ -1215,7 +1428,12 @@ that decision reads: how many non-pen contacts are down, and whether any of them
 started on the toolbar. Always returns true.
 ]]
 function JustDraw:onStylusTouchFrame(slots)
-    if self.canvas_open then return self:routeCanvasTouch(slots) end
+    if self.canvas_open then
+        local kept = self:routeCanvasTouch(slots)
+        self:_afterLegacyStylusFrame()
+        self:_flushPendingCanvasCaptureStop()
+        return kept
+    end
 
     if not self.passthrough and self:dialogOnTop() then
         self.passthrough = true
@@ -1259,6 +1477,7 @@ function JustDraw:onStylusTouchFrame(slots)
         end
     end
 
+    self:_afterLegacyStylusFrame()
     return true
 end
 
@@ -1373,14 +1592,27 @@ function JustDraw:addPoint(x, y)
     local s = self.stroke
     local i = s.n * 2
     local px, py = s[i - 1], s[i]
-    if px == x and py == y then return end
+    if px == x and py == y then return true end
+    if s.n >= (self.max_open_points or Limits.MAX_OPEN_POINTS) then
+        self.trace_route_reason = "point_budget"
+        self:abortStroke()
+        if self.stylus_active then
+            self.stylus_suspended = true
+        else
+            self.draw_slot = SUSPENDED
+        end
+        self:notifyStrokeBudget()
+        return false
+    end
 
     s[i + 1] = x
     s[i + 2] = y
     s.n = s.n + 1
 
-    Render.segment(Screen.bb, px, py, x, y, s.w, INK)
-    self:refreshBox(px, py, x, y, s.w)
+    local painted, left, top, right, bottom =
+        Render.segment(Screen.bb, px, py, x, y, s.w, INK)
+    if painted then self:refreshBox(left, top, right, bottom) end
+    return true
 end
 
 --- Ends whichever stroke is in progress. Every caller -- the pen lift, a
@@ -1395,8 +1627,9 @@ function JustDraw:endStroke()
     if not s then return end
 
     if s.n == 1 then -- a dot: never painted live, paint it now
-        Render.stroke(Screen.bb, s, 0, 0, INK)
-        self:refreshBox(s[1], s[2], s[1], s[2], s.w)
+        local painted, left, top, right, bottom =
+            Render.stroke(Screen.bb, s, 0, 0, INK)
+        if painted then self:refreshBox(left, top, right, bottom) end
     end
     self.store:add(self:currentPage(), s)
 end
@@ -1471,6 +1704,7 @@ function JustDraw:openCanvas(canvas)
         end
         return nil, err
     end
+    self.canvas_pending_repaint = nil
     self.bar = overlay.bar
     self.canvas_open = true
     if self.router then self.router:reset() end
@@ -1499,8 +1733,36 @@ function JustDraw:onCanvasCacheWillRebuild(canvas)
     if not (self.canvas_open and active and canvas and active.id == canvas.id) then
         return
     end
+    self.canvas_pending_repaint = nil
     self:abortCanvasStroke()
     self:setDrawing(false)
+end
+
+--- Latch a domain-fatal input stop until the residual handler for this same
+--- SYN_REPORT has filtered palms and advanced diagnostics. The stylus callback
+--- runs before feedEvent, so releasing the lease there would bypass both.
+function JustDraw:_requestCanvasCaptureStop(canvas, repair_live_stroke)
+    if not canvas then return nil, "no_canvas" end
+    local pending = self.canvas_pending_capture_stop
+    if pending and pending.canvas_id == canvas.id then
+        pending.repair_live_stroke = pending.repair_live_stroke
+            or repair_live_stroke == true
+        return true
+    end
+    self.canvas_pending_capture_stop = {
+        canvas = canvas,
+        canvas_id = canvas.id,
+        repair_live_stroke = repair_live_stroke == true,
+    }
+    return true
+end
+
+function JustDraw:_flushPendingCanvasCaptureStop()
+    local pending = self.canvas_pending_capture_stop
+    if not pending then return true end
+    self.canvas_pending_capture_stop = nil
+    return self:_deferCanvasCaptureStop(
+        pending.canvas, pending.repair_live_stroke)
 end
 
 --- A cache or save failure may be reported from inside the stylus callback.
@@ -1508,6 +1770,7 @@ end
 --- true through the rest of this frame so palm gestures remain suppressed.
 --- The visible state changes on the next safe UI tick.
 function JustDraw:_deferCanvasCaptureStop(canvas, repair_live_stroke)
+    self.canvas_pending_capture_stop = nil
     local active = self.session and self.session:activeCanvas()
     if not (self.canvas_open and active and canvas and active.id == canvas.id) then
         return
@@ -1616,6 +1879,7 @@ function JustDraw:closeCanvas()
     self:setDrawing(false)
     local ok, err = self.session:closeCanvas()
     if not ok then return nil, err end
+    self.canvas_pending_repaint = nil
     self.canvas_open = false
     self.bar = nil
     if self.bar_restore then self:setBarShown(true) end
@@ -1647,7 +1911,7 @@ function JustDraw:applyCanvasPoint(x, y, tool)
     else
         self:endCanvasErase()
         if self.canvas_stroke then
-        self:addCanvasPoint(cx, cy, tr)
+            if not self:addCanvasPoint(cx, cy, tr) then return false end
         else
             self:startCanvasStroke(cx, cy, tr)
         end
@@ -1669,7 +1933,18 @@ function JustDraw:addCanvasPoint(cx, cy, tr)
     local s = self.canvas_stroke
     local i = s.n * 2
     local px, py = s[i - 1], s[i]
-    if px == cx and py == cy then return end
+    if px == cx and py == cy then return true end
+    if s.n >= (self.max_open_points or Limits.MAX_OPEN_POINTS) then
+        self.trace_route_reason = "point_budget"
+        self:abortCanvasStroke()
+        if self.stylus_active then
+            self.stylus_suspended = true
+        else
+            self.draw_slot = SUSPENDED
+        end
+        self:notifyStrokeBudget()
+        return false
+    end
 
     s[i + 1] = cx
     s[i + 2] = cy
@@ -1678,8 +1953,15 @@ function JustDraw:addCanvasPoint(cx, cy, tr)
     if cy < s.min_y then s.min_y = cy elseif cy > s.max_y then s.max_y = cy end
 
     local cache = self.session:cache()
-    if not cache then return end
-    self:blitCanvasBox(cache:drawSegment(px, py, cx, cy, s.w), tr)
+    if not cache then
+        s.live_raster_complete = false
+        return true
+    end
+    local box, raster_cache, raster_generation =
+        cache:drawSegment(px, py, cx, cy, s.w)
+    updateLiveRasterToken(s, box, raster_cache, raster_generation)
+    self:blitCanvasBox(box, tr)
+    return true
 end
 
 --[[--
@@ -1689,14 +1971,114 @@ The raster is the source of truth for what the sheet looks like, so live ink
 goes into it first and is copied out. That is what lets a repaint mid-stroke --
 a notification, a menu closing -- show the stroke so far instead of losing it.
 ]]
+function JustDraw:_queueCanvasRepaint(box, tr, overlay, cache)
+    local sx, sy = tr:fromCache(box.x, box.y)
+    local pending = self.canvas_pending_repaint
+    local active = self.session and self.session:activeCanvas()
+    local generation = cache and cache.generation
+    if not pending or pending.overlay ~= overlay or pending.cache ~= cache
+        or pending.generation ~= generation or pending.transform ~= tr
+        or not active or pending.canvas_id ~= active.id then
+        pending = {
+            overlay = overlay,
+            cache = cache,
+            generation = generation,
+            transform = tr,
+            canvas_id = active and active.id,
+            cache_left = box.x,
+            cache_top = box.y,
+            cache_right = box.x + box.w,
+            cache_bottom = box.y + box.h,
+            screen_left = sx,
+            screen_top = sy,
+            screen_right = sx + box.w,
+            screen_bottom = sy + box.h,
+        }
+        self.canvas_pending_repaint = pending
+        return
+    end
+    pending.cache_left = math.min(pending.cache_left, box.x)
+    pending.cache_top = math.min(pending.cache_top, box.y)
+    pending.cache_right = math.max(pending.cache_right, box.x + box.w)
+    pending.cache_bottom = math.max(pending.cache_bottom, box.y + box.h)
+    pending.screen_left = math.min(pending.screen_left, sx)
+    pending.screen_top = math.min(pending.screen_top, sy)
+    pending.screen_right = math.max(pending.screen_right, sx + box.w)
+    pending.screen_bottom = math.max(pending.screen_bottom, sy + box.h)
+end
+
+function JustDraw:_canvasPendingRepaintValid(pending)
+    local overlay = self.session and self.session:overlay()
+    local active = self.session and self.session:activeCanvas()
+    local cache = self.session and self.session:cache()
+    return pending and self.canvas_open and overlay == pending.overlay
+        and active and active.id == pending.canvas_id
+        and cache == pending.cache and cache.generation == pending.generation
+        and self.session:transform() == pending.transform
+end
+
+--- Flush fallback ink only when the canvas is once again the topmost window.
+--- Direct framebuffer writes while a modal is above the overlay would punch
+--- through that modal. The pending union is O(1) and bound to the exact
+--- canvas/cache/transform generation that produced it.
+function JustDraw:_flushCanvasPendingRepaint(already_painted)
+    local pending = self.canvas_pending_repaint
+    if not pending then return true end
+    if not self:_canvasPendingRepaintValid(pending) then
+        self.canvas_pending_repaint = nil
+        return nil, "stale_repaint"
+    end
+    if Stack.visualAbove(pending.overlay) then return nil, "covered" end
+    self.canvas_pending_repaint = nil
+    local x, y = pending.screen_left, pending.screen_top
+    local w = pending.screen_right - x
+    local h = pending.screen_bottom - y
+    if not already_painted then
+        local bb = pending.cache:buffer()
+        if not bb then return nil, "no_buffer" end
+        Screen.bb:blitFrom(bb, x, y, pending.cache_left, pending.cache_top, w, h)
+        pending.overlay:restoreChromeIfIntersecting(Screen.bb,
+            { x = x, y = y, w = w, h = h }, 0, 0)
+    end
+    if w > 0 and h > 0 then
+        if already_painted then
+            UIManager:setDirty(nil, "partial",
+                Geom:new{ x = x, y = y, w = w, h = h })
+        else
+            self:refreshBox(x, y, x + w, y + h)
+        end
+    end
+    return true
+end
+
+--- Called after the overlay has copied the current cache into Screen.bb.
+--- Closing any KOReader modal repaints the exposed overlay; use that natural
+--- lifecycle boundary to request the deferred regional refresh once.
+function JustDraw:onCanvasOverlayPainted(overlay)
+    local pending = self.canvas_pending_repaint
+    if pending and pending.overlay == overlay then
+        self:_flushCanvasPendingRepaint(true)
+    end
+end
+
 function JustDraw:blitCanvasBox(box, tr)
     if not box or box.w <= 0 or box.h <= 0 then return end
     local cache = self.session and self.session:cache()
     local bb = cache and cache:buffer()
     if not bb then return end
+    local overlay = self.session and self.session:overlay()
+    if overlay and Stack.visualAbove(overlay) then
+        self:_queueCanvasRepaint(box, tr, overlay, cache)
+        return nil, "covered"
+    end
+    self:_flushCanvasPendingRepaint(false)
     local sx, sy = tr:fromCache(box.x, box.y)
     Screen.bb:blitFrom(bb, sx, sy, box.x, box.y, box.w, box.h)
-    self:refreshBox(sx, sy, sx + box.w, sy + box.h, 0)
+    if overlay then
+        overlay:restoreChromeIfIntersecting(Screen.bb,
+            { x = sx, y = sy, w = box.w, h = box.h }, 0, 0)
+    end
+    self:refreshBox(sx, sy, sx + box.w, sy + box.h)
 end
 
 function JustDraw:endCanvasStroke()
@@ -1710,11 +2092,19 @@ function JustDraw:endCanvasStroke()
         -- A dot is never painted live, because there is no segment to paint.
         local cache = self.session:cache()
         if cache then
-            self:blitCanvasBox(cache:drawSegment(s[1], s[2], s[1], s[2], s.w), tr)
+            local box, raster_cache, raster_generation =
+                cache:drawSegment(s[1], s[2], s[1], s[2], s.w)
+            updateLiveRasterToken(s, box, raster_cache, raster_generation)
+            self:blitCanvasBox(box, tr)
         end
     end
 
-    local ok, err = self.session:addStroke(s, s.n, s.w, Capture.TOOL_PEN)
+    local ok, err, painted, left, top, right, bottom =
+        self.session:addStroke(s, s.n, s.w, Capture.TOOL_PEN, {
+            raster_cache = s.raster_cache,
+            raster_generation = s.raster_generation,
+            live_raster_complete = s.live_raster_complete == true,
+        })
     if not ok then
         logger.warn("JustDraw: canvas stroke not recorded:", err)
         -- Live segments were painted before the queue accepted the stroke.
@@ -1723,7 +2113,23 @@ function JustDraw:endCanvasStroke()
         local box = self.session:repair(
             s.min_x, s.min_y, s.max_x, s.max_y, s.w)
         if box and tr then self:blitCanvasBox(box, tr) end
+        if err == "queue_backpressure" and not self.canvas_backpressure_notified then
+            self.canvas_backpressure_notified = true
+            self:notifyCanvasBackpressure()
+        elseif err == "operation_too_large" then
+            self:notifyStrokeBudget()
+            self:_requestCanvasCaptureStop(
+                self.session and self.session:activeCanvas(), false)
+        end
+        return nil, err
     end
+    self.canvas_backpressure_notified = false
+    if painted and tr then
+        self:blitCanvasBox({
+            x = left, y = top, w = right - left, h = bottom - top,
+        }, tr)
+    end
+    return true
 end
 
 --[[--
@@ -1809,25 +2215,32 @@ function JustDraw:repaint()
     UIManager:setDirty(self.ui, "ui")
 end
 
---- DU refresh over the padded bounding box of one segment, clamped to screen.
-function JustDraw:refreshBox(x0, y0, x1, y1, w)
-    local pad = w + 2
-    local x = (x0 < x1 and x0 or x1) - pad
-    local y = (y0 < y1 and y0 or y1) - pad
-    local bw = (x0 < x1 and x1 - x0 or x0 - x1) + 2 * pad
-    local bh = (y0 < y1 and y1 - y0 or y0 - y1) + 2 * pad
-
-    if x < 0 then bw = bw + x; x = 0 end
-    if y < 0 then bh = bh + y; y = 0 end
+--- Refresh the half-open coverage returned by InkRender, clamped to screen.
+function JustDraw:refreshBox(left, top, right, bottom)
+    left, top, right, bottom = tonumber(left), tonumber(top),
+        tonumber(right), tonumber(bottom)
+    if not left or not top or not right or not bottom
+        or left ~= left or top ~= top or right ~= right or bottom ~= bottom
+        or left == math.huge or top == math.huge
+        or right == math.huge or bottom == math.huge
+        or left == -math.huge or top == -math.huge
+        or right == -math.huge or bottom == -math.huge then
+        return
+    end
+    local x, y = math.floor(left), math.floor(top)
+    local edge_x, edge_y = math.ceil(right), math.ceil(bottom)
     local sw, sh = Screen:getWidth(), Screen:getHeight()
-    if x + bw > sw then bw = sw - x end
-    if y + bh > sh then bh = sh - y end
-    if bw <= 0 or bh <= 0 then return end
+    if x < 0 then x = 0 end
+    if y < 0 then y = 0 end
+    if edge_x > sw then edge_x = sw end
+    if edge_y > sh then edge_y = sh end
+    local w, h = edge_x - x, edge_y - y
+    if w <= 0 or h <= 0 then return end
 
     if self.live_fast then
-        Screen:refreshFast(x, y, bw, bh)
+        Screen:refreshFast(x, y, w, h)
     else
-        Screen:refreshPartial(x, y, bw, bh)
+        Screen:refreshPartial(x, y, w, h)
     end
 end
 
@@ -1965,6 +2378,7 @@ function JustDraw:deleteCanvas(canvas)
     end
 
     if active then
+        self.canvas_pending_repaint = nil
         self.canvas_open = false
         self.bar = nil
         if self.router then self.router:reset() end
@@ -2163,7 +2577,7 @@ function JustDraw:addToMainMenu(menu_items)
                 -- and for them it never is.
                 text = _("Stylus diagnostics"),
                 callback = function() self:showDiagnostics() end,
-                help_text = _([[Shows why the pen route is or is not running, and writes the same report to the log along with one line per pen event for a minute, capped at 500 lines. Digitizer numbers only - nothing from the book.]]),
+                help_text = _([[Shows why the pen route is or is not running. With confirmation, it writes pen coordinates and decisions to the local log for up to one minute or 8,192 events. No book or notebook identity is logged.]]),
                 separator = true,
             },
             {

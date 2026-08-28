@@ -11,6 +11,7 @@ local InputController = require("ink_input_controller")
 local Errors = require("ink_notebook_errors")
 local SurfaceSession = require("ink_surface_session")
 local Transform = require("ink_canvas_transform")
+local logger = require("logger")
 
 local Session = {}
 Session.__index = Session
@@ -159,6 +160,34 @@ function Session:_releaseCapture(deferred)
     else ok, err = lease:release() end
     if ok then self.input_lease = nil end
     return ok, err
+end
+
+--- Make a deterministic domain failure inert inside the callback, but leave
+--- KOReader's stylus hook installed until the next safe UI tick. This mirrors
+--- the capture guard's two-phase teardown without misclassifying a rejected
+--- operation as a failed SQLite transaction.
+function Session:failInputDeferred(reason)
+    reason = reason or "input_failed"
+    self.input_error = reason
+    local lease = self.input_lease
+    local function finish()
+        if self.input_lease == lease then self.input_lease = nil end
+        if self.abort_contact then
+            local ok, abort_err = pcall(self.abort_contact, self)
+            if not ok then
+                logger.err("JustDraw notebooks: deferred input abort failed:",
+                    abort_err)
+            end
+        end
+        self:_notifyState()
+    end
+    if not lease then
+        self.schedule(finish)
+        return true
+    end
+    local ok, err = lease:releaseDeferred(finish)
+    if not ok then return nil, err end
+    return true
 end
 
 function Session:_acquireCapture(retry)

@@ -71,6 +71,11 @@ local function snap(pct)
     return best
 end
 
+local function intersects(a, b)
+    return a and b and a.x < b.x + b.w and b.x < a.x + a.w
+        and a.y < b.y + b.h and b.y < a.y + a.h
+end
+
 --- The grab strip's thickness: enough to hit with a thumb, bounded so it does
 --- not eat the sheet on a small screen.
 local function handleHeight()
@@ -202,14 +207,7 @@ function InkCanvasOverlay:getSize()
     return self.dimen
 end
 
-function InkCanvasOverlay:paintTo(bb, x, y)
-    local sheet = self.transform:sheetRect()
-    -- The whole sheet, letterbox margins included: a stroke left behind in a
-    -- margin after a rotation would otherwise never be cleared.
-    bb:paintRect(sheet.x, sheet.y, sheet.w, sheet.h, Blitbuffer.COLOR_WHITE)
-
-    if self.cache then self.cache:paintTo(bb) end
-
+function InkCanvasOverlay:paintChromeTo(bb, x, y)
     -- The handle doubles as the sheet's top edge, so there is one line rather
     -- than a border and a grip.
     local h = self:handleRect()
@@ -220,7 +218,33 @@ function InkCanvasOverlay:paintTo(bb, x, y)
         grip_w, rule, Blitbuffer.COLOR_BLACK)
 
     -- Last, so it is on top of everything the canvas painted.
-    self.bar:paintTo(bb, x, y)
+    self.bar:paintTo(bb, x or 0, y or 0)
+end
+
+--- Restore only chrome after a direct live-ink framebuffer blit. A wide nib or
+--- repair box may geometrically overlap controls even though its centre was
+--- accepted inside the canvas.
+function InkCanvasOverlay:restoreChromeIfIntersecting(bb, rect, x, y)
+    if not rect or not (intersects(rect, self:handleRect())
+        or intersects(rect, self.bar and self.bar.dimen)) then
+        return false
+    end
+    self:paintChromeTo(bb, x, y)
+    return true
+end
+
+function InkCanvasOverlay:paintTo(bb, x, y)
+    local sheet = self.transform:sheetRect()
+    -- The whole sheet, letterbox margins included: a stroke left behind in a
+    -- margin after a rotation would otherwise never be cleared.
+    bb:paintRect(sheet.x, sheet.y, sheet.w, sheet.h, Blitbuffer.COLOR_WHITE)
+
+    if self.cache then self.cache:paintTo(bb) end
+
+    self:paintChromeTo(bb, x, y)
+    if self.plugin and self.plugin.onCanvasOverlayPainted then
+        self.plugin:onCanvasOverlayPainted(self)
+    end
 end
 
 -- --------------------------------------------------------------------- input

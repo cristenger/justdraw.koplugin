@@ -39,17 +39,27 @@ return function(ctx)
         local sched = support.newScheduler()
         local errors = {}
         local scheduled, unscheduled = {}, {}
+        local estimate = opts.estimate or function(n)
+            n = tonumber(n)
+            return n and 3 + 4 * n or nil
+        end
         local queue = Queue.new{
             repository = store,
             max_ops = opts.max_ops,
             max_bytes = opts.max_bytes,
+            hard_ops = opts.hard_ops,
+            hard_bytes = opts.hard_bytes,
             delay = opts.delay,
+            estimate_insert_bytes = estimate,
+            max_single_op_bytes = opts.max_single_op_bytes or estimate(8192),
+            clock = function() return sched:now() end,
             schedule = function(delay, fn)
                 scheduled[#scheduled + 1] = { delay = delay, fn = fn }
-                sched:schedule(fn)
+                sched:scheduleIn(delay, fn)
             end,
             unschedule = function(fn)
                 unscheduled[#unscheduled + 1] = fn
+                sched:unschedule(fn)
             end,
             on_error = function(err) errors[#errors + 1] = err end,
             on_persisted = opts.on_persisted,
@@ -80,7 +90,7 @@ return function(ctx)
         queue:addStroke(CANVAS, stroke(4, 1))
         t:eq(#log.scheduled, 1, "one timer armed")
         t:check(log.scheduled[1].delay > 0, "after a delay, not immediately")
-        sched:drain()
+        sched:advance(queue.delay)
         t:eq(strokeCount(store), 1, "and then it is written")
         t:eq(queue:pendingCount(), 0, "with nothing left over")
     end)
@@ -92,33 +102,43 @@ return function(ctx)
         t:eq(#log.scheduled, 1, "the first timer still covers both")
     end)
 
-    t:case("enough operations flush without waiting for the timer", function()
-        local queue, store = fixture{ max_ops = 3 }
+    t:case("enough operations replace delayed work with next-tick work", function()
+        local queue, store, sched, log = fixture{ max_ops = 3 }
         queue:addStroke(CANVAS, stroke(4, 1))
         queue:addStroke(CANVAS, stroke(4, 2))
         t:eq(strokeCount(store), 0, "under the limit")
         queue:addStroke(CANVAS, stroke(4, 3))
-        t:eq(strokeCount(store), 3, "and at the limit it goes now")
+        t:eq(strokeCount(store), 0, "the input callback does no SQLite")
+        t:eq(queue.scheduled_kind, "urgent", "an urgent action owns the flush")
+        t:eq(log.unscheduled[1], log.scheduled[1].fn,
+            "the delayed action was cancelled by identity")
+        t:eq(log.scheduled[2].fn, log.scheduled[1].fn,
+            "the replacement reuses the stable closure")
+        sched:tick()
+        t:eq(strokeCount(store), 3, "the next tick commits")
         t:eq(queue:pendingCount(), 0, "queue drained")
     end)
 
-    t:case("enough bytes flush without waiting either", function()
+    t:case("enough bytes schedule an urgent flush", function()
         -- A single very long stroke can exceed the byte bound on its own,
         -- which is the case the count alone would miss.
-        local queue, store = fixture{ max_bytes = 200 }
+        local queue, store, sched = fixture{ max_bytes = 200 }
         queue:addStroke(CANVAS, stroke(500, 1))
-        t:eq(strokeCount(store), 1, "written straight away")
+        t:eq(strokeCount(store), 0, "still not written in addStroke")
+        sched:tick()
+        t:eq(strokeCount(store), 1, "written on the next tick")
     end)
 
     t:case("a flush is one transaction, whatever it holds", function()
-        local queue, store = fixture{ max_ops = 4 }
+        local queue, store, sched = fixture{ max_ops = 4 }
         for i = 1, 4 do queue:addStroke(CANVAS, stroke(4, i)) end
+        sched:tick()
         t:eq(store.calls.transaction, 1, "four strokes, one transaction")
     end)
 
     t:case("surface recency is touched once per committed batch", function()
         local committed, touches = 0, 0
-        local queue, store = fixture{
+        local queue, store, sched = fixture{
             max_ops = 3,
             on_committed = function(count) committed = committed + count end,
         }
@@ -128,15 +148,17 @@ return function(ctx)
             return true
         end
         for i = 1, 3 do queue:addStroke(CANVAS, stroke(4, i)) end
+        sched:tick()
         t:eq(touches, 1, "not one metadata write per stroke")
         t:eq(committed, 3, "post-commit callback sees the durable batch")
     end)
 
     t:case("a failed recency update rolls back the entire ink batch", function()
-        local queue, store = fixture{ max_ops = 2 }
+        local queue, store, sched = fixture{ max_ops = 2 }
         function store:touchSurface() return nil, "touch failed" end
         queue:addStroke(CANVAS, stroke(4, 1))
         queue:addStroke(CANVAS, stroke(4, 2))
+        sched:tick()
         t:eq(queue:isFailed(), true, "metadata failure is a save failure")
         t:eq(queue:pendingCount(), 2, "same operations remain retryable")
         t:eq(strokeCount(store), 0, "ink was rolled back with metadata")
@@ -157,6 +179,75 @@ return function(ctx)
         t:eq(#log.unscheduled, 1, "cancelled")
         t:eq(log.unscheduled[1], log.scheduled[1].fn, "the same function object")
         sched:drain()
+    end)
+
+    t:case("the delayed commit observes virtual due time", function()
+        local queue, store, sched = fixture{ delay = 0.25 }
+        queue:addStroke(CANVAS, stroke(4, 1))
+        sched:advance(0.249)
+        t:eq(store.calls.transaction, 0, "not before its due time")
+        sched:advance(0.001)
+        t:eq(store.calls.transaction, 1, "exactly at its due time")
+    end)
+
+    t:case("synchronous producers cannot cross the hard operation ceiling", function()
+        local queue, store, sched = fixture{
+            max_ops = 3, max_bytes = 1000000,
+        }
+        local accepted, rejected = 0, 0
+        for i = 1, 100 do
+            local id, err = queue:addStroke(CANVAS, stroke(4, i))
+            if id then
+                accepted = accepted + 1
+            else
+                rejected = rejected + 1
+                t:eq(err, "queue_backpressure", "the rejection is transient")
+            end
+        end
+        t:eq(accepted, 4, "soft bound plus one admitted operation")
+        t:eq(rejected, 96, "all later producers are rejected")
+        t:eq(queue:pendingCount(), queue.hard_ops, "hard ops never exceeded")
+        t:eq(queue.next_local, accepted, "rejections consume no local ids")
+        t:eq(store.calls.transaction, 0, "no producer enters SQLite")
+        t:eq(sched:pending(queue.flush_action), 1, "one urgent action remains")
+        sched:tick()
+        t:eq(strokeCount(store), accepted, "the admitted batch commits")
+    end)
+
+    t:case("byte admission and individual operation size fail before mutation", function()
+        local queue, store, sched = fixture{
+            max_ops = 100,
+            max_bytes = 20,
+            max_single_op_bytes = 100,
+        }
+        local first = queue:addStroke(CANVAS, stroke(20, 1))
+        t:check(first ~= nil, "the first operation fits its own ceiling")
+        local before_id, before_bytes = queue.next_local, queue.bytes
+        local second, pressure = queue:addStroke(CANVAS, stroke(20, 2))
+        t:eq(second, nil, "hard bytes reject the second")
+        t:eq(pressure, "queue_backpressure", "with the transient reason")
+        t:eq(queue.next_local, before_id, "no id consumed")
+        t:eq(queue.bytes, before_bytes, "no bytes charged")
+        t:eq(store.calls.transaction, 0, "still outside SQLite")
+        sched:tick()
+
+        local too_small = fixture{ max_single_op_bytes = 50 }
+        local id, reason = too_small:addStroke(CANVAS, stroke(20, 1))
+        t:eq(id, nil, "oversized operation is rejected")
+        t:eq(reason, "operation_too_large", "as a configuration/domain error")
+        t:eq(too_small:pendingCount(), 0, "the empty queue stays untouched")
+        t:eq(too_small.next_local, 0, "and no id is consumed")
+    end)
+
+    t:case("a callback extracted before close is harmless afterwards", function()
+        local queue, store, _, log = fixture()
+        queue:addStroke(CANVAS, stroke(4, 1))
+        local stale = log.scheduled[1].fn
+        t:eq(queue:close(), true, "lifecycle close commits synchronously")
+        local transactions = store.calls.transaction
+        stale()
+        t:eq(store.calls.transaction, transactions, "stale action is a no-op")
+        t:eq(strokeCount(store), 1, "the row is not duplicated")
     end)
 
     -- =================================================================

@@ -310,6 +310,8 @@ return function(ctx)
             repository = store,
             schedule = function() end,
             unschedule = function() end,
+            estimate_insert_bytes = function(n) return 3 + 4 * n end,
+            max_single_op_bytes = 64 * 1024,
         }
         for i = 1, 1000 do
             local id = queue:addStroke(DENSE, {

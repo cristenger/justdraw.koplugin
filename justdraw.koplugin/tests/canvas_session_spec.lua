@@ -68,8 +68,8 @@ return function(ctx)
                        onJustDrawUndo = function() end, setBarShown = function() end },
             ui = below,
             schedule = function(fn) sched:schedule(fn) end,
-            scheduleIn = function(_, fn) sched:schedule(fn) end,
-            unschedule = function() end,
+            scheduleIn = function(delay, fn) sched:scheduleIn(delay, fn) end,
+            unschedule = function(fn) sched:unschedule(fn) end,
             notify = function(text) notes[#notes + 1] = text end,
             batch = opts.batch or 32,
         }
@@ -458,6 +458,32 @@ return function(ctx)
         session:flush()
         t:eq(#store.strokes[1], 1, "one stroke")
         t:eq(store.strokes[1][1].width, 4, "with its width")
+    end)
+
+    t:case("canvas addStroke propagates live token and fallback scalars", function()
+        local session, _, sched = openedSession{
+            canvases = { canvasAt(1, "/p1") }, pages = { ["/p1"] = 3 },
+        }
+        session:openCanvas(session:canvasById(1))
+        sched:drain()
+        local cache = session:cache()
+        local _, raster_cache, raster_generation =
+            cache:drawSegment(10, 10, 20, 20, 4)
+        local before = #cache:buffer().writes
+        local id, err, painted, left, top, right, bottom = session:addStroke(
+            { 10, 10, 20, 20 }, 2, 4, 1, {
+                raster_cache = raster_cache,
+                raster_generation = raster_generation,
+                live_raster_complete = true,
+            })
+        t:check(id ~= nil, "the compatible first return remains the id")
+        t:eq(err, nil, "second return remains the error slot")
+        t:eq(painted, false, "matching token reports no fallback paint")
+        t:eq(left, nil, "no fallback left")
+        t:eq(top, nil, "no fallback top")
+        t:eq(right, nil, "no fallback right")
+        t:eq(bottom, nil, "no fallback bottom")
+        t:eq(#cache:buffer().writes, before, "registration did not repaint")
     end)
 
     t:case("draw flush erase flush cannot resurrect a session stroke", function()

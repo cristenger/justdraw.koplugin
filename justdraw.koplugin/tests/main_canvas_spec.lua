@@ -22,6 +22,7 @@ return function(ctx)
     local support = ctx.support
     local Device = ctx.Device
     local Capture = require("ink_capture")
+    local Replay = require("input_replay")
 
     local SW, SH = Device.screen.w, Device.screen.h
 
@@ -459,6 +460,255 @@ return function(ctx)
         penLift(p, SHEET.x + 40, SHEET.y + 40)
         t:eq(p.canvas_stroke, nil, "finished")
         t:eq(p.session:pendingWrites(), 1, "and waiting to be written")
+    end)
+
+    t:case("canvas lift reuses a complete live raster", function()
+        local p = canvasPlugin()
+        p:openCanvasHere()
+        local cache = p.session:cache()
+        penFrame(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 40, SHEET.y + 40)
+        local before = #cache:buffer().writes
+        penLift(p, SHEET.x + 40, SHEET.y + 40)
+        t:eq(#cache:buffer().writes, before,
+            "registration adds no second raster pass")
+        t:eq(#cache:strokes(), 1, "stroke metadata is still indexed")
+    end)
+
+    t:case("canvas generation mismatch repaints and presents fallback coverage", function()
+        local p = canvasPlugin()
+        p:openCanvasHere()
+        local cache = p.session:cache()
+        penFrame(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 40, SHEET.y + 40)
+        cache.generation = cache.generation + 1
+        local before_writes = #cache:buffer().writes
+        local before_refreshes = #Device.screen.refreshes
+        penLift(p, SHEET.x + 40, SHEET.y + 40)
+        t:check(#cache:buffer().writes > before_writes,
+            "stale token rasterizes the finished stroke once")
+        t:check(#Device.screen.refreshes > before_refreshes,
+            "fallback coverage is copied and refreshed")
+    end)
+
+    t:case("canvas fallback repaint waits until a modal uncovers the overlay", function()
+        local p = canvasPlugin()
+        local overlay = p:openCanvasHere()
+        local cache = p.session:cache()
+        penFrame(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 40, SHEET.y + 40)
+        cache.generation = cache.generation + 1
+
+        local modal = { handleEvent = function() return true end }
+        env.UIManager:show(modal)
+        local before_blits = #Device.screen.bb.blits
+        penLift(p, SHEET.x + 40, SHEET.y + 40)
+        t:eq(#Device.screen.bb.blits, before_blits,
+            "fallback does not write through the modal")
+        t:check(p.canvas_pending_repaint ~= nil,
+            "the exact cache generation retains one pending union")
+
+        env.UIManager:close(modal)
+        local before_dirty = #env.UIManager.dirty
+        overlay:paintTo(Device.screen.bb, 0, 0)
+        t:eq(p.canvas_pending_repaint, nil, "overlay paint consumes the union")
+        t:eq(#env.UIManager.dirty, before_dirty + 1,
+            "uncover schedules one regional cleanup")
+        local dirty = env.UIManager.dirty[#env.UIManager.dirty]
+        t:eq(dirty[1], nil, "cleanup refresh does not repaint a widget")
+        t:eq(dirty[2], "partial", "fallback receives a quality refresh")
+    end)
+
+    t:case("canvas framebuffer writes never cover toolbar or handle chrome", function()
+        for _, side in ipairs({ "right", "left" }) do
+            local p = canvasPlugin()
+            local overlay = p:openCanvasHere()
+            if side == "left" then p:sideItem("Left", "left").callback() end
+            overlay = p.session:overlay()
+            local tr = p.session:transform()
+            local bar, handle = overlay.bar.dimen, overlay:handleRect()
+            local sx = side == "right" and bar.x - 2 or bar.x + bar.w - 2
+            local sy = bar.y + 8
+            local box = {
+                x = sx - tr.offset_x, y = sy - tr.offset_y, w = 5, h = 4,
+            }
+            local before = #Device.screen.bb.rects
+            p:blitCanvasBox(box, tr)
+            t:check(#Device.screen.bb.rects > before,
+                side .. " toolbar is repainted over an intersecting nib")
+
+            box = {
+                x = math.floor(handle.x + handle.w / 2) - tr.offset_x,
+                y = handle.y + handle.h - 2 - tr.offset_y,
+                w = 5, h = 5,
+            }
+            before = #Device.screen.bb.rects
+            p:blitCanvasBox(box, tr)
+            t:check(#Device.screen.bb.rects > before,
+                side .. " handle is repainted over an intersecting repair")
+
+            local modal = { handleEvent = function() return true end }
+            env.UIManager:show(modal)
+            p:blitCanvasBox({
+                x = sx - tr.offset_x, y = sy - tr.offset_y, w = 5, h = 4,
+            }, tr)
+            env.UIManager:close(modal)
+            before = #Device.screen.bb.rects
+            p:_flushCanvasPendingRepaint(false)
+            t:check(#Device.screen.bb.rects > before,
+                side .. " deferred repaint restores intersected chrome")
+        end
+    end)
+
+    t:case("canvas repaint treats a toast as a visual occluder", function()
+        local p = canvasPlugin()
+        local overlay = p:openCanvasHere()
+        local tr = p.session:transform()
+        local toast = { toast = true, handleEvent = function() return false end }
+        env.UIManager:show(toast)
+        local before = #Device.screen.bb.blits
+        p:blitCanvasBox({ x = 100, y = 100, w = 10, h = 10 }, tr)
+        t:eq(#Device.screen.bb.blits, before,
+            "direct ink does not punch through a toast")
+        t:check(p.canvas_pending_repaint ~= nil,
+            "hidden ink remains bound to the canvas generation")
+        env.UIManager:close(toast)
+        overlay:paintTo(Device.screen.bb, 0, 0)
+        t:eq(p.canvas_pending_repaint, nil,
+            "toast uncover consumes the pending repaint")
+    end)
+
+    t:case("canvas backpressure repairs ink and recovers after urgent commit", function()
+        local p = canvasPlugin()
+        p:openCanvasHere()
+        local surface = p.session.surface_session
+        penFrame(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 20, SHEET.y)
+        penLift(p, SHEET.x + 20, SHEET.y)
+        surface.queue.hard_ops = 1
+
+        penFrame(p, SHEET.x, SHEET.y + 40)
+        penFrame(p, SHEET.x + 20, SHEET.y + 40)
+        penLift(p, SHEET.x + 20, SHEET.y + 40)
+        t:eq(surface.queue:isFailed(), false, "transient pressure is not save_failed")
+        t:eq(surface:pendingWrites(), 1, "admitted work remains queued")
+        t:eq(#surface:cache():strokes(), 1, "rejected live stroke is repaired")
+        t:eq(#env.notifications, 0, "no window opens inside the stylus callback")
+        env.UIManager:flush()
+        t:eq(surface:pendingWrites(), 0, "urgent action committed the admitted work")
+        t:eq(#env.notifications, 1, "one deferred warning is shown")
+        t:check(env.notifications[1]:find("write queue is busy", 1, true) ~= nil,
+            "warning names the recoverable condition")
+
+        penFrame(p, SHEET.x, SHEET.y + 80)
+        penLift(p, SHEET.x, SHEET.y + 80)
+        t:eq(surface:pendingWrites(), 1, "the next physical contact is accepted")
+        t:eq(#surface:cache():strokes(), 2, "durable and new ink remain visible")
+    end)
+
+    t:case("canvas backpressure repair never punches through a modal", function()
+        local p = canvasPlugin()
+        local overlay = p:openCanvasHere()
+        local surface = p.session.surface_session
+        penFrame(p, SHEET.x, SHEET.y)
+        penLift(p, SHEET.x, SHEET.y)
+        surface.queue.hard_ops = 1
+
+        penFrame(p, SHEET.x, SHEET.y + 40)
+        penFrame(p, SHEET.x + 20, SHEET.y + 40)
+        local modal = { handleEvent = function() return true end }
+        env.UIManager:show(modal)
+        local before_blits = #Device.screen.bb.blits
+        penLift(p, SHEET.x + 20, SHEET.y + 40)
+        t:eq(#Device.screen.bb.blits, before_blits,
+            "repair remains behind the modal")
+        t:check(p.canvas_pending_repaint ~= nil, "repair is retained")
+
+        env.UIManager:close(modal)
+        overlay:paintTo(Device.screen.bb, 0, 0)
+        t:eq(p.canvas_pending_repaint, nil, "uncover presents the repaired cache")
+    end)
+
+    t:case("an oversized canvas operation disarms capture after the frame", function()
+        local p = canvasPlugin()
+        p:openCanvasHere()
+        penFrame(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 20, SHEET.y)
+        p.session.addStroke = function() return nil, "operation_too_large" end
+
+        penLift(p, SHEET.x + 20, SHEET.y)
+        t:eq(Capture.active, true, "stylus callback leaves this frame filterable")
+        t:check(p.canvas_pending_capture_stop ~= nil,
+            "domain stop is latched until the residual handler")
+        local kept = touchFrame(p, {
+            { slot = 0, id = 9, x = SHEET.x, y = SHEET.y, tool = 0 },
+        })
+        t:eq(#kept, 0, "same-frame palm is filtered before capture stops")
+        t:eq(Capture.active, false, "capture becomes inert after filtering")
+        t:eq(p.drawing, true, "visible state stays stable through the frame")
+        t:eq(p.session.surface_session.queue:isFailed(), false,
+            "the domain error is not a transaction failure")
+        env.UIManager:flush()
+        t:eq(p.drawing, false, "capture is removed from a safe tick")
+        t:eq(p.input_lease, nil, "the process lease is released")
+    end)
+
+    t:case("canvas fatal teardown preserves the real SYN pipeline", function()
+        local p = canvasPlugin()
+        p:openCanvasHere()
+        p.session.addStroke = function() return nil, "operation_too_large" end
+        local input = Device.input
+        local callback = input.stylus_callback
+        local replay = Replay.new{
+            mode = "integration", input = input, capture = Capture,
+        }
+        replay:set(4, {
+            id = 1, x = SHEET.x, y = SHEET.y, tool = Capture.TOOL_PEN,
+        })
+        replay:syn()
+        replay:set(4, {
+            id = -1, x = SHEET.x, y = SHEET.y, tool = Capture.TOOL_FINGER,
+        })
+        replay:set(5, {
+            id = 2, x = SHEET.x + 20, y = SHEET.y + 20,
+            tool = Capture.TOOL_PEN,
+        })
+        replay:set(0, {
+            id = 9, x = SHEET.x + 10, y = SHEET.y + 10,
+            tool = Capture.TOOL_FINGER,
+        })
+        local _, _, dominated = replay:syn()
+        t:eq(#dominated, 2, "both stylus slots are dominated")
+        t:eq(#input.gesture_detector.last_slots, 0,
+            "palm is removed by the wrapped frame handler")
+        t:eq(Capture.active, false, "capture stops only after frame filtering")
+        t:eq(input.stylus_callback, callback,
+            "callback identity survives until the safe tick")
+        env.UIManager:flush()
+        t:eq(input.stylus_callback, nil, "safe tick removes callback")
+        t:eq(p.drawing, false, "visible drawing state follows teardown")
+        t:eq(p.router:touchCount(), 0,
+            "lease teardown releases the same-frame palm latch")
+        t:eq(p.router.pen_down, false,
+            "lease teardown also releases physical pen ownership")
+
+        p:setDrawing(true)
+        t:eq(p.drawing, true, "drawing can be re-enabled after the domain stop")
+        replay:set(0, {
+            id = 10, x = READER.x, y = READER.y,
+            tool = Capture.TOOL_FINGER,
+        })
+        replay:syn()
+        t:eq(#input.gesture_detector.last_slots, 1,
+            "the reused slot reaches GestureDetector in the new lease")
+        t:eq(p.router:destinationOf(0), "reader",
+            "the old palm classification does not survive reactivation")
+        replay:set(0, {
+            id = -1, x = READER.x, y = READER.y,
+            tool = Capture.TOOL_FINGER,
+        })
+        replay:syn()
+        t:eq(p.router:touchCount(), 0, "the new lease observes the reused-slot lift")
     end)
 
     t:case("the stroke reaches the database when settings are saved", function()

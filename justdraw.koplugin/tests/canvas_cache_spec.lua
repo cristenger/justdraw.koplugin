@@ -216,6 +216,57 @@ return function(ctx)
         t:check(#cache:buffer().rects > 0, "and it was painted")
     end)
 
+    t:case("a matching complete live token registers without repainting", function()
+        local cache = readyCache()
+        local bb = cache:buffer()
+        bb:clear()
+        local _, raster_cache, raster_generation =
+            cache:drawSegment(100, 100, 100, 100, 4)
+        local before = #bb.rects
+        local ok, err, painted, left, top, right, bottom = cache:addStroke({
+            id = -1, seq = 1, width = 4, tool = 1, point_count = 1,
+            min_x = 100, min_y = 100, max_x = 100, max_y = 100,
+        }, { 100, 100 }, 1, {
+            raster_cache = raster_cache,
+            raster_generation = raster_generation,
+            live_raster_complete = true,
+        })
+        t:eq(ok, true, "metadata accepted")
+        t:eq(err, nil, "without an error")
+        t:eq(painted, false, "no fallback rasterisation")
+        t:eq(left, nil, "no dirty coverage")
+        t:eq(top, nil, "no dirty coverage")
+        t:eq(right, nil, "no dirty coverage")
+        t:eq(bottom, nil, "no dirty coverage")
+        t:eq(#bb.rects, before, "the dot is not painted twice")
+        t:eq(cache:strokes()[1].id, -1, "temporary metadata was registered")
+        t:check(cache:hitTest(100, 100, 2) ~= nil, "grid/live chunks were indexed")
+    end)
+
+    t:case("a generation mismatch falls back once and reports cache coverage", function()
+        local cache = readyCache()
+        local bb = cache:buffer()
+        bb:clear()
+        local stale_generation = cache.generation - 1
+        local before = #bb.rects
+        local ok, err, painted, left, top, right, bottom = cache:addStroke({
+            id = -1, seq = 1, width = 4, tool = 1, point_count = 2,
+            min_x = 100, min_y = 100, max_x = 110, max_y = 100,
+        }, { 100, 100, 110, 100 }, 2, {
+            raster_cache = cache,
+            raster_generation = stale_generation,
+            live_raster_complete = true,
+        })
+        t:eq(ok, true, "metadata accepted")
+        t:eq(err, nil, "without an error")
+        t:eq(painted, true, "fallback rasterisation occurred")
+        t:check(#bb.rects > before, "the whole stroke was painted once")
+        t:check(left >= 0 and top >= 0, "coverage is clipped to the cache")
+        t:check(right > left and bottom > top, "coverage is positive half-open")
+        t:check(right <= bb:getWidth() and bottom <= bb:getHeight(),
+            "coverage cannot escape the cache")
+    end)
+
     t:case("a pending stroke is hit and repaired without a negative SQLite read", function()
         local cache, store = readyCache()
         local s = bar(100, 100)
@@ -411,6 +462,28 @@ return function(ctx)
         t:check(#bb.rects > 0, "painted")
         t:check(box ~= nil and box.w > 0 and box.h > 0, "with a dirty box to refresh")
         t:check(box.x <= 100 and box.x + box.w >= 200, "covering the segment")
+    end)
+
+    t:case("live dirty coverage is the half-open union actually painted", function()
+        local cache = readyCache()
+        local bb = cache:buffer()
+        bb:clear()
+        local box, raster_cache, raster_generation =
+            cache:drawSegment(-10, 20, 10, 20, 4)
+        local left, top = bb:getWidth(), bb:getHeight()
+        local right, bottom = 0, 0
+        for _, rect in ipairs(bb.rects) do
+            if rect.x < left then left = rect.x end
+            if rect.y < top then top = rect.y end
+            if rect.x + rect.w > right then right = rect.x + rect.w end
+            if rect.y + rect.h > bottom then bottom = rect.y + rect.h end
+        end
+        t:eq(box.x, left, "left edge")
+        t:eq(box.y, top, "top edge")
+        t:eq(box.w, right - left, "half-open width")
+        t:eq(box.h, bottom - top, "half-open height")
+        t:eq(raster_cache, cache, "token identifies the cache object")
+        t:eq(raster_generation, cache.generation, "token identifies its generation")
     end)
 
     t:case("a live segment outside the canvas paints nothing at all", function()

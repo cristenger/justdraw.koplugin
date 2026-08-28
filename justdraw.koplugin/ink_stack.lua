@@ -49,6 +49,20 @@ function Stack.above(widget)
     end
 end
 
+--- Return the topmost window above `widget`, including toasts.
+--- Toasts never own input, but they do own pixels while UIManager paints the
+--- stack from bottom to top. Direct framebuffer blits must therefore treat a
+--- toast as an occluder even though event routing deliberately ignores it.
+function Stack.visualAbove(widget)
+    local stack = UIManager._window_stack
+    local above
+    for i = #stack, 1, -1 do
+        local w = stack[i].widget
+        if w == widget then return above end
+        if not above then above = w end
+    end
+end
+
 --[[--
 Pass an input event on to the window underneath, if this is one of the events
 that would otherwise stop here.

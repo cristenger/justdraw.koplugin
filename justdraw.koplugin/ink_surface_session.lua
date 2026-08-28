@@ -8,10 +8,21 @@ controllers; this module only knows an id and persistent logical geometry.
 
 local Cache = require("ink_canvas_cache")
 local Codec = require("ink_canvas_codec")
+local Limits = require("ink_limits")
 local Queue = require("ink_canvas_queue")
 
 local SurfaceSession = {}
 SurfaceSession.__index = SurfaceSession
+
+local function encodedBytes(n)
+    n = tonumber(n)
+    if not n or n < 1 or n ~= math.floor(n) then return nil end
+    local chunks = 1
+    if n > 1 then
+        chunks = math.ceil((n - 1) / (Codec.MAX_POINTS - 1))
+    end
+    return chunks * Codec.HEADER + 4 * (n + chunks - 1)
+end
 
 local function notifyState(self)
     if self.on_state_changed then
@@ -40,6 +51,7 @@ function SurfaceSession.new(opts)
         on_will_rebuild = opts.on_will_rebuild,
         cache_opts = opts.cache_opts or {},
         queue_opts = opts.queue_opts or {},
+        max_open_points = opts.max_open_points or Limits.MAX_OPEN_POINTS,
         cache_obj = nil,
         queue = nil,
         next_seq = nil,
@@ -113,6 +125,11 @@ function SurfaceSession:open()
             max_ops = self.queue_opts.max_ops,
             max_bytes = self.queue_opts.max_bytes,
             delay = self.queue_opts.delay,
+            hard_ops = self.queue_opts.hard_ops,
+            hard_bytes = self.queue_opts.hard_bytes,
+            clock = self.queue_opts.clock,
+            estimate_insert_bytes = encodedBytes,
+            max_single_op_bytes = encodedBytes(self.max_open_points),
             on_error = function(reason)
                 if self.on_save_error then self.on_save_error(reason, self) end
                 notifyState(self)
@@ -180,7 +197,7 @@ function SurfaceSession:setTransform(transform)
     return true
 end
 
-function SurfaceSession:addStroke(points, n, width, tool)
+function SurfaceSession:addStroke(points, n, width, tool, opts)
     if not self:isWritable() then return nil, "read_only" end
     if self:saveFailed() then return nil, "save_failed" end
     if not self:isReady() then return nil, self:stateName() end
@@ -211,10 +228,11 @@ function SurfaceSession:addStroke(points, n, width, tool)
         if x < min_x then min_x = x elseif x > max_x then max_x = x end
         if y < min_y then min_y = y elseif y > max_y then max_y = y end
     end
-    local added, cache_err = self.cache_obj:addStroke({
+    local added, cache_err, painted, left, top, right, bottom =
+        self.cache_obj:addStroke({
         id = local_id, seq = seq, width = width, tool = tool, point_count = n,
         min_x = min_x, min_y = min_y, max_x = max_x, max_y = max_y,
-    }, points, n)
+    }, points, n, opts)
     if not added then
         self.queue:removeStroke(self.surface_obj, local_id)
         return nil, cache_err
@@ -228,7 +246,7 @@ function SurfaceSession:addStroke(points, n, width, tool)
     end
     self.next_seq = seq + 1
     self.edited = true
-    return local_id
+    return local_id, nil, painted, left, top, right, bottom
 end
 
 function SurfaceSession:beginErase()

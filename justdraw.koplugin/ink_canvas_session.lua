@@ -499,11 +499,12 @@ Record a finished stroke: into the raster, the spatial index and the queue.
 Points are canvas coordinates. Nothing here touches the disk -- the queue
 decides when that happens.
 ]]
-function Session:addStroke(points, n, width, tool)
+function Session:addStroke(points, n, width, tool, opts)
     if not self.surface_session then return nil, "no_canvas" end
-    local id, err = self.surface_session:addStroke(points, n, width, tool)
+    local id, err, painted, left, top, right, bottom =
+        self.surface_session:addStroke(points, n, width, tool, opts)
     if id then self.edited = true end
-    return id, err
+    return id, err, painted, left, top, right, bottom
 end
 
 --- Remove the topmost stroke under a canvas point. Returns the dirty region.

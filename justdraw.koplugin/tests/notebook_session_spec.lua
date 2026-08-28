@@ -315,6 +315,34 @@ return function(ctx)
         t:check(input.current ~= nil, "new lease installed")
     end)
 
+    t:case("a domain failure disarms input on a safe scheduled boundary", function()
+        local session, _, sched, input, aborted = fixture()
+        session:open(1)
+        input.contact = true
+        local lease = input.current
+        function lease:releaseDeferred(after)
+            self.active = false
+            sched:schedule(function()
+                input.current = nil
+                input.released = input.released + 1
+                after()
+            end)
+            return true
+        end
+
+        t:eq(session:failInputDeferred("operation_too_large"), true,
+            "the expected domain error is accepted")
+        t:eq(lease.active, false, "capture becomes inert immediately")
+        t:eq(aborted(), 0, "adapter cleanup is outside the callback frame")
+        t:eq(session:stateName(), "input_failed",
+            "the explicit Retry input state is already latched")
+        sched:drain()
+        t:eq(aborted(), 1, "live input is repaired on the safe tick")
+        t:eq(input.current, nil, "the global lease is released")
+        t:eq(session.input_lease, nil, "the session drops the old lease")
+        t:eq(session:retryInput(), true, "the user can rearm input explicitly")
+    end)
+
     t:case("resume never retries a failed input handler implicitly", function()
         local session, _, _, input = fixture()
         session:open(1)

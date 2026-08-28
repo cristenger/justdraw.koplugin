@@ -3,9 +3,10 @@ When a stroke reaches the disk.
 
 Committing on every lift puts a database write in the middle of handwriting.
 Committing only on close loses everything the reader wrote this session. So
-strokes are held in memory and flushed at the first of four bounds: a quarter
-of a second, eight operations, sixty-four kilobytes, or any point KOReader
-tells us the session might be about to end.
+strokes are held in memory and a commit is requested at the first of three
+soft bounds: a quarter of a second, eight operations or sixty-four kilobytes.
+Thresholds schedule the commit on the next UI tick; they never run SQLite from
+the input callback. Lifecycle gates still flush synchronously.
 
 `onSaveSettings` is the mandatory one, and it is not interchangeable with
 `onSuspend`: `Device:_beforeSuspend` calls `UIManager:flushSettings()` and only
@@ -24,6 +25,7 @@ marked as written, and no fresh database is reached for.
 ]]
 
 local logger = require("logger")
+local time = require("ui/time")
 
 local Queue = {}
 Queue.__index = Queue
@@ -35,30 +37,43 @@ local FLUSH_DELAY = 0.25          -- seconds
 local FLUSH_OPS = 8
 local FLUSH_BYTES = 64 * 1024
 
---- Codec header plus four bytes a point, close enough to bound the queue
---- without encoding a stroke twice.
-local function estimateBytes(n)
-    return 3 + 4 * (tonumber(n) or 0)
+local function monotonicSeconds()
+    return time.now() / time.s(1)
 end
 
 --[[--
   opts.repository  canvas store: transaction, addStroke, deleteStroke
   opts.schedule    function(delay_seconds, fn) -- UIManager:scheduleIn
   opts.unschedule  function(fn)                -- UIManager:unschedule
+  opts.estimate_insert_bytes function(point_count) -- exact codec footprint
+  opts.max_single_op_bytes largest valid insert admitted by the input budget
   opts.on_error    function(reason), called once per failed flush
   opts.on_persisted function(local_id, row_id), after the transaction commits
 ]]
 function Queue.new(opts)
-    return setmetatable({
+    opts = opts or {}
+    assert(type(opts.estimate_insert_bytes) == "function",
+        "estimate_insert_bytes is required")
+    local max_single = tonumber(opts.max_single_op_bytes)
+    assert(max_single and max_single >= 0 and max_single < math.huge,
+        "max_single_op_bytes is required")
+    local max_ops = opts.max_ops or FLUSH_OPS
+    local max_bytes = opts.max_bytes or FLUSH_BYTES
+    local self = setmetatable({
         repository = opts.repository,
         schedule = opts.schedule,
         unschedule = opts.unschedule,
+        estimate_insert_bytes = opts.estimate_insert_bytes,
+        max_single_op_bytes = max_single,
         on_error = opts.on_error,
         on_persisted = opts.on_persisted,
         on_committed = opts.on_committed,
-        max_ops = opts.max_ops or FLUSH_OPS,
-        max_bytes = opts.max_bytes or FLUSH_BYTES,
+        max_ops = max_ops,
+        max_bytes = max_bytes,
+        hard_ops = opts.hard_ops or max_ops + 1,
+        hard_bytes = opts.hard_bytes or max_bytes + max_single,
         delay = opts.delay or FLUSH_DELAY,
+        clock = opts.clock or monotonicSeconds,
 
         ops = {},
         bytes = 0,
@@ -68,9 +83,22 @@ function Queue.new(opts)
         --- matches on the action it was given, and treating scheduleIn's return
         --- value as a handle cancels nothing at all.
         timer = nil,
+        scheduled_kind = nil,
+        scheduled_due = nil,
         failed = false,
         closed = false,
     }, Queue)
+    self.flush_action = function()
+        -- An action already extracted by the event loop may run after it was
+        -- cancelled or after close. Only the currently armed generation owns
+        -- the right to flush.
+        if self.scheduled_kind == nil then return end
+        self.timer = nil
+        self.scheduled_kind = nil
+        self.scheduled_due = nil
+        if not self.closed then self:flush() end
+    end
+    return self
 end
 
 function Queue:pendingCount()
@@ -105,6 +133,21 @@ function Queue:addStroke(canvas, stroke)
     if self.closed then return nil, "closed" end
     if self.failed then return nil, "failed" end
 
+    local estimated = self.estimate_insert_bytes(stroke and stroke.n)
+    if type(estimated) ~= "number" or estimated ~= estimated
+        or estimated < 0 or estimated == math.huge then
+        return nil, "bad_stroke"
+    end
+    if estimated > self.max_single_op_bytes then
+        if #self.ops > 0 then self:_armTimer("urgent", 0) end
+        return nil, "operation_too_large"
+    end
+    if #self.ops + 1 > self.hard_ops
+        or self.bytes + estimated > self.hard_bytes then
+        if #self.ops > 0 then self:_armTimer("urgent", 0) end
+        return nil, "queue_backpressure"
+    end
+
     self.next_local = self.next_local + 1
     local local_id = -self.next_local   -- negative, so it can never collide
                                         -- with a SQLite row id
@@ -115,8 +158,9 @@ function Queue:addStroke(canvas, stroke)
         seq = stroke.seq,
         local_id = local_id,
         stroke = stroke,
+        estimated_bytes = estimated,
     }
-    self.bytes = self.bytes + estimateBytes(stroke.n)
+    self.bytes = self.bytes + estimated
     self:_afterChange()
     return local_id
 end
@@ -137,7 +181,7 @@ function Queue:removeStroke(canvas, id)
         local op = self.ops[i]
         if op.kind == "insert" and op.local_id == id then
             table.remove(self.ops, i)
-            self.bytes = self.bytes - estimateBytes(op.stroke.n)
+            self.bytes = self.bytes - op.estimated_bytes
             if self.bytes < 0 then self.bytes = 0 end
             if #self.ops == 0 then self:_cancelTimer() end
             return true
@@ -151,6 +195,10 @@ function Queue:removeStroke(canvas, id)
         row_id = self.real[id]
     end
     if not row_id then return nil, "unknown_stroke" end
+    if #self.ops + 1 > self.hard_ops then
+        if #self.ops > 0 then self:_armTimer("urgent", 0) end
+        return nil, "queue_backpressure"
+    end
     self.ops[#self.ops + 1] = {
         kind = "delete",
         canvas = canvas,
@@ -163,27 +211,27 @@ end
 
 function Queue:_afterChange()
     if #self.ops >= self.max_ops or self.bytes >= self.max_bytes then
-        self:flush()
-        return
+        return self:_armTimer("urgent", 0)
     end
-    self:_armTimer()
+    self:_armTimer("delayed", self.delay)
 end
 
-function Queue:_armTimer()
-    if self.timer then return end
-    local fn
-    fn = function()
-        if self.timer == fn then self.timer = nil end
-        self:flush()
-    end
-    self.timer = fn
-    self.schedule(self.delay, fn)
+function Queue:_armTimer(kind, delay)
+    if self.closed or #self.ops == 0 then return end
+    if self.scheduled_kind == "urgent" then return end
+    if self.scheduled_kind == "delayed" and kind == "delayed" then return end
+    if self.scheduled_kind then self:_cancelTimer() end
+    self.timer = self.flush_action
+    self.scheduled_kind = kind
+    self.scheduled_due = self.clock() + delay
+    self.schedule(delay, self.flush_action)
 end
 
 function Queue:_cancelTimer()
-    if not self.timer then return end
-    self.unschedule(self.timer)
+    if self.timer then self.unschedule(self.timer) end
     self.timer = nil
+    self.scheduled_kind = nil
+    self.scheduled_due = nil
 end
 
 -- ----------------------------------------------------------------- flushing
@@ -207,6 +255,7 @@ function Queue:flush()
     local assigned = {}
     local touched = {}
 
+    local started = self.clock()
     local ok, err = self.repository:transaction(function()
         for i = 1, #ops do
             local op = ops[i]
@@ -231,17 +280,21 @@ function Queue:flush()
         return true
     end)
 
+    local elapsed_ms = (self.clock() - started) * 1000
     if not ok then
         -- Everything stays exactly where it was. Marking work as durable that
         -- is not is the one outcome worse than losing it loudly.
         self.failed = true
         self.error = err
+        logger.dbg("JustDraw: canvas commit,", #ops, "operations,",
+            self.bytes, "bytes,", elapsed_ms, "ms, failed")
         logger.err("JustDraw: could not save canvas ink:", err)
         if self.on_error then self.on_error(err) end
         return nil, err
     end
 
-    logger.dbg("JustDraw: canvas commit,", #ops, "operations,", self.bytes, "bytes")
+    logger.dbg("JustDraw: canvas commit,", #ops, "operations,",
+        self.bytes, "bytes,", elapsed_ms, "ms, success")
     for i = 1, #assigned do
         local local_id, row_id = assigned[i][1], assigned[i][2]
         -- Keep the map only when the insert committed before the cache knew

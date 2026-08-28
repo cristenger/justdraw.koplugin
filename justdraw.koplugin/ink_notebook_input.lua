@@ -11,12 +11,29 @@ local Capture = require("ink_capture")
 local Device = require("device")
 local Geom = require("ui/geometry")
 local time = require("ui/time")
+local Limits = require("ink_limits")
 
 local Adapter = {}
 Adapter.__index = Adapter
 
 local function truthy(fn, ...)
     return type(fn) == "function" and fn(...) and true or false
+end
+
+local function updateLiveRasterToken(stroke, box, cache, generation)
+    if stroke.live_raster_complete == false then return end
+    if not box or not cache or generation == nil then
+        stroke.live_raster_complete = false
+        return
+    end
+    if stroke.raster_cache == nil then
+        stroke.raster_cache = cache
+        stroke.raster_generation = generation
+        stroke.live_raster_complete = true
+    elseif stroke.raster_cache ~= cache
+        or stroke.raster_generation ~= generation then
+        stroke.live_raster_complete = false
+    end
 end
 
 function Adapter.new(opts)
@@ -31,8 +48,13 @@ function Adapter.new(opts)
         on_dirty = opts.on_dirty,
         on_edit_changed = opts.on_edit_changed,
         on_error = opts.on_error,
+        on_domain_error = opts.on_domain_error,
+        on_physical_contact_end = opts.on_physical_contact_end,
         now = opts.now or time.now,
+        get_stylus_trace = opts.get_stylus_trace,
         control_guard = opts.control_guard or time.ms(300),
+        max_open_points = opts.max_open_points or Limits.MAX_OPEN_POINTS,
+        max_contact_samples = opts.max_contact_samples or Limits.MAX_CONTACT_SAMPLES,
         active_session = nil,
         transform = nil,
         stylus_active = false,
@@ -55,6 +77,16 @@ function Adapter.new(opts)
         contact_count = 0,
         finger_slot = nil,
         residual = {},
+        physical_contact_active = false,
+        trace_instance = nil,
+        trace_event_ordinal = 0,
+        trace_frame_ordinal = 0,
+        stylus_sample_count = 0,
+        stylus_budget_notified = false,
+        backpressure_notified = false,
+        trace_route_reason = nil,
+        pending_domain_reason = nil,
+        pending_domain_session = nil,
     }, Adapter)
 end
 
@@ -63,7 +95,8 @@ function Adapter:configure(opts)
     local keys = {
         "get_mode", "get_pen_width", "get_eraser", "eraser_radius",
         "touch_passthrough", "stylus_passthrough", "on_dirty",
-        "on_edit_changed", "on_error",
+        "on_edit_changed", "on_physical_contact_end", "on_error",
+        "on_domain_error", "get_stylus_trace",
         "now", "control_guard",
     }
     for i = 1, #keys do
@@ -81,6 +114,21 @@ function Adapter:_maybeEmitEditChanged()
     if not self.edit_pending or self:hasActiveContact() then return end
     self.edit_pending = false
     if self.on_edit_changed then self.on_edit_changed(self.active_session) end
+end
+
+function Adapter:_markPhysicalContact()
+    self.physical_contact_active = true
+end
+
+function Adapter:_maybeEmitPhysicalContactEnd(reason, session)
+    if not self.physical_contact_active or self:hasActiveContact(session) then
+        return false
+    end
+    self.physical_contact_active = false
+    if self.on_physical_contact_end then
+        self.on_physical_contact_end(session or self.active_session, reason)
+    end
+    return true
 end
 
 function Adapter:presentDirtyBox(box, kind, session)
@@ -188,7 +236,9 @@ function Adapter:_beginInk(sx, sy, tool)
         tool = tonumber(tool) or Capture.TOOL_PEN,
         min_x = cx, min_y = cy, max_x = cx, max_y = cy,
     }
-    local box = surface:cache():drawSegment(cx, cy, cx, cy, width)
+    local box, raster_cache, raster_generation =
+        surface:cache():drawSegment(cx, cy, cx, cy, width)
+    updateLiveRasterToken(self.stroke, box, raster_cache, raster_generation)
     self:_dirty(box, "ink")
     return true
 end
@@ -215,13 +265,19 @@ function Adapter:_continueInk(sx, sy, tool)
     local previous_x = stroke.points[stroke.n * 2 - 1]
     local previous_y = stroke.points[stroke.n * 2]
     if cx == previous_x and cy == previous_y then return true end
+    if stroke.n >= self.max_open_points then
+        self:_discardLiveInk()
+        return nil, "point_budget"
+    end
     stroke.n = stroke.n + 1
     stroke.points[stroke.n * 2 - 1] = cx
     stroke.points[stroke.n * 2] = cy
     if cx < stroke.min_x then stroke.min_x = cx elseif cx > stroke.max_x then stroke.max_x = cx end
     if cy < stroke.min_y then stroke.min_y = cy elseif cy > stroke.max_y then stroke.max_y = cy end
-    local box = surface:cache():drawSegment(previous_x, previous_y,
-        cx, cy, stroke.width)
+    local box, raster_cache, raster_generation =
+        surface:cache():drawSegment(previous_x, previous_y,
+            cx, cy, stroke.width)
+    updateLiveRasterToken(stroke, box, raster_cache, raster_generation)
     self:_dirty(box, "ink")
     return true
 end
@@ -236,14 +292,38 @@ function Adapter:_finishInk()
     local stroke = self.stroke
     self.stroke = nil
     if not stroke or not surface then return true end
-    local id, err = surface:addStroke(stroke.points, stroke.n,
-        stroke.width, stroke.tool)
+    local id, err, painted, left, top, right, bottom =
+        surface:addStroke(stroke.points, stroke.n,
+            stroke.width, stroke.tool, {
+                raster_cache = stroke.raster_cache,
+                raster_generation = stroke.raster_generation,
+                live_raster_complete = stroke.live_raster_complete == true,
+            })
     if not id then
         local box = surface:repair(stroke.min_x, stroke.min_y,
             stroke.max_x, stroke.max_y, stroke.width)
         self:_dirty(box, "repair")
-        if self.on_error then self.on_error(err or "stroke_failed") end
+        if err == "queue_backpressure" then
+            if not self.backpressure_notified and self.on_error then
+                self.backpressure_notified = true
+                self.on_error(err)
+            end
+        elseif self.on_error then
+            self.on_error(err or "stroke_failed")
+        end
+        if err == "operation_too_large" and self.on_domain_error then
+            -- Calling releaseDeferred from the stylus callback makes
+            -- InkCapture's feed wrapper inert before this same SYN_REPORT is
+            -- filtered. Deliver only after the residual frame has run.
+            self.pending_domain_reason = err
+            self.pending_domain_session = self.active_session
+        end
         return nil, err
+    end
+    self.backpressure_notified = false
+    if painted then
+        self:_dirty({ x = left, y = top, w = right - left, h = bottom - top },
+            "ink")
     end
     self:_markEditChanged()
     return true
@@ -251,6 +331,8 @@ end
 
 function Adapter:abort(session)
     if session and self.active_session and session ~= self.active_session then return true end
+    local had_contact = self.physical_contact_active or self:hasActiveContact(session)
+    local active_session = self.active_session
     -- Contacts already forwarded to GestureDetector have armed its Contact
     -- state and timers. If a resize/error tears down capture before their
     -- physical lift, retire them explicitly rather than suppressing that lift
@@ -274,11 +356,19 @@ function Adapter:abort(session)
     self.stylus_slot = nil
     self.stylus_tool = nil
     self.stale_down = false
+    self.stylus_sample_count = 0
+    self.stylus_budget_notified = false
+    self.trace_route_reason = nil
+    self.pending_domain_reason = nil
+    self.pending_domain_session = nil
     self.contacts = {}
     self.contact_count = 0
     self.finger_slot = nil
     self.residual = {}
+    self.physical_contact_active = had_contact and true or false
+    self:_maybeEmitPhysicalContactEnd("external_abort", active_session)
     self:_maybeEmitEditChanged()
+    self:_resetStylusTraceContactHistory()
     return true
 end
 
@@ -301,17 +391,141 @@ function Adapter:controlTouchAllowed()
     return true
 end
 
+function Adapter:_legacyStylusTraceState()
+    if self.stylus_pass_latched then return "active_pass" end
+    if self.stylus_suspended then return "suspended" end
+    if self.stylus_active then
+        if not self.stylus_geom_latched then return "geometry_pending" end
+        if self.stylus_inked then return "active_draw" end
+        return "active_block"
+    end
+    return "idle"
+end
+
+local function legacyTraceDelivery(state)
+    return state ~= "active_pass" and state ~= "forwarded_wait_lift"
+end
+
+function Adapter:_activeStylusTrace()
+    local trace = self.get_stylus_trace and self.get_stylus_trace() or nil
+    if trace ~= self.trace_instance then
+        self.trace_instance = trace
+        self.trace_event_ordinal = 0
+        self.trace_frame_ordinal = 0
+    end
+    return trace
+end
+
+function Adapter:_resetStylusTraceContactHistory()
+    local trace = self:_activeStylusTrace()
+    if trace and type(trace.resetContactHistory) == "function" then
+        trace:resetContactHistory()
+    end
+end
+
+function Adapter:_deliverPendingDomainError()
+    local reason, session = self.pending_domain_reason,
+        self.pending_domain_session
+    self.pending_domain_reason = nil
+    self.pending_domain_session = nil
+    if reason and self.on_domain_error then
+        self.on_domain_error(reason, session)
+    end
+end
+
+function Adapter:_recordLegacyStylusTrace(trace, slot_number, id, tool,
+        x, y, timev, before_state, before_delivery, delivery, decision, reason)
+    self.trace_event_ordinal = self.trace_event_ordinal + 1
+    local dx, dy, dt = trace:deltas(slot_number, id, tool, x, y, timev)
+    trace:record(self.trace_event_ordinal, self.trace_frame_ordinal + 1,
+        slot_number, id, tool, x, y, timev,
+        before_state, self:_legacyStylusTraceState(),
+        before_delivery, delivery, decision, reason, dx, dy, dt)
+end
+
+--- Instrument the current route without choosing an unproven geometry policy.
 function Adapter:_stylus(slot)
+    local trace = self:_activeStylusTrace()
+    if not trace then return self:_routeLegacyStylus(slot) end
+
+    local slot_number, id = slot.slot, slot.id
+    local x, y, tool, timev = slot.x, slot.y, slot.tool, slot.timev
+    local before_state = self:_legacyStylusTraceState()
+    local before_delivery = legacyTraceDelivery(before_state)
+    local before_owner = self.stylus_slot
+    self.trace_route_reason = nil
+    local delivery = self:_routeLegacyStylus(slot)
+    local after_state = self:_legacyStylusTraceState()
+    local decision, reason
+    if id == nil then
+        decision, reason = "discard", "hover"
+    elseif id < 0 then
+        if before_owner ~= nil and slot_number ~= before_owner then
+            decision, reason = "lift", "foreign_lift"
+        elseif before_state == "idle" then
+            decision, reason = "discard", "late_lift"
+        elseif before_state == "geometry_pending" then
+            decision = "lift"
+            reason = x ~= nil and y ~= nil and "pending_dot" or "pending_discard"
+        else
+            decision, reason = "lift", "owner_lift"
+        end
+    elseif before_owner ~= nil and slot_number ~= before_owner then
+        decision, reason = "discard", "foreign_slot"
+    elseif delivery == false then
+        decision, reason = "pass", "route_pass"
+    elseif after_state == "geometry_pending" then
+        decision, reason = "pending", "geometry_pending"
+    elseif after_state == "suspended" then
+        if self.trace_route_reason == "point_budget"
+            or self.trace_route_reason == "sample_budget" then
+            decision, reason = "abort_budget", self.trace_route_reason
+        else
+            decision, reason = "suspend", "abort_suspend"
+        end
+    elseif after_state == "active_draw" then
+        decision = before_state == "active_draw" and "append" or "begin"
+        reason = "accepted"
+    elseif after_state == "active_block" then
+        decision, reason = "accept", "route_block"
+    else
+        decision, reason = "accept", "route_draw"
+    end
+    self:_recordLegacyStylusTrace(trace, slot_number, id, tool, x, y, timev,
+        before_state, before_delivery, delivery, decision, reason)
+    return delivery
+end
+
+function Adapter:_afterLegacyStylusFrame()
+    local trace = self:_activeStylusTrace()
+    if not trace then return end
+    trace:afterFrame()
+    self.trace_frame_ordinal = self.trace_frame_ordinal + 1
+end
+function Adapter:_routeLegacyStylus(slot)
     local id = slot.id
     -- Hover before BTN_TOUCH is not a lift. In particular it must not replace
     -- the previous lift coordinates used to identify sticky contact-down data.
     if id == nil then return true end
 
+    -- A fatal operation from an earlier stylus slot in this SYN is delivered
+    -- only after residual filtering. Dominate any remaining positive slots;
+    -- they must not start new work or leak into GestureDetector meanwhile.
+    if id >= 0 and self.pending_domain_reason then
+        self:_markPhysicalContact()
+        self.stylus_suspended = true
+        self.stylus_dominated = true
+        return true
+    end
+
     if id >= 0 then
+        self:_markPhysicalContact()
         if self.stylus_pass_latched then return false end
         if not self.stylus_active then
             self.stylus_active = true
             self.stylus_slot = slot.slot
+            self.stylus_sample_count = 0
+            self.stylus_budget_notified = false
             self.stylus_dominated = false
             self.stylus_geom_latched = false
             self.stylus_suspended = false
@@ -321,6 +535,21 @@ function Adapter:_stylus(slot)
         elseif slot.slot ~= self.stylus_slot then
             return false
         end
+
+        if self.stylus_sample_count >= self.max_contact_samples then
+            if not self.stylus_suspended then
+                self:_discardLiveInk()
+                self.stylus_suspended = true
+                self.trace_route_reason = "sample_budget"
+                if not self.stylus_budget_notified and self.on_error then
+                    self.stylus_budget_notified = true
+                    self.on_error("sample_budget")
+                end
+            end
+            self.stylus_dominated = true
+            return true
+        end
+        self.stylus_sample_count = self.stylus_sample_count + 1
 
         if slot.tool ~= nil and slot.tool ~= Capture.TOOL_FINGER then
             self.stylus_tool = slot.tool
@@ -378,6 +607,13 @@ function Adapter:_stylus(slot)
             elseif reason == "outside" then
                 self:_finishInk()
                 self.stylus_suspended = true
+            elseif reason == "point_budget" then
+                self.stylus_suspended = true
+                self.trace_route_reason = reason
+                if not self.stylus_budget_notified and self.on_error then
+                    self.stylus_budget_notified = true
+                    self.on_error(reason)
+                end
             end
         end
         self.stylus_dominated = true
@@ -409,7 +645,10 @@ function Adapter:_stylus(slot)
     self.stylus_slot = nil
     self.stylus_tool = nil
     self.stale_down = false
+    self.stylus_sample_count = 0
+    self.stylus_budget_notified = false
     self.last_stylus_lift_time = self.now()
+    self:_maybeEmitPhysicalContactEnd("owner_lift", self.active_session)
     self:_maybeEmitEditChanged()
     return dominated
 end
@@ -423,6 +662,7 @@ function Adapter:_filterResidual(slots)
         else
             local key = event.slot or 0
             local down = event.id ~= nil and event.id >= 0
+            if down then self:_markPhysicalContact() end
             local pass = self.residual[key]
             if down and pass == nil then
                 if event.x ~= nil and event.y ~= nil then
@@ -437,6 +677,7 @@ function Adapter:_filterResidual(slots)
             if not down then self.residual[key] = nil end
         end
     end
+    self:_maybeEmitPhysicalContactEnd("residual_lift", self.active_session)
     self:_maybeEmitEditChanged()
     return kept
 end
@@ -448,6 +689,7 @@ function Adapter:_fingerFrame(slots)
         local key = event.slot or 0
         local down = event.id ~= nil and event.id >= 0
         if down then
+            self:_markPhysicalContact()
             local state = self.contacts[key]
             if not state then
                 local pass = false
@@ -497,7 +739,14 @@ function Adapter:_fingerFrame(slots)
                 local sx, sy = Capture.toScreen(event.x, event.y)
                 if self.stroke or self.erase_ctx then
                     local ok, reason = self:_continueInk(sx, sy, Capture.TOOL_FINGER)
-                    if not ok and reason == "outside" then self:_finishInk(); self.finger_slot = nil end
+                    if not ok and reason == "outside" then
+                        self:_finishInk()
+                        self.finger_slot = nil
+                    elseif not ok and reason == "point_budget" then
+                        state.suspended = true
+                        self.finger_slot = nil
+                        if self.on_error then self.on_error(reason) end
+                    end
                 else
                     self:_beginInk(sx, sy, Capture.TOOL_FINGER)
                 end
@@ -513,7 +762,9 @@ function Adapter:_fingerFrame(slots)
             end
         end
     end
+    self:_maybeEmitPhysicalContactEnd("finger_lift", self.active_session)
     self:_maybeEmitEditChanged()
+    self:_deliverPendingDomainError()
     return kept
 end
 
@@ -541,7 +792,12 @@ function Adapter:captureSpec(session, _, transform)
     }
     if backend == "stylus" then
         spec.stylus_handler = function(slot) return self:_stylus(slot) end
-        spec.frame_handler = function(slots) return self:_filterResidual(slots) end
+        spec.frame_handler = function(slots)
+            local kept = self:_filterResidual(slots)
+            self:_afterLegacyStylusFrame()
+            self:_deliverPendingDomainError()
+            return kept
+        end
     else
         spec.frame_handler = function(slots) return self:_fingerFrame(slots) end
     end

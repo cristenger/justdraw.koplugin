@@ -1,6 +1,7 @@
 --[[-- Coordinate notebook windows without leaking widgets into the domain. ]]
 
 local InfoMessage = require("ui/widget/infomessage")
+local Notification = require("ui/widget/notification")
 local UIManager = require("ui/uimanager")
 local logger = require("logger")
 local _ = require("gettext")
@@ -87,6 +88,9 @@ function NotebookUI:_editorCallbacks(editor, generation)
         on_edit_changed = function(session)
             if current() then editor:onEditChanged(session) end
         end,
+        on_physical_contact_end = function(session, reason)
+            if current() then editor:onPhysicalContactEnd(session, reason) end
+        end,
         on_page_ready = function(...)
             if current() then editor:onPageReady(...) end
         end,
@@ -106,7 +110,22 @@ function NotebookUI:_editorCallbacks(editor, generation)
         end,
         on_error = function(reason)
             logger.warn("JustDraw notebooks: input failed:", reason)
-            if current() then editor:onStateChanged() end
+            if not current() then return end
+            editor:onStateChanged()
+            local message
+            if reason == "queue_backpressure" then
+                message = _("Stroke was not saved because the write queue is busy. Try again.")
+            elseif reason == "point_budget" or reason == "sample_budget"
+                or reason == "operation_too_large" then
+                message = _("Stroke stopped because the pen contact did not end. Lift the pen and try again.")
+            end
+            if message then
+                UIManager:nextTick(function()
+                    if current() then
+                        UIManager:show(Notification:new{ text = message })
+                    end
+                end)
+            end
         end,
     }
 end
@@ -121,6 +140,7 @@ function NotebookUI:_clearEditorCallbacks()
         stylus_passthrough = false,
         on_dirty = false,
         on_edit_changed = false,
+        on_physical_contact_end = false,
         on_page_ready = false,
         on_state_changed = false,
         on_durable_change = false,
@@ -152,7 +172,11 @@ function NotebookUI:openNotebook(item)
         set_input_mode = function(value) return self.plugin:setInputMode(value) end,
         get_pen_width = function() return self.plugin.pen_width end,
         set_pen_width = function(value) return self.plugin:setPenWidth(value) end,
+        get_live_fast = function() return self.plugin.live_fast end,
         get_rail_side = function() return self.plugin.notebook_rail_side end,
+        show_stylus_diagnostics = function()
+            return self.plugin:showDiagnostics("notebook")
+        end,
         set_rail_side = function(value) self.plugin:setNotebookRailSide(value) end,
         has_active_contact = function()
             return self.plugin.notebook_input
@@ -237,6 +261,7 @@ end
 function NotebookUI:onResume()
     if self.editor then
         self.editor:onStateChanged()
+        self.editor:onFullRepaint()
         UIManager:setDirty(self.editor, "full")
     elseif self.library then
         UIManager:setDirty(self.library, "ui")

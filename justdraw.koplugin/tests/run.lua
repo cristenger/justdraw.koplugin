@@ -530,6 +530,65 @@ t:case("pen down, move and lift produce exactly one stroke", function()
     t:eq(list and list[1].n, 2, "two points recorded")
 end)
 
+t:case("an over-budget direct stroke is repaired and owns through lift", function()
+    local p = drawingPlugin()
+    local bus = support.newSlotBus()
+    p.max_open_points = 2
+
+    p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 1 }))
+    p:onStylusEvent(bus:set(4, { x = 200, y = 100 }))
+    t:eq(p:onStylusEvent(bus:set(4, { x = 300, y = 100 })), true,
+        "over-budget frame remains dominated")
+    t:eq(p.stroke, nil, "the complete live stroke was abandoned")
+    t:eq(p.store:get(1), nil, "no prefix was persisted")
+    t:eq(p.stylus_active, true, "physical contact remains owned")
+    t:eq(p.stylus_suspended, true, "host work is suspended until lift")
+    t:eq(#env.notifications, 0, "notification is not opened inside the callback")
+    env.UIManager:flush()
+    t:eq(#env.notifications, 1, "one deferred notice is visible")
+    t:check(env.notifications[1]:find("Stroke stopped", 1, true) ~= nil,
+        "the notice explains the orphaned contact")
+
+    p:onStylusEvent(bus:set(4, { id = -1 }))
+    t:eq(p.stylus_active, false, "lift releases ownership")
+    p:onStylusEvent(bus:set(4, { id = 5, x = 400, y = 100, tool = 1 }))
+    p:onStylusEvent(bus:set(4, { id = -1 }))
+    t:eq(#p.store:get(1), 1, "the next physical contact works")
+end)
+
+t:case("the sample cap preserves direct erases and stops further work", function()
+    local p = drawingPlugin()
+    local bus = support.newSlotBus()
+    p.max_contact_samples = 2
+    p.store:add(1, { n = 1, w = 4, 100, 100 })
+
+    p:onStylusEvent(bus:set(4, { id = 4, x = 105, y = 100, tool = 2 }))
+    p:onStylusEvent(bus:set(4, { x = 106, y = 100 }))
+    p:onStylusEvent(bus:set(4, { x = 107, y = 100 }))
+    t:eq(p.store:get(1), nil, "accepted eraser work is not rolled back")
+    t:eq(p.stylus_sample_count, 2, "sample counter saturates at its bound")
+    t:eq(p.stylus_suspended, true, "further samples do no host work")
+    p:onStylusEvent(bus:set(4, { id = -1 }))
+    t:eq(p.stylus_active, false, "lift rearms the route")
+end)
+
+t:case("a passed stylus contact is never reclaimed by the sample cap", function()
+    local p = drawingPlugin()
+    local bus = support.newSlotBus()
+    local bar = p.bar.dimen
+    p.max_contact_samples = 1
+    t:eq(p:onStylusEvent(bus:set(4, {
+        id = 4, x = bar.x + 5, y = bar.y + 5, tool = 1,
+    })), false, "control down passes")
+    for _ = 1, 4 do
+        t:eq(p:onStylusEvent(bus:slot(4)), false,
+            "forwarded sequence stays forwarded")
+    end
+    t:eq(p:onStylusEvent(bus:set(4, { id = -1 })), false,
+        "matching lift also passes")
+    t:eq(p.store:get(1), nil, "nothing was drawn")
+end)
+
 t:case("a frame with id=nil neither starts nor ends a stroke", function()
     local p = drawingPlugin()
     local bus = support.newSlotBus()
@@ -913,6 +972,8 @@ t:describe("auxiliary regressions")
 t:case("rasteriser covers horizontal, vertical and diagonal", function()
     local bb = { n = 0 }
     function bb:paintRect() self.n = self.n + 1 end
+    function bb:getWidth() return 32 end
+    function bb:getHeight() return 32 end
     bb.n = 0; Render.segment(bb, 0, 0, 10, 0, 2, "black")
     t:check(bb.n >= 10, "horizontal painted")
     bb.n = 0; Render.segment(bb, 0, 0, 0, 10, 2, "black")
@@ -1264,27 +1325,38 @@ t:case("the diagnostics menu entry is reachable with the pen route dead", functi
     t:check(item.enabled_func == nil or item.enabled_func(), "and it is selectable")
 
     item.callback()
-    t:check(p.diag_until ~= nil, "armed")
+    t:eq(p.stylus_trace, nil, "coordinates are not logged before confirmation")
+    local warning = env.UIManager.shown[#env.UIManager.shown]
+    t:check(warning and warning.text:find("Pen coordinates", 1, true),
+        "the privacy warning is shown")
+    warning.ok_callback()
+    t:check(p.stylus_trace and p.stylus_trace:isActive(), "armed after confirmation")
     t:check(#env.logs.info > 0, "and the capability report was written")
     t:check(#env.notifications > 0 or #env.shown_messages > 0, "and shown to the user")
 end)
 
 t:case("diagnostics stop on their own", function()
     local p = pipelinePlugin()
-    p:startDiagnostics()
-    t:check(p.diag_until ~= nil, "diagnostics armed")
-
-    local before = #env.logs.info
-    for i = 1, 600 do p:diag({ slot = 4, id = 4, tool = 1 }, 10, i) end
-
-    t:eq(p.diag_until, nil, "the line budget disarmed them")
-    t:check(#env.logs.info - before <= 502, "and the log did not run away")
+    local lines = {}
+    p:startDiagnostics("direct", {
+        emit = function(line) lines[#lines + 1] = line end,
+        now = function() return 0 end,
+        duration_seconds = 60,
+        max_events = 3,
+    })
+    t:check(p.stylus_trace:isActive(), "diagnostics armed")
+    for i = 1, 3 do
+        p:onStylusEvent({ slot = 4, id = 4, tool = 1, x = 10, y = i })
+    end
+    t:check(not p.stylus_trace:isActive(), "the event budget disarmed them")
+    t:check(lines[#lines]:find("trace_truncated=event_limit", 1, true),
+        "the bounded cause is recorded")
 end)
 
 t:case("diagnostics log nothing until they are armed", function()
     local p = pipelinePlugin()
     local before = #env.logs.info
-    p:diag({ slot = 4, id = 4, tool = 1 }, 10, 10)
+    p:onStylusEvent({ slot = 4, id = 4, tool = 1, x = 10, y = 10 })
     t:eq(#env.logs.info, before, "disarmed is silent")
 end)
 
@@ -1691,6 +1763,9 @@ local ctx = {
 
 for _, spec in ipairs({
     "compat_spec",
+    "conformance_policy_spec",
+    "stylus_sequence_spec",
+    "render_spec",
     "canvas_codec_spec",
     "canvas_repository_spec",
     "canvas_anchor_spec",

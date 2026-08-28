@@ -204,8 +204,11 @@ Register a stroke that has just been finished and paint it.
 
 The points are already in hand, so nothing is read back -- which is what keeps
 finishing a stroke proportional to that stroke rather than to the canvas.
+When opts proves that every live segment was painted into this exact ready
+cache generation, registration skips the duplicate replay. Otherwise the
+extra return values describe the effective half-open fallback coverage.
 ]]
-function Cache:addStroke(meta, points, n)
+function Cache:addStroke(meta, points, n, opts)
     if self.closed then return nil, "closed" end
     if meta.id < 0 then
         meta.points = points
@@ -215,8 +218,17 @@ function Cache:addStroke(meta, points, n)
     self.by_id[meta.id] = meta
     if self.grid then self:_indexStroke(meta) end
     self:_indexLiveChunks(meta, points, n)
-    self:_paintStroke(meta, points, n)
-    return true
+    local live_raster_valid = opts
+        and opts.live_raster_complete == true
+        and opts.raster_cache == self
+        and opts.raster_generation == self.generation
+        and self:isReady()
+    if live_raster_valid then
+        return true, nil, false
+    end
+    local painted, left, top, right, bottom =
+        self:_paintStroke(meta, points, n)
+    return true, nil, painted, left, top, right, bottom
 end
 
 --- Replace a temporary queue id with the SQLite row id assigned at COMMIT.
@@ -436,10 +448,10 @@ end
 --[[--
 Paint one live segment of the stroke in progress, in canvas coordinates.
 
-Returns the dirty region in cache coordinates for the caller to blit and
-refresh, or nil if there is no buffer. A segment outside the canvas paints
-nothing at all: the buffer bounds the write, so it is dropped rather than
-wrapped onto the far side.
+Returns the dirty region in cache coordinates plus the cache identity and
+generation for a live-raster token, or nil if nothing was painted. A segment
+outside the canvas paints nothing at all: the buffer bounds the write, so it
+is dropped rather than wrapped onto the far side.
 ]]
 function Cache:drawSegment(x0, y0, x1, y1, width)
     if not self.bb then return nil end
@@ -447,14 +459,12 @@ function Cache:drawSegment(x0, y0, x1, y1, width)
     local w = tr:scaleWidth(width)
     local kx0, ky0 = tr:toCache(x0, y0)
     local kx1, ky1 = tr:toCache(x1, y1)
-    Render.segment(self.bb, kx0, ky0, kx1, ky1, w, self.ink)
-
-    local pad = w + 2
-    local x = (kx0 < kx1 and kx0 or kx1) - pad
-    local y = (ky0 < ky1 and ky0 or ky1) - pad
-    local bw = (kx0 < kx1 and kx1 - kx0 or kx0 - kx1) + 2 * pad
-    local bh = (ky0 < ky1 and ky1 - ky0 or ky0 - ky1) + 2 * pad
-    return self:_clampBox({ x = floor(x), y = floor(y), w = ceil(bw), h = ceil(bh) })
+    local painted, left, top, right, bottom =
+        Render.segment(self.bb, kx0, ky0, kx1, ky1, w, self.ink)
+    if not painted then return nil end
+    return {
+        x = left, y = top, w = right - left, h = bottom - top,
+    }, self, self.generation
 end
 
 function Cache:close()
@@ -697,7 +707,7 @@ end
 
 function Cache:_paintStroke(m, points, n, target, ox, oy)
     local tr = self.transform
-    Render.points(target or self.bb, points, n, tr.scale,
+    return Render.points(target or self.bb, points, n, tr.scale,
         ox or 0, oy or 0, tr:scaleWidth(m.width), self.ink)
 end
 

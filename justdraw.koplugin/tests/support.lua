@@ -1159,22 +1159,60 @@ function support.newNotebookStore(opts)
 end
 
 --[[--
-A manual scheduler standing in for UIManager:nextTick.
+A deterministic scheduler with KOReader's identity-based cancellation rules.
 
-Nothing runs until a test pumps it, which is what makes "the index is still
-incomplete here" an observable state rather than a race.
+Callbacks are ordered by due time and then insertion order. Nothing runs until
+a test pumps or advances the clock, which makes delayed-to-urgent replacement,
+idle cleanup and stale-generation callbacks observable without wall time.
+`schedule` remains the next-tick shorthand used by the older suites.
 ]]
-function support.newScheduler()
-    local s = { queue = {} }
-    function s:schedule(fn) self.queue[#self.queue + 1] = fn end
-    --- Run one pending callback. Returns false when there was nothing to run.
+function support.newScheduler(start_time)
+    local s = { queue = {}, clock = tonumber(start_time) or 0, serial = 0 }
+
+    local function before(a, b)
+        return a.due < b.due or (a.due == b.due and a.serial < b.serial)
+    end
+
+    function s:now() return self.clock end
+
+    function s:scheduleIn(delay, fn)
+        assert(type(fn) == "function", "scheduled action must be a function")
+        delay = tonumber(delay) or 0
+        if delay < 0 then delay = 0 end
+        self.serial = self.serial + 1
+        local item = { due = self.clock + delay, serial = self.serial, fn = fn }
+        local at = #self.queue + 1
+        while at > 1 and before(item, self.queue[at - 1]) do
+            self.queue[at] = self.queue[at - 1]
+            at = at - 1
+        end
+        self.queue[at] = item
+        return fn
+    end
+
+    function s:schedule(fn) return self:scheduleIn(0, fn) end
+
+    function s:unschedule(fn)
+        local removed = false
+        for i = #self.queue, 1, -1 do
+            if self.queue[i].fn == fn then
+                table.remove(self.queue, i)
+                removed = true
+            end
+        end
+        return removed
+    end
+
+    --- Run one callback due at the current virtual time.
     function s:tick()
-        local fn = table.remove(self.queue, 1)
-        if not fn then return false end
-        fn()
+        local item = self.queue[1]
+        if not item or item.due > self.clock then return false end
+        table.remove(self.queue, 1)
+        item.fn()
         return true
     end
-    --- Run to quiescence, with a bound so a scheduling loop fails loudly.
+
+    --- Run all callbacks due now, with a bound for scheduling loops.
     function s:drain(limit)
         local n = 0
         while self:tick() do
@@ -1183,6 +1221,23 @@ function support.newScheduler()
         end
         return n
     end
+
+    function s:advance(seconds, limit)
+        seconds = tonumber(seconds) or 0
+        assert(seconds >= 0, "virtual time cannot move backwards")
+        self.clock = self.clock + seconds
+        return self:drain(limit)
+    end
+
+    function s:pending(fn)
+        if fn == nil then return #self.queue end
+        local n = 0
+        for i = 1, #self.queue do
+            if self.queue[i].fn == fn then n = n + 1 end
+        end
+        return n
+    end
+
     return s
 end
 

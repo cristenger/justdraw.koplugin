@@ -102,6 +102,64 @@ return function(ctx)
         ui:shutdown()
     end)
 
+    t:case("editor diagnostics uses the shared notebook trace source", function()
+        ctx.reset()
+        local source
+        local controller = {
+            openNotebook = function() return {} end,
+            shutdown = function() return true end,
+        }
+        local editor_factory = {}
+        function editor_factory:new(opts)
+            opts.onStateChanged = function() end
+            opts.markShown = function() end
+            opts.shutdown = function() end
+            return opts
+        end
+        local plugin = {
+            eraser = false, input_mode = "stylus", pen_width = 4,
+            live_fast = true, notebook_rail_side = "right",
+            configureNotebookInteraction = function() return true end,
+            showDiagnostics = function(_, value) source = value end,
+            setInputMode = function() return true end,
+            setPenWidth = function() return true end,
+            setNotebookRailSide = function() end,
+        }
+        local ui = NotebookUI.new{
+            plugin = plugin, controller = controller,
+            editor_factory = editor_factory,
+        }
+        local editor = ui:openNotebook{ id = 1, title = "Private title" }
+        editor.show_stylus_diagnostics()
+        t:eq(source, "notebook", "notebook editor arms the shared trace session")
+        ui:shutdown()
+    end)
+
+    t:case("recoverable input notices are deferred and generation safe", function()
+        ctx.reset()
+        local states = 0
+        local editor = { onStateChanged = function() states = states + 1 end }
+        local ui = NotebookUI.new{
+            plugin = { configureNotebookInteraction = function() return true end },
+            controller = { shutdown = function() return true end },
+        }
+        local callbacks = ui:_editorCallbacks(editor, ui.editor_generation)
+        callbacks.on_error("queue_backpressure")
+        t:eq(states, 1, "state refresh remains synchronous")
+        t:eq(#ctx.env.notifications, 0, "notification is outside the input callback")
+        ctx.env.UIManager:flush()
+        t:eq(#ctx.env.notifications, 1, "recoverable rejection is visible")
+        t:check(ctx.env.notifications[1]:find("write queue is busy", 1, true) ~= nil,
+            "message is actionable and in English")
+
+        callbacks.on_error("point_budget")
+        ui.editor_generation = ui.editor_generation + 1
+        ctx.env.UIManager:flush()
+        t:eq(#ctx.env.notifications, 1,
+            "a callback from the previous editor generation is discarded")
+        ui:shutdown()
+    end)
+
     t:case("a failed editor configuration destroys the unopened window", function()
         ctx.reset()
         local shutdowns = 0
