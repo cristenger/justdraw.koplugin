@@ -78,6 +78,31 @@ return function(ctx)
             "stylus stays captured on paper")
     end)
 
+    --[[--
+    A rail control is painted at its slot's origin and hit-tested against that
+    same rectangle, so a widget bigger than its slot is a control that overdraws
+    its neighbour and answers for pixels it does not own. Button grows past the
+    `height` it is handed, which is why the slot has to be converted rather than
+    passed straight through -- and why the bottom control used to spill off the
+    screen edge.
+    ]]
+    t:case("no control paints outside the slot it is hit-tested against", function()
+        ctx.reset()
+        local editor = newEditor()
+        local screen = editor.layout_geometry.screen_rect
+        t:check(#editor.control_entries > 0, "the rail built its controls")
+        for i = 1, #editor.control_entries do
+            local entry = editor.control_entries[i]
+            local size = entry.widget:getSize()
+            t:check(size.h <= entry.rect.h,
+                "control " .. i .. " fits its slot vertically ("
+                    .. size.h .. " <= " .. entry.rect.h .. ")")
+            t:check(size.w <= entry.rect.w, "control " .. i .. " fits it horizontally")
+            t:check(entry.rect.y + size.h <= screen.y + screen.h,
+                "control " .. i .. " stays on the screen")
+        end
+    end)
+
     t:case("palm guard blocks control touch without changing stylus geometry", function()
         ctx.reset()
         local editor = newEditor{ guard = false }

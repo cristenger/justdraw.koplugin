@@ -36,6 +36,39 @@ local function rounded(value)
     return math.floor(value + 0.5)
 end
 
+--[[--
+KOReader's Button is asymmetric about the box it is handed.
+
+`width` is the outer width: the frame subtracts its own chrome and gives the
+label what is left, so the widget ends up exactly as wide as asked. `height` is
+*not* the widget's height -- it is the label box, and the frame then adds
+padding, border and margin around it (frontend/ui/widget/button.lua, identical
+in v2026.07.1 and master). A column that budgets one row per
+`Size.item.height_large` therefore spends `chrome` more per row than it planned,
+and because a VerticalGroup stacks, the error accumulates downward: on a Kindle
+Scribe the notebook library's footer sank 24px per notebook until, at seven, it
+was off the bottom of the screen with no way to page or create.
+
+These two helpers are the one place that difference is corrected, so callers can
+keep thinking in outer boxes -- which is what a layout budget means. The
+`margin = 0, padding = Size.padding.button` they assume is what both drawing
+hosts pass; tests/conformance.lua measures a real Button and fails if the
+arithmetic here stops describing it.
+]]
+Layout.BUTTON_MARGIN = 0
+
+function Layout.buttonChrome()
+    local padding = (Size.padding and Size.padding.button) or 0
+    local border = (Size.border and Size.border.button) or 0
+    return 2 * (padding + border + Layout.BUTTON_MARGIN)
+end
+
+--- The `height` to hand Button so the widget occupies `outer` pixels.
+function Layout.buttonLabelHeight(outer)
+    if not finite(outer) then return nil, "bad_geometry" end
+    return math.max(1, rounded(outer) - Layout.buttonChrome())
+end
+
 function Layout.physicalPixels(mm, screen)
     screen = screen or Device.screen
     if not finite(mm) or mm <= 0 or not screen

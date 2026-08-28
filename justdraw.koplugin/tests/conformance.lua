@@ -35,6 +35,10 @@ _G.G_reader_settings = _G.G_reader_settings
     or LuaSettings:open(DataStorage:getDataDir() .. "/settings.reader.lua")
 
 local Device = require("device")
+-- reader.lua's third act, and the one the widget claims below need: anything
+-- that reaches ui/font asks CanvasContext what device it is on, and an
+-- uninitialised one fails as a bare "attempt to call method 'isKindle'".
+require("document/canvascontext"):init(Device)
 local Input = Device.input
 
 local rows = {}
@@ -102,6 +106,47 @@ probe:handleEvent(require("ui/event"):new("JustDrawProbe"))
 claim("WidgetContainer offers events to children before itself",
     true, order[1] == "child" and order[2] == "parent",
     table.concat(order, " then "))
+
+-- =====================================================================
+-- Button's box, against the real widget
+--
+-- The notebook library and the notebook rail both lay out in outer boxes: a
+-- row occupies its slot, the footer occupies the strip left at the bottom.
+-- Button does not read `width` and `height` the same way -- it subtracts its
+-- chrome from the width but adds it to the height -- and tests/support.lua's
+-- stub used to return whatever it was handed, which is how a footer could walk
+-- off a Kindle Scribe with every assertion green. ink_notebook_layout does the
+-- arithmetic; this is where it is checked against the widget itself.
+-- =====================================================================
+do
+    local Button = require("ui/widget/button")
+    local Size = require("ui/size")
+    local NotebookLayout = require("ink_notebook_layout")
+    local box = Size.item.height_large * 2
+    local width = require("device").screen:getWidth()
+    local made = Button:new{
+        text = "Conformance", width = width, height = box,
+        margin = NotebookLayout.BUTTON_MARGIN, padding = Size.padding.button,
+    }
+    local size = made:getSize()
+    claim("Button treats `width` as the widget's own width",
+        true, size.w == width, size.w .. " for a requested " .. width)
+    claim("Button treats `height` as the label box, not the widget's height",
+        true, size.h == box + NotebookLayout.buttonChrome(),
+        size.h .. " for a requested " .. box .. " plus a computed chrome of "
+            .. NotebookLayout.buttonChrome())
+
+    -- And the correction, end to end: ask for a label box sized so the widget
+    -- lands on the budget, and it has to land on it exactly.
+    local fitted = Button:new{
+        text = "Conformance", width = width,
+        height = NotebookLayout.buttonLabelHeight(box),
+        margin = NotebookLayout.BUTTON_MARGIN, padding = Size.padding.button,
+    }
+    claim("buttonLabelHeight makes a Button occupy the budget it was given",
+        true, fitted:getSize().h == box,
+        fitted:getSize().h .. " for a budget of " .. box)
+end
 
 -- =====================================================================
 -- Viewport clipping, against a real BlitBuffer

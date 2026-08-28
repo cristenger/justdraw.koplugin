@@ -669,8 +669,10 @@ function Editor:_button(text, enabled, callback, rect, help_text, checked_func)
         help_text = help_text or text,
         show_parent = self,
         width = rect.w,
-        height = rect.h,
-        margin = 0,
+        -- rect.h is the slot this control is painted into and hit-tested
+        -- against, so it has to be the widget's height, not its label's.
+        height = NotebookLayout.buttonLabelHeight(rect.h),
+        margin = NotebookLayout.BUTTON_MARGIN,
         padding = Size.padding.button,
         enabled = enabled and true or false,
         checked_func = checked_func,

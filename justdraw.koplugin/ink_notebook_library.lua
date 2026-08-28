@@ -227,10 +227,19 @@ function Library:nextScreen()
     return true
 end
 
+--[[--
+Every button here is placed in a column with a height budget, so `height` means
+the box the widget occupies. Button reads it as the label box and grows by its
+own chrome, which is why this conversion is not optional: without it the column
+overspends once per row and the footer walks off the screen.
+]]
 function Library:_button(opts)
     opts.show_parent = self
-    opts.margin = 0
+    opts.margin = NotebookLayout.BUTTON_MARGIN
     opts.padding = Size.padding.button
+    if opts.height then
+        opts.height = NotebookLayout.buttonLabelHeight(opts.height)
+    end
     return Button:new(opts)
 end
 

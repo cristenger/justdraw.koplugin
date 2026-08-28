@@ -13,6 +13,70 @@ return function(ctx)
         return out
     end
 
+    --- What VerticalGroup does when it paints: each child starts where the
+    --- running total of the ones above it ended. Measuring the same way is the
+    --- only honest way to ask whether the last child is still on the screen.
+    local function stackedHeights(group)
+        local offsets, total = {}, 0
+        for i = 1, #group do
+            offsets[i] = total
+            total = total + group[i]:getSize().h
+        end
+        return offsets, total
+    end
+
+    --[[--
+    The footer sank one button's worth of chrome per notebook.
+
+    `_rebuild` budgets the column in outer boxes, but KOReader's Button reads
+    `height` as its label box and grows by padding and border on top. In a
+    VerticalGroup those excesses stack, so the toolbar drifted down as rows were
+    added: on a Kindle Scribe, half of it was gone at three notebooks and all of
+    it at seven, taking Previous / New notebook / Next with it.
+    ]]
+    t:case("the footer stays on screen however many notebooks there are", function()
+        ctx.reset()
+        local count = 0
+        local controller = {}
+        function controller:listNotebookBatch()
+            return { items = rows(count), has_more = false, writable = true }
+        end
+        local library = Library:new{ controller = controller }
+        library:markShown()
+        local screen_h = ctx.env.Device.screen:getHeight()
+        for n = 0, library.rows_per_screen do
+            count = n
+            library:_loadBatch(nil, 1, false)
+            ctx.env.UIManager:flush()
+            local offsets, total = stackedHeights(library[1])
+            local footer = #library[1]
+            t:check(total <= screen_h, n .. " notebooks fit the screen ("
+                .. total .. " <= " .. screen_h .. ")")
+            t:check(offsets[footer] + library[1][footer]:getSize().h <= screen_h,
+                "the whole footer is on screen with " .. n .. " notebooks")
+            t:eq(#library:_visibleItems(), math.min(n, library.rows_per_screen),
+                "every notebook that fits is drawn")
+        end
+    end)
+
+    t:case("a button occupies the height the column budgeted for it", function()
+        ctx.reset()
+        local controller = {}
+        function controller:listNotebookBatch()
+            return { items = rows(3), has_more = false, writable = true }
+        end
+        local library = Library:new{ controller = controller }
+        library:markShown(); library:startLoading(); ctx.env.UIManager:flush()
+        local row = library.layout[1][1]
+        local chrome = require("ink_notebook_layout").buttonChrome()
+        t:check(chrome > 0, "the fake models a chrome to be wrong about")
+        t:eq(row:getSize().h, row.height + chrome,
+            "the widget is taller than the label box it was given")
+        local _, total = stackedHeights(library[1])
+        t:eq(total, ctx.env.Device.screen:getHeight(),
+            "and the column still lands exactly on the screen edge")
+    end)
+
     t:case("loading paints before a bounded metadata query", function()
         ctx.reset()
         local calls = 0
