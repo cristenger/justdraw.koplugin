@@ -41,6 +41,7 @@ local DECISIONS = {
     discard = true,
     abort_budget = true,
     pass = true,
+    palm = true,
 }
 
 -- Never put an arbitrary host/storage error in a coordinate trace. Besides
@@ -79,6 +80,17 @@ local REASONS = {
     pending_dot = true,
     pending_discard = true,
     invalid_geometry = true,
+    -- Wacom slot classification. A routed palm never reaches the sequence, so
+    -- without these a Scribe trace would simply have a gap where the hand was.
+    wacom_non_pen = true,
+    wacom_pen_slot_missing = true,
+    palm_promoted = true,
+    palm_continued = true,
+    palm_lift = true,
+    -- Which accumulated axis is still unproven against the trusted baseline.
+    axis_x_pending = true,
+    axis_y_pending = true,
+    axis_both_pending = true,
 }
 
 local function positiveInteger(value, fallback)

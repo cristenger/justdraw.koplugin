@@ -349,11 +349,32 @@ return function(ctx)
         t:eq(seq.state, "active_draw", "non-Wacom finger value is an update")
         t:eq(log.points[#log.points].tool, 1, "last stylus tool preserved")
 
+        -- On Wacom the fallback is no longer the question: a slot that is not
+        -- the digitizer's own cannot own a contact at all, whatever its tool
+        -- claims to be.
         local wacom, wlog = harness{ wacom_protocol = true, pen_slot = 9 }
-        wacom:feed(pen(1, 10, 10, 1, 4))
-        wacom:feed(pen(1, 20, 20, 0, 4))
-        t:eq(wacom.state, "active_draw", "non-pen slot does not use fallback")
+        t:eq(wacom:feed(pen(1, 10, 10, 1, 4)), true, "foreign Wacom slot dominated")
+        t:eq(wacom.state, "idle", "and never becomes the owner")
+        t:eq(wlog.starts, 0, "no contact was started")
         t:eq(wlog.ends, 0, "no false physical end")
+    end)
+
+    t:case("a Wacom slot that is not the pen never reaches the host", function()
+        -- Defense in depth behind InkWacomPalm: Linux gives a rejected touch
+        -- MT_TOOL_PALM, the same value as ERASER, so KOReader routes a resting
+        -- hand to the stylus callback wearing the eraser's number.
+        local seq, log = harness{ wacom_protocol = true, pen_slot = 4 }
+        seq:feed(pen(7, 100, 100, 1))
+        t:eq(seq.state, "active_draw", "the real pen owns the sequence")
+
+        t:eq(seq:feed(pen(3, 900, 900, 2, 0)), true, "promoted palm dominated")
+        t:eq(seq:feed(pen(-1, 900, 900, 2, 0)), true, "its lift is dominated too")
+        t:eq(seq.owner_slot, 4, "ownership is untouched")
+        t:eq(seq.state, "active_draw", "and so is the state")
+        t:eq(#log.points, 1, "the palm produced no point")
+        t:eq(log.starts, 1, "and no second contact")
+        t:eq(log.finishes, 0, "and closed nothing")
+        t:eq(log.ends, 0, "and ended nothing")
     end)
 
     t:case("runtime constants are instance-local rather than cached", function()

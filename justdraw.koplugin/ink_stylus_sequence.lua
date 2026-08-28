@@ -7,10 +7,15 @@ work. It knows nothing about widgets, documents, persistence, or refreshes.
 
 KOReader's public callback exposes accumulated slot state but no per-SYN axis
 freshness mask. Consequently, the production default geometry policy is
-deliberately fail-closed: it never accepts coordinates. A trace-backed policy
-must be injected before hosts use this module for drawing. Tests inject
-explicit policies to exercise the physical state machine without turning a
-guess about N samples, distance, or time into production behavior.
+deliberately fail-closed: it never accepts coordinates. InkStylusGeometry is
+the trace-backed policy hosts inject; tests inject explicit ones to exercise
+the physical state machine without turning a guess about N samples, distance,
+or time into production behavior.
+
+A policy may answer "route" as well as "accept" and "pending": evidence that is
+good enough to decide whose contact this is, but not good enough to draw from.
+Only a hand-over acts on it, which is what keeps a control tappable with a pen
+while ink still waits for a coordinate pair it can prove.
 ]]
 
 local Limits = require("ink_limits")
@@ -57,11 +62,11 @@ end
 local ConservativeGeometry = {}
 
 function ConservativeGeometry:observe()
-    return "pending", "geometry_unverified"
+    return "pending", nil, nil, "geometry_unverified"
 end
 
 function ConservativeGeometry:onLift()
-    return "discard", "geometry_unverified"
+    return "discard", nil, nil, "geometry_unverified"
 end
 
 function ConservativeGeometry:reset()
@@ -216,6 +221,36 @@ function Sequence:_traceResult(delivery, decision, reason, state_before,
     end
     self.last_delivery = delivery
     return delivery
+end
+
+--[[--
+Record a slot that is not, and never becomes, this sequence's contact.
+
+A routed palm and a foreign Wacom slot both need to appear in the trace -- a
+discarded event with no explanation is the hardest kind to read afterwards --
+but neither is a transition of the owner, so the owner's delivery history must
+survive them intact.
+]]
+function Sequence:_traceForeign(delivery, decision, reason,
+        slot, id, tool, x, y, timev)
+    if not self.trace then return end
+    local previous = self.last_delivery
+    self:_traceResult(delivery, decision, reason, self.state,
+        slot, id, tool, x, y, timev)
+    self.last_delivery = previous
+end
+
+--[[--
+Record a palm InkWacomPalm dominated before it reached this sequence.
+
+Called by the host so one bounded trace explains every discarded contact,
+including the ones this module never sees.
+]]
+function Sequence:tracePalm(slot, reason)
+    if not self.trace or not slot then return end
+    self:_traceForeign(true, "palm", reason,
+        finiteNumber(slot.slot), finiteNumber(slot.id), finiteNumber(slot.tool),
+        slot.x, slot.y, slot.timev)
 end
 
 function Sequence:_deliverDomainError()
@@ -426,7 +461,7 @@ function Sequence:_acceptGeometry(raw_x, raw_y, is_first)
     end
 
     if is_first then
-        local route, effect = self.classify(x, y, self.current_tool)
+        local route, effect = self.classify(x, y, self.current_tool, true)
         if route == "draw" then
             if effect ~= "ink" and effect ~= "erase" then
                 error("draw route requires ink or erase effect", 2)
@@ -452,17 +487,51 @@ function Sequence:_acceptGeometry(raw_x, raw_y, is_first)
     return true, decision, reason
 end
 
+--[[--
+Hand the contact over on evidence good enough to route but not to draw from.
+
+A pair with one accumulated axis still unproven can be a long way from where
+the pen actually is, so it may never become ink. It can still answer the one
+question that has to be answered while the contact is still down: does this
+belong to somebody else? Without that, a pen tap whose position shares an axis
+with the previous contact -- two taps running on the same button -- would be
+dominated to its lift and then discarded, because forwarding a lone lift for a
+contact GestureDetector never opened produces no tap at all.
+
+Only a hand-over acts on this. "draw" and "block" change nothing and wait for a
+coherent pair, so a half-proven coordinate can never start ink or latch a host
+destination.
+]]
+function Sequence:_routePending(raw_x, raw_y)
+    local x, y = self.to_screen(raw_x, raw_y)
+    x, y = finiteNumber(x), finiteNumber(y)
+    if not x or not y then return false end
+    if self.classify(x, y, self.current_tool, false) ~= "pass" then return false end
+    self.state = "active_pass"
+    self.effect = nil
+    self.effect_active = false
+    return true
+end
+
 function Sequence:_observeGeometry(raw_x, raw_y, timev, phase, is_first)
     raw_x, raw_y = finiteNumber(raw_x), finiteNumber(raw_y)
     if not raw_x or not raw_y then
         return true, "discard", "non_finite"
     end
 
-    local status, a, b = self.geometry_observe(
+    local status, a, b, why = self.geometry_observe(
         self.geometry, raw_x, raw_y, timev, phase)
-    if status == "pending" then
+    if status == "pending" or status == "route" then
+        if status == "route" and is_first then
+            local rx, ry = finiteNumber(a), finiteNumber(b)
+            if rx and ry and self:_routePending(rx, ry) then
+                return false, "pass", "route_pass"
+            end
+        end
         if is_first then self.state = "geometry_pending" end
-        return true, "pending", "geometry_pending"
+        -- The policy names which axis is still unproven; that token is the
+        -- only way a trace tells "waiting for evidence" apart from "refused".
+        return true, "pending", type(why) == "string" and why or "geometry_pending"
     elseif status == "reject" then
         if self.effect_active then
             self:_closeEffect("abort", "geometry_rejected")
@@ -496,6 +565,9 @@ end
 function Sequence:_finishPending(target_state, reason, x, y, timev)
     local status, a, b = self.geometry_on_lift(
         self.geometry, x, y, timev)
+    -- A policy that can route may answer with either token here; both mean
+    -- "this is the last position observed", which is at most one dot.
+    if status == "route" then status = "dot" end
     local decision, trace_reason = "discard", "pending_discard"
 
     if status == "dot" then
@@ -591,6 +663,18 @@ function Sequence:feed(slot)
     local tool = finiteNumber(slot and slot.tool)
     local timev = slot and slot.timev
     local before = self.state
+
+    -- Defense in depth behind InkWacomPalm. On Wacom the digitizer owns one
+    -- slot; a stylus-valued tool anywhere else is a promoted palm wearing the
+    -- eraser's number, and no state here may move because of it. Dominated,
+    -- because handing a palm back to GestureDetector is the other half of the
+    -- bug this rejects.
+    if self.wacom_protocol and self.pen_slot ~= nil
+        and slot_number ~= nil and slot_number ~= self.pen_slot then
+        self:_traceForeign(true, "discard", "wacom_non_pen",
+            slot_number, id, tool, x, y, timev)
+        return true
+    end
 
     if id == nil then
         local delivery = not isForwardedState(self.state)
