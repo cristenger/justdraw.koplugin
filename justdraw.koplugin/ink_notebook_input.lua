@@ -471,13 +471,15 @@ on the paper draws. `coherent` is false when the geometry policy is asking only
 whether this contact belongs to somebody else, from a pair it would not draw
 from -- nothing here latches, so the answer is the same either way.
 ]]
-function Adapter:_classifyStylus(sx, sy, tool)
+function Adapter:_classifyStylus(sx, sy, tool, coherent)
     if self.pending_domain_reason ~= nil then return "block" end
     if self:_passesStylus(sx, sy) then return "pass" end
     local by_tool = tool == Capture.TOOL_ERASER
-    if by_tool then
-        -- Once per contact, and only for a tool the pen reported. The rail's
-        -- own eraser toggle is our state and says nothing about the hardware.
+    -- `coherent` changes no answer here -- nothing latches, so a half-proven
+    -- pair gets the same route as a proven one. It does decide *counting*: the
+    -- sequence asks again on every pending frame while the geometry is still
+    -- unproven, and only the coherent call happens once per contact.
+    if by_tool and coherent then
         Capture:noteEraserContact(self.capture_input)
     end
     local erasing = by_tool or truthy(self.get_eraser, self.active_session)

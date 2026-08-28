@@ -566,6 +566,36 @@ return function(ctx)
         t:eq(edits(), 2, "pen and one eraser contact each update capabilities once")
     end)
 
+    --[[--
+    One erase contact is one count, on this surface too.
+
+    The sequence asks `classify` again on every frame while the geometry is
+    still unproven, so a counter placed there without consulting `coherent`
+    fires several times for a single contact and once more for contacts that
+    never erase at all. A unit test of the counters cannot see that; only
+    driving the real route can.
+    ]]
+    t:case("an erase contact is counted once on the notebook surface", function()
+        local Capture = require("ink_capture")
+        local session, _, _, spec = fixture("stylus")
+        Capture:resetEraserCounts()
+
+        spec.stylus_handler{ slot = 4, id = 2, x = 15, y = 15, tool = 2 }
+        spec.stylus_handler{ slot = 4, id = 2, x = 40, y = 60, tool = 2 }
+        spec.stylus_handler{ slot = 4, id = 2, x = 70, y = 95, tool = 2 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 70, y = 95, tool = 0 }
+        local by_button, by_tool = Capture:eraserCounts()
+        t:eq(by_button, 0, "no barrel button was held")
+        t:eq(by_tool, 1, "three samples are still one erase contact")
+
+        spec.stylus_handler{ slot = 4, id = 3, x = 200, y = 200, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 3, x = 260, y = 250, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 260, y = 250, tool = 0 }
+        by_button, by_tool = Capture:eraserCounts()
+        t:eq(by_tool, 1, "and an ink contact adds nothing")
+        t:check(session ~= nil, "the surface stayed usable throughout")
+    end)
+
     t:case("finger compatibility draws one contact and filters it", function()
         local session, _, _, spec = fixture("finger")
         t:eq(spec.backend, "finger", "legacy route selected")

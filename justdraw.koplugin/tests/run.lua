@@ -600,6 +600,89 @@ t:case("a re-render ends the contact the capture can no longer see lift", functi
         "and nowhere near where the abandoned contact was")
 end)
 
+--[[--
+A forwarded contact has to end too, and the drop that would end it cannot work.
+
+`inhibitInput` runs `Input:resetState` before the re-render event is dispatched,
+which drops GestureDetector's contacts. So the hand-back this sequence would
+normally perform fails -- and a failed hand-back normally means the opposite of
+what it means here: a contact somebody else still owns, which must not be
+forgotten. Without telling the sequence which case it is in, it latches
+`forwarded_wait_lift` and `hasActivePhysicalContact` never goes false again:
+notebooks stay unreachable and the next pen contact is forwarded instead of
+drawing.
+]]
+t:case("a re-render ends a contact the detector no longer owns", function()
+    local p = drawingPlugin()
+    local bus = support.newSlotBus()
+    local bar = p.bar.dimen
+
+    t:eq(p:onStylusEvent(bus:set(4, {
+        id = 4, x = bar.x + 5, y = bar.y + 5, tool = 1,
+    })), false, "a contact on the toolbar is handed to the UI")
+    t:eq(p:hasActivePhysicalContact(), true, "and is still physically down")
+
+    -- What inhibitInput did before the event reached us.
+    env.Device.input.gesture_detector.contacts = {}
+
+    p:onDocumentRerendered()
+    t:eq(p:hasActivePhysicalContact(), false,
+        "the forwarded contact ends even though it could not be handed back")
+    t:eq(p.stylus_sequence.state, "idle", "the sequence is not left latched")
+
+    p:onStylusEvent(bus:set(4, { id = 4, x = 300, y = 300, tool = 1 }))
+    p:onStylusEvent(bus:set(4, { x = 400, y = 380 }))
+    p:onStylusEvent(bus:set(4, { id = -1 }))
+    t:eq(#p.store:get(1), 1, "and the next contact draws instead of forwarding")
+end)
+
+--- The notebook editor runs its own contact machine over the same digitizer and
+--- can be open above a document, so the blind window reaches it too.
+t:case("a re-render reaches the notebook contact machine as well", function()
+    local p = drawingPlugin()
+    local aborted = 0
+    p.notebook_input = {
+        hasActiveContact = function() return true end,
+        abort = function() aborted = aborted + 1; return true end,
+    }
+    p:onDocumentRerendered()
+    t:eq(aborted, 1, "the notebook adapter was told exactly once")
+
+    p.notebook_input = {
+        hasActiveContact = function() return false end,
+        abort = function() aborted = aborted + 1; return true end,
+    }
+    p:onDocumentRerendered()
+    t:eq(aborted, 1, "with nothing on the glass it is left alone")
+end)
+
+--[[--
+The eraser counters are wired to the route, not only to themselves.
+
+A unit test of Capture's counters passes whether or not anything calls them --
+which is how a bump that fired several times per contact went unnoticed. This
+drives a real erase contact through the host and reads the numbers back.
+]]
+t:case("an erase contact is counted once, by where the tool came from", function()
+    local p = drawingPlugin()
+    local bus = support.newSlotBus()
+    Capture:resetEraserCounts()
+
+    p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 2 }))
+    p:onStylusEvent(bus:set(4, { x = 200, y = 140 }))
+    p:onStylusEvent(bus:set(4, { x = 260, y = 190 }))
+    p:onStylusEvent(bus:set(4, { id = -1 }))
+    local by_button, by_tool = Capture:eraserCounts()
+    t:eq(by_button, 0, "no barrel button was held")
+    t:eq(by_tool, 1, "one erase contact, counted once")
+
+    p:onStylusEvent(bus:set(4, { id = 4, x = 500, y = 500, tool = 1 }))
+    p:onStylusEvent(bus:set(4, { x = 600, y = 560 }))
+    p:onStylusEvent(bus:set(4, { id = -1 }))
+    by_button, by_tool = Capture:eraserCounts()
+    t:eq(by_tool, 1, "an ink contact adds nothing")
+end)
+
 t:case("a re-render with nothing on the glass changes nothing", function()
     local p = drawingPlugin()
     local bus = support.newSlotBus()

@@ -864,10 +864,22 @@ function Sequence:feed(slot)
         slot_number, id, tool, x, y, timev)
 end
 
-function Sequence:abort(reason, clear_history)
+--[[--
+End whatever is in flight.
+
+`detector_reset` is the caller telling this sequence that GestureDetector's
+contacts have already been dropped underneath it -- which is what
+`Input:resetState` does from inside `Input:inhibitInput`. It matters because a
+failed drop normally means the opposite: a contact the detector still owns,
+with a live hold timer and a lift still coming, which must not be forgotten.
+When the detector has been reset there is nothing left to hand back, and
+refusing to end the contact would leave this sequence latched in
+`forwarded_wait_lift` waiting for a lift that can no longer arrive.
+]]
+function Sequence:abort(reason, clear_history, detector_reset)
     reason = reason or "external_abort"
     if isForwardedState(self.state) then
-        local dropped = self:_tryDrop(self.owner_slot)
+        local dropped = self:_tryDrop(self.owner_slot) or detector_reset == true
         if not dropped then
             self.state = "forwarded_wait_lift"
             if clear_history then self:_resetGeometry(true) end

@@ -127,10 +127,13 @@ tool anywhere else is the palm collision above, and trusting it is what let a
 resting hand run the erase path on a Scribe. Tool 2 on the pen slot stays a
 real eraser; that is the case the strict rule has to keep working.
 
-Off Wacom the old tool-based classification is kept unchanged. Kobo styluses
-report through ABS_MT_TOOL_TYPE with no dedicated slot, and nothing has shown
-the palm collision there; narrowing them on a guess would break the one route
-those devices have. See ADR-22.
+Off Wacom the tool value has two possible authors and they have to be told
+apart. `ABS_MT_TOOL_TYPE` is copied through unchecked, and in the panel's
+namespace 2 is MT_TOOL_PALM and 3 is MT_TOOL_DIAL -- so believing a bare 2 is
+the Scribe defect on a device with no pen slot to appeal to. But KOReader also
+writes ERASER and HIGHLIGHTER itself while a barrel button is held, and that
+branch is gated on `not isSDL`, *not* on the pen protocol: it is live on a Kobo.
+The latch it sets is readable, so it is the discriminator. See ADR-22, ADR-24.
 ]]
 function Capture:physicalSlotRole(slot, input)
     if not slot then return "touch", "touch_slot" end
@@ -156,21 +159,34 @@ function Capture:physicalSlotRole(slot, input)
         return "touch", "touch_slot"
     end
 
-    -- Off Wacom nothing synthesizes a tool value for us: it was copied straight
-    -- out of the panel's ABS_MT_TOOL_TYPE (input.lua @ 60ce80ed, handleTouchEv,
-    -- `setCurrentMtSlot("tool", ev.value)` with no range check). In that
-    -- namespace 0 is MT_TOOL_FINGER and 1 is MT_TOOL_PEN, but 2 is
-    -- MT_TOOL_PALM and 3 is MT_TOOL_DIAL -- the two values KOReader exports as
-    -- ERASER and HIGHLIGHTER, which it only ever means for the tools it writes
-    -- itself (BTN_TOOL_RUBBER and the BTN_STYLUS latches, both gated on
-    -- `wacom_protocol or isSDL`). A panel reporting 2 is reporting a hand, so
-    -- believing it here would be the defect ADR-22 closed for Wacom, one
-    -- device class over. The dedicated pen slot still decides first: that is
-    -- where SDL puts its synthesized eraser.
+    -- Off Wacom, three authors can have put this number here, and only the
+    -- last of them is a hand.
+    --
+    -- The dedicated pen slot decides first: that is where SDL's own
+    -- BTN_TOOL_RUBBER lands (input.lua @ 60ce80ed, the `stylus_tool_protocol`
+    -- branch). TOOL_PEN is the one panel value that means a pen in both
+    -- namespaces. And KOReader rewrites PEN into ERASER or HIGHLIGHTER while a
+    -- barrel button is held -- a branch gated on `not isSDL`, so it is live on
+    -- an ordinary Kobo, and the rewrite in routeStylusEvents has no device gate
+    -- at all. That is a real stylus and it must keep working.
+    --
+    -- What is left is a panel-authored 2 or 3, and there `ABS_MT_TOOL_TYPE` was
+    -- copied through with no range check: 2 is MT_TOOL_PALM and 3 is
+    -- MT_TOOL_DIAL. Believing it would be the defect ADR-22 closed for Wacom,
+    -- one device class over. The latch is the only thing that separates the two,
+    -- so read it rather than the value alone.
     if pen_slot ~= nil and slot.slot == pen_slot then
         return "trusted_stylus", "configured_pen_slot"
     end
     if tool == self.TOOL_PEN then return "trusted_stylus", "tool_type" end
+    if tool == self.TOOL_ERASER and input ~= nil
+        and input.stylus_eraser_active == true then
+        return "trusted_stylus", "stylus_button"
+    end
+    if tool == self.TOOL_HIGHLIGHTER and input ~= nil
+        and input.stylus_highlighter_active == true then
+        return "trusted_stylus", "stylus_button"
+    end
     if stylus_tool then return "routed_palm", "panel_tool_not_pen" end
     return "touch", "touch_slot"
 end

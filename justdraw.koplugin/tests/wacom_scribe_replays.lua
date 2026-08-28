@@ -15,9 +15,12 @@ Each fixture is a list of SYN frames; each frame is a list of
 `{ slot = n, fields = { ... } }` entries naming only the fields that changed,
 because that is exactly how KOReader's persistent `ev_slots` behaves.
 
-One caveat about the pen's `id`. KOReader's Wacom branch pins it: BTN_TOUCH
-down writes `pen_slot` into the slot and the lift writes -1, and nothing else
-touches it (`input.lua @ 60ce80ed`, handleKeyBoardEv). The fixtures below give
+One caveat about the pen's `id`. On the plain `handleTouchEv` path KOReader's
+Wacom branch pins it: BTN_TOUCH down writes `pen_slot` into the slot and the
+lift writes -1 (`input.lua @ 60ce80ed`, handleKeyBoardEv). That is not universal
+across Wacom devices -- reMarkable swaps in `handleMixedTouchEv`, where
+`ABS_MT_TRACKING_ID` writes into whatever `cur_slot` holds -- but it is the case
+that loses information, so it is the one to be safe against. The fixtures below give
 consecutive pen contacts different positive ids, which is either the scaled
 tablet's own ABS_MT_TRACKING_ID arriving through handleTouchEv or an artifact
 of how the recording was transcribed -- the log that would settle it is not

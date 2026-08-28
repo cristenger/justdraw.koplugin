@@ -84,12 +84,6 @@ local REASONS = {
     -- without these a Scribe trace would simply have a gap where the hand was.
     wacom_non_pen = true,
     wacom_pen_slot_missing = true,
-    -- Off Wacom the tool value is the panel's own: 2 is MT_TOOL_PALM and 3 is
-    -- MT_TOOL_DIAL, whatever KOReader exports those numbers as.
-    panel_tool_not_pen = true,
-    -- The capture went blind mid-contact (Input:inhibitInput) and the lift
-    -- will never arrive.
-    document_rerendered = true,
     palm_promoted = true,
     palm_continued = true,
     palm_lift = true,

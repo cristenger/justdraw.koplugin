@@ -125,10 +125,35 @@ return function(ctx)
         t:eq(reason, "tool_type", "named as such")
         local palm_role, palm_reason = Capture:physicalSlotRole(
             { slot = 1, id = 2, tool = 2 }, input)
-        t:eq(palm_role, "routed_palm", "MT_TOOL_PALM is a hand, not an eraser")
+        t:eq(palm_role, "routed_palm",
+            "with no button held, tool 2 is MT_TOOL_PALM, not an eraser")
         t:eq(palm_reason, "panel_tool_not_pen", "and says which namespace it read")
         t:eq(Capture:physicalSlotRole({ slot = 1, id = 2, tool = 3 }, input),
             "routed_palm", "so is MT_TOOL_DIAL")
+
+        --[[--
+        The same number, written by KOReader instead of by the panel.
+
+        `BTN_STYLUS` sets `stylus_eraser_active` and routeStylusEvents rewrites
+        the slot to ERASER. That branch is gated on `not isSDL`, not on the pen
+        protocol, so it is live on an ordinary Kobo: this is a real stylus with
+        its barrel button held, and refusing it would leave that device with no
+        eraser and -- because a tracked palm stops consulting the tool -- no pen
+        either until the lift.
+        ]]
+        input.stylus_eraser_active = true
+        local held_role, held_reason = Capture:physicalSlotRole(
+            { slot = 1, id = 2, tool = 2 }, input)
+        t:eq(held_role, "trusted_stylus", "a held barrel button is a real eraser")
+        t:eq(held_reason, "stylus_button", "named by the latch that wrote it")
+        input.stylus_eraser_active = false
+        input.stylus_highlighter_active = true
+        t:eq(Capture:physicalSlotRole({ slot = 1, id = 2, tool = 3 }, input),
+            "trusted_stylus", "and the second button is a real highlighter")
+        t:eq(Capture:physicalSlotRole({ slot = 1, id = 2, tool = 2 }, input),
+            "routed_palm",
+            "the highlighter latch does not vouch for an eraser value")
+        input.stylus_highlighter_active = false
         local sdl_role, sdl_reason = Capture:physicalSlotRole(
             { slot = 4, id = 2, tool = 2 }, input)
         t:eq(sdl_role, "trusted_stylus",

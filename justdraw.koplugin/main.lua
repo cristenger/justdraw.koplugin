@@ -577,11 +577,22 @@ them apart. The geometry history goes with it: a boundary from before the blind
 window names a place the pen may have left long ago.
 ]]
 function JustDraw:abandonBlindContact(reason)
+    -- The third argument is the point. `inhibitInput` already ran
+    -- `Input:resetState`, so a forwarded contact is not owned by anybody any
+    -- more and the drop that would hand it back is guaranteed to fail. Without
+    -- saying so, the sequence refuses to end it and latches forever.
     local sequence = self.stylus_sequence
-    if sequence then sequence:abort(reason, true) end
+    if sequence then sequence:abort(reason, true, true) end
     if self.palm_gate then self.palm_gate:reset() end
     self:abortStroke()
     self:resetContacts()
+    -- The notebook editor runs a second, independent contact machine over the
+    -- same digitizer, and a notebook can be open above a document. Its own
+    -- abort already survives a contact GestureDetector no longer owns -- it
+    -- rebuilds the machine rather than latching -- so it needs nothing new,
+    -- only to be told.
+    local adapter = self.notebook_input
+    if adapter and adapter:hasActiveContact() then adapter:abort() end
 end
 
 --- The asynchronous page index has caught up with the current layout. Session
@@ -925,9 +936,11 @@ function JustDraw:resetContacts()
     self.passthrough = false
     self.draw_slot = nil
     -- Callers reach this with capture released, made inert, or -- in
-    -- abandonBlindContact -- still installed but unable to see a lift. In all
-    -- three the frame wrapper cannot observe the physical lifts that are still
-    -- owed, so ownership ends here and reused slots start unclassified.
+    -- abandonBlindContact -- still installed but with KOReader's own contacts
+    -- already dropped underneath it by Input:resetState. In all three nothing
+    -- is owed a lift any more, so ownership ends here and a reused slot starts
+    -- unclassified rather than inheriting a decision made for a contact that
+    -- no longer exists.
     if self.router then self.router:reset() end
 end
 
