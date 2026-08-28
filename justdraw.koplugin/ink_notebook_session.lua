@@ -110,6 +110,26 @@ function Session:uiSnapshot()
         and not (surface and surface:saveFailed())
     local can_close = not self.closed and not contact and state ~= "save_failed"
         and not pending_metadata
+    -- Why navigation is refused, from a closed vocabulary, in the order the
+    -- reader can act on it. A single can_navigate=false collapsed "your hand
+    -- is still on the glass" into the same silence as "this page never
+    -- loaded", and the editor had nothing to say when a button did nothing.
+    local navigation_block_reason
+    if not can_navigate then
+        if contact then
+            navigation_block_reason = "contact_active"
+        elseif pending_metadata then
+            navigation_block_reason = "transition_pending"
+        elseif state == "save_failed" or (surface and surface:saveFailed()) then
+            navigation_block_reason = "save_failed"
+        elseif state == "load_failed" then
+            navigation_block_reason = "load_failed"
+        elseif state == "closed" then
+            navigation_block_reason = "closed"
+        else
+            navigation_block_reason = "loading"
+        end
+    end
     local error_code
     if state == "load_failed" then
         error_code = Errors.normalize(surface and surface.load_error, "load")
@@ -123,6 +143,7 @@ function Session:uiSnapshot()
         writable = writable,
         can_ink = state == "ready" and writable and transition_free and not contact,
         can_navigate = can_navigate,
+        navigation_block_reason = navigation_block_reason,
         can_close = can_close,
         has_previous = can_navigate and self.has_previous or false,
         has_next = can_navigate and self.has_next or false,

@@ -553,9 +553,38 @@ function Editor:_qualityContactBoundary(session)
         and "immediate" or "delayed", completed or was_waiting)
 end
 
+--[[--
+Re-read the snapshot and repaint the rail only if what it can do changed.
+
+The reason this is not folded into onEditChanged: a palm resting on the glass
+blocks navigation without editing anything, so the only event that can unblock
+it is the last contact ending. Missing that is how Add page stayed disabled
+with nothing on the screen.
+]]
+function Editor:_refreshActionAvailability()
+    local before = self.snapshot
+    local snapshot = self:_refreshSnapshot()
+    if not snapshot then return false end
+    if before and before.can_navigate == snapshot.can_navigate
+        and before.writable == snapshot.writable
+        and before.can_ink == snapshot.can_ink
+        and before.can_undo == snapshot.can_undo
+        and before.can_close == snapshot.can_close
+        and before.has_previous == snapshot.has_previous
+        and before.has_next == snapshot.has_next then
+        return false
+    end
+    self:_rebuildControls()
+    self:_dirtyRail()
+    return true
+end
+
 function Editor:onPhysicalContactEnd(session)
-    if self.closed or session ~= self:_currentSession()
-        or not self.quality_waiting_for_contact_end then return end
+    if self.closed or session ~= self:_currentSession() then return end
+    -- Unconditional: the e-ink quality pass has its own bookkeeping and may
+    -- have nothing to do, but the rail's capability always has to catch up.
+    self:_refreshActionAvailability()
+    if not self.quality_waiting_for_contact_end then return end
     self:_syncQualitySetting(session)
     if self.quality_waiting_for_contact_end then
         self:_qualityContactBoundary(session)
@@ -679,15 +708,18 @@ function Editor:_rebuildControls()
     local eraser = self:_button(_("Eraser"), snapshot.can_ink,
         function() self.set_eraser(true); self:_rebuildControls(); self:_dirtyRail() end,
         rects.eraser, nil, function() return self.get_eraser() end)
-    local undo = self:_button(_("Undo"), snapshot.can_undo,
+    -- Enabled state and the domain gate come from one function, so a control
+    -- can look wrong only for as long as the snapshot behind it is stale --
+    -- and never disagree about what would happen if it were pressed.
+    local undo = self:_button(_("Undo"), self:_actionAvailability("undo", snapshot),
         function() self:_runDomain("undo") end, rects.undo)
     local previous = self:_button(_("Previous page"),
-        snapshot.can_navigate and snapshot.has_previous,
+        self:_actionAvailability("previous", snapshot),
         function() self:_runDomain("previous") end, rects.previous)
     local next_button = self:_button(_("Next page"),
-        snapshot.can_navigate and snapshot.has_next,
+        self:_actionAvailability("next", snapshot),
         function() self:_runDomain("next") end, rects.next)
-    local add = self:_button(_("Add page"), snapshot.can_navigate and snapshot.writable,
+    local add = self:_button(_("Add page"), self:_actionAvailability("add", snapshot),
         function() self:_runDomain("add") end, rects.add)
     local more = self:_button(_("More"), snapshot.state ~= "loading",
         function() self:showMore() end, rects.more)
@@ -734,24 +766,84 @@ function Editor:_showInfo(text)
     return self:showModalSafely(InfoMessage:new{ text = text })
 end
 
+--[[--
+Whether one rail action may run right now, and if not, why.
+
+The single source of truth for both the button's enabled state and the domain
+call, because they used to disagree. A Button closes over the enabled flag it
+was built with, so a snapshot that changed since -- a palm lifting, a page
+finishing its save -- left a control that looked live and did nothing, or
+looked dead while the action was available.
+
+The reason is a closed token: `contact_active`, `transition_pending`,
+`save_failed`, `load_failed`, `loading` and `closed` come from the session,
+`read_only` and `boundary` are this widget's own.
+]]
+function Editor:_actionAvailability(action, snapshot)
+    snapshot = snapshot or self.snapshot
+    if not snapshot then return false, "loading" end
+    if action == "undo" then
+        if snapshot.can_undo then return true end
+        return false, snapshot.navigation_block_reason or "unavailable"
+    end
+    if not snapshot.can_navigate then
+        return false, snapshot.navigation_block_reason or "unavailable"
+    end
+    if action == "previous" then
+        if snapshot.has_previous then return true end
+        return false, "boundary"
+    elseif action == "next" then
+        if snapshot.has_next then return true end
+        return false, "boundary"
+    elseif action == "add" then
+        if snapshot.writable then return true end
+        return false, "read_only"
+    end
+    return false, "unavailable"
+end
+
+--[[--
+Say why an activated action did nothing.
+
+A KOReader Button draws its pressed state before the callback runs, so the
+flash is proof the tap arrived and nothing more. Without this, "Add page
+flashes and does nothing" is all the reader ever learns.
+]]
+function Editor:_reportBlockedAction(action, reason)
+    logger.info("JustDraw notebooks: action blocked:", action, reason)
+    if reason == "contact_active" then
+        self:_showInfo(_("Lift the pen and your hand, then try again."))
+    elseif reason == "boundary" then
+        self:_showInfo(action == "previous" and _("First page") or _("Last page"))
+    elseif reason == "save_failed" or reason == "load_failed" then
+        -- The error band already carries the explanation and its retry; a
+        -- second modal over it would only be one more thing to dismiss.
+        self:onStateChanged()
+    end
+end
+
 function Editor:_runDomain(action)
     local snapshot = self:_refreshSnapshot()
+    local enabled, blocked_reason = self:_actionAvailability(action, snapshot)
+    if not enabled then
+        self:_reportBlockedAction(action, blocked_reason)
+        return nil, blocked_reason or "disabled"
+    end
     local ok, err
-    if action == "undo" and snapshot.can_undo then
+    if action == "undo" then
         ok, err = self.controller:undo()
-    elseif action == "previous" and snapshot.can_navigate and snapshot.has_previous then
+    elseif action == "previous" then
         ok, err = self.controller:goPrevious()
-    elseif action == "next" and snapshot.can_navigate and snapshot.has_next then
+    elseif action == "next" then
         ok, err = self.controller:goNext()
-    elseif action == "add" and snapshot.can_navigate and snapshot.writable then
+    elseif action == "add" then
         ok, err = self.controller:appendPage()
     else
         return nil, "disabled"
     end
     if not ok then
-        if err == "contact_active" then self:_showInfo(_("Lift the pen and try again."))
-        elseif err == "boundary" then
-            self:_showInfo(action == "previous" and _("First page") or _("Last page"))
+        if err == "contact_active" or err == "boundary" then
+            self:_reportBlockedAction(action, err)
         else
             logger.warn("JustDraw notebooks: editor action failed:", action, err)
             self:onStateChanged()
