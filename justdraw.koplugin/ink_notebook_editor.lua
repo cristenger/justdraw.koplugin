@@ -35,6 +35,11 @@ local Editor = FocusManager:extend{
 local QUALITY_DELAY = 0.35
 local QUALITY_STROKE_BUDGET = 8
 local QUALITY_AREA_RATIO = 0.25
+-- After a run's cleanup, how long the pen has to stay away before the page
+-- gets the full-quality pass. Above any pause between words a hand makes
+-- while still writing; the device log (JUSTDRAW-REFRESH since_lift) is what
+-- would move it.
+local QUALITY_REST_DELAY = 2.0
 
 local function inside(rect, x, y)
     return rect ~= nil and x >= rect.x and x < rect.x + rect.w
@@ -67,6 +72,12 @@ function Editor:init()
     self.show_stylus_diagnostics = self.show_stylus_diagnostics or function() end
     -- Optional; when absent only an explicit `quality_trace = true` traces.
     self.quality_trace_enabled = self.quality_trace_enabled
+    -- Whether this device's `partial` blocks the process (see
+    -- _qualityRunWaveform). Injectable so the policy is testable without a
+    -- device table; the default reads the one capability flag that decides it.
+    self.partial_blocks_input = self.partial_blocks_input or function()
+        return type(Device.isMTK) == "function" and Device:isMTK() == true
+    end
     self.set_rail_side = self.set_rail_side or function() end
     self.show_host_message = self.show_host_message or function(text)
         UIManager:show(InfoMessage:new{ text = text })
@@ -199,6 +210,7 @@ function Editor:_initQualityRefresh()
     self.quality_live_fast = self.get_live_fast() ~= false
     self.quality_action = function()
         local generation = self.quality_scheduled_generation
+        self.quality_fired_kind = self.quality_scheduled_kind
         self.quality_scheduled_kind = nil
         self.quality_scheduled_generation = nil
         self:_runQualityRefresh(generation)
@@ -414,6 +426,12 @@ function Editor:_qualityBudgetReached()
         >= paper.w * paper.h * QUALITY_AREA_RATIO
 end
 
+local QUALITY_KIND_DELAY = {
+    immediate = 0,
+    delayed = QUALITY_DELAY,
+    rest = QUALITY_REST_DELAY,
+}
+
 function Editor:_scheduleQualityAction(kind, restart)
     if self.closed or not self:_qualityHasUnion()
         or self.quality_waiting_for_contact_end
@@ -425,15 +443,44 @@ function Editor:_scheduleQualityAction(kind, restart)
         self:_cancelQualityAction()
     elseif self.quality_scheduled_kind == "immediate" then
         return false
-    elseif self.quality_scheduled_kind == "delayed" then
+    elseif self.quality_scheduled_kind == "delayed"
+        or self.quality_scheduled_kind == "rest" then
         if not restart then return false end
         self:_cancelQualityAction()
     end
     self.quality_scheduled_kind = kind
     self.quality_scheduled_generation = self.quality_generation
-    self.quality_schedule_in(kind == "immediate" and 0 or QUALITY_DELAY,
-        self.quality_action)
+    self.quality_schedule_in(QUALITY_KIND_DELAY[kind], self.quality_action)
     return true
+end
+
+--[[--
+Which waveform a cleanup uses, and why there are two.
+
+A `partial` is the right cleanup for DU ghosting: on the Kindle Scribe it is
+GLR16, the waveform that actually repaints grey residue. It is also the wrong
+thing to fire while a hand is still writing, because `mxc_update` promotes
+GLR16 to a FULL update and then blocks the whole process on
+MXCFB_WAIT_FOR_UPDATE_COMPLETE -- and UIManager repaints before it reads
+input, so the pen is dead until the panel is done. That is not the panel's
+cost; it is KOReader fencing FULL updates to avoid jitter on page turns, applied
+to ink.
+
+So a cleanup that ends a *run* of strokes -- the one the pen is most likely to
+land on -- uses `ui`. On MTK that is AUTO: no FULL promotion, no completion
+wait, only a submission wait for the previous marker, which after a burst of
+small DU updates is short or nil. It leaves a little more ghosting than GLR16
+would. The full-quality `partial` is kept for when it costs nobody anything:
+once the pen has stayed away for QUALITY_REST_DELAY, when the budget is spent,
+and on every path that was already `partial` (repair, undo, preference change,
+uncover). Devices whose `partial` does not block keep `partial` for the run
+cleanup too; nothing changes for them.
+]]
+function Editor:_qualityRunWaveform()
+    if self.partial_blocks_input and self.partial_blocks_input() then
+        return "ui"
+    end
+    return "partial"
 end
 
 function Editor:_runQualityRefresh(generation)
@@ -455,7 +502,24 @@ function Editor:_runQualityRefresh(generation)
         return
     end
     local box = self:_qualityBox()
-    self:_traceQuality("fire", string.format(" box=%dx%d", box.w, box.h))
+    local kind = self.quality_fired_kind
+    self.quality_fired_kind = nil
+    if kind == "delayed" then
+        local waveform = self:_qualityRunWaveform()
+        self:_traceQuality("fire", string.format(" box=%dx%d mode=%s", box.w, box.h, waveform))
+        if waveform == "partial" then
+            self:_resetQualityRefresh()
+            UIManager:setDirty(nil, "partial", box)
+            return
+        end
+        -- The run cleanup cleared the worst of it without blocking. Keep the
+        -- union and let the rest pass finish the job when the pen has left.
+        UIManager:setDirty(nil, waveform, box)
+        self.quality_strokes = 0
+        self:_scheduleQualityAction("rest", true)
+        return
+    end
+    self:_traceQuality("fire", string.format(" box=%dx%d mode=partial", box.w, box.h))
     self:_resetQualityRefresh()
     UIManager:setDirty(nil, "partial", box)
 end
@@ -481,7 +545,10 @@ Only the delayed kind is held. An "immediate" cleanup was armed because the
 budget is exhausted; that one has to land.
 ]]
 function Editor:_holdQualityForContact()
-    if self.quality_scheduled_kind ~= "delayed" then return false end
+    if self.quality_scheduled_kind ~= "delayed"
+        and self.quality_scheduled_kind ~= "rest" then
+        return false
+    end
     self:_cancelQualityAction()
     self.quality_waiting_for_contact_end = true
     self:_traceQuality("hold")

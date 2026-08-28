@@ -57,6 +57,7 @@ return function(ctx)
             end,
             quality_unschedule = function(action) scheduler:unschedule(action) end,
             control_touch_allowed = function() return guard ~= false end,
+            partial_blocks_input = overrides.partial_blocks_input,
             show_host_message = overrides.show_host_message,
             show_stylus_diagnostics = overrides.show_stylus_diagnostics,
             on_close = function() closed = closed + 1 end,
@@ -599,6 +600,130 @@ return function(ctx)
         t:eq(cleanup[3].x, 100, "covering the first stroke")
         t:eq(cleanup[3].w, 50, "and the second: nothing was cleaned less, only later")
         t:eq(editor.quality_strokes, 0, "the accumulator was consumed once")
+    end)
+
+    --[[--
+    Where `partial` blocks the process, the run cleanup must not be one.
+
+    On the Kindle Scribe a partial is GLR16, promoted to FULL and fenced with a
+    completion wait inside the process; UIManager reads no input meanwhile.
+    The cleanup that ends a run of strokes is the one the pen lands on, so on
+    such a device it goes out as `ui` -- no promotion, no completion wait --
+    and the full-quality partial is deferred to a rest pass that fires only
+    once the pen has stayed away for QUALITY_REST_DELAY.
+    ]]
+    t:case("on a blocking device the run cleanup is ui and the rest pass is partial", function()
+        ctx.reset()
+        local Geom = require("ui/geometry")
+        local transform = {}
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local runtime = { live_fast = true, active_contact = false }
+        local editor, _, _, _, session, _, scheduler = newEditor{
+            transform = transform, cache = cache, runtime = runtime,
+            partial_blocks_input = function() return true end,
+        }
+        local function ink(x, y)
+            editor:onDirty(Geom:new{ x = x, y = y, w = 10, h = 10 },
+                "ink", session, transform, { x = 1, y = 1, w = 10, h = 10 })
+        end
+        ink(100, 200); editor:onEditChanged(session)
+        ink(140, 240); editor:onEditChanged(session)
+        scheduler:advance(0.35)
+        local run = ctx.env.UIManager.dirty[#ctx.env.UIManager.dirty]
+        t:eq(run[2], "ui", "the run cleanup uses the non-blocking waveform")
+        t:eq(run[3].x, 100, "over the whole union")
+        t:eq(run[3].w, 50, "of both strokes")
+        t:eq(editor:_qualityHasUnion(), true, "the union is kept for the rest pass")
+        t:eq(editor.quality_scheduled_kind, "rest", "and a rest pass is armed")
+        t:eq(scheduler:pending(), 1, "exactly one")
+
+        -- Two advances rather than 1.99 + 0.01: summed floats land a hair
+        -- short of the due time and the fake scheduler, correctly, does not
+        -- fire early. Assert "not yet" at a clear margin, then land on it.
+        local before = #ctx.env.UIManager.dirty
+        scheduler:advance(1.5)
+        t:eq(#ctx.env.UIManager.dirty, before, "the rest pass waits out QUALITY_REST_DELAY")
+        scheduler:advance(0.5)
+        local rest = ctx.env.UIManager.dirty[#ctx.env.UIManager.dirty]
+        t:eq(rest[2], "partial", "the rest pass is the full-quality waveform")
+        t:eq(rest[3].x, 100, "over the same union")
+        t:eq(rest[3].w, 50, "unchanged")
+        t:eq(editor:_qualityHasUnion(), false, "and it consumes the union")
+        t:eq(scheduler:pending(), 0, "nothing left armed")
+    end)
+
+    t:case("a pen back on the glass holds the rest pass too", function()
+        ctx.reset()
+        local Geom = require("ui/geometry")
+        local transform = {}
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local runtime = { live_fast = true, active_contact = false }
+        local editor, _, _, _, session, _, scheduler = newEditor{
+            transform = transform, cache = cache, runtime = runtime,
+            partial_blocks_input = function() return true end,
+        }
+        local function ink(x, y)
+            editor:onDirty(Geom:new{ x = x, y = y, w = 10, h = 10 },
+                "ink", session, transform, { x = 1, y = 1, w = 10, h = 10 })
+        end
+        ink(100, 200); editor:onEditChanged(session)
+        scheduler:advance(0.35)                       -- run cleanup (ui) fired
+        t:eq(editor.quality_scheduled_kind, "rest", "rest pass armed")
+        scheduler:advance(1.0)
+        runtime.active_contact = true
+        ink(300, 400)                                 -- a new word starts
+        t:eq(scheduler:pending(), 0, "the rest pass is cancelled by the contact")
+        t:eq(editor.quality_waiting_for_contact_end, true, "and handed to the latch")
+        runtime.active_contact = false
+        editor:onEditChanged(session)
+        t:eq(editor.quality_scheduled_kind, "delayed",
+            "its lift arms a run cleanup again, not the rest pass")
+        scheduler:advance(0.35)
+        local run = ctx.env.UIManager.dirty[#ctx.env.UIManager.dirty]
+        t:eq(run[2], "ui", "which goes out as ui")
+        t:eq(run[3].x, 100, "over the union that now spans both words")
+        t:eq(run[3].w, 210, "old and new")
+    end)
+
+    t:case("a budget-driven cleanup stays partial on a blocking device", function()
+        ctx.reset()
+        local Geom = require("ui/geometry")
+        local transform = {}
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local runtime = { live_fast = true, active_contact = false }
+        local editor, _, _, _, session, _, scheduler = newEditor{
+            transform = transform, cache = cache, runtime = runtime,
+            partial_blocks_input = function() return true end,
+        }
+        for i = 1, 8 do
+            editor:onDirty(Geom:new{ x = 100 + i, y = 200, w = 10, h = 10 },
+                "ink", session, transform, { x = 1, y = 1, w = 10, h = 10 })
+            editor:onEditChanged(session)
+        end
+        t:eq(editor.quality_scheduled_kind, "immediate", "the budget armed an immediate")
+        scheduler:advance(0)
+        local fired = ctx.env.UIManager.dirty[#ctx.env.UIManager.dirty]
+        t:eq(fired[2], "partial", "a spent budget takes the blocking pass; it has to land")
+        t:eq(editor:_qualityHasUnion(), false, "and consumes the union")
+    end)
+
+    t:case("off a blocking device the run cleanup is still partial", function()
+        ctx.reset()
+        local Geom = require("ui/geometry")
+        local transform = {}
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local runtime = { live_fast = true, active_contact = false }
+        local editor, _, _, _, session, _, scheduler = newEditor{
+            transform = transform, cache = cache, runtime = runtime,
+            partial_blocks_input = function() return false end,
+        }
+        editor:onDirty(Geom:new{ x = 100, y = 200, w = 10, h = 10 },
+            "ink", session, transform, { x = 1, y = 1, w = 10, h = 10 })
+        editor:onEditChanged(session)
+        scheduler:advance(0.35)
+        t:eq(ctx.env.UIManager.dirty[#ctx.env.UIManager.dirty][2], "partial",
+            "nothing changes where partial does not block")
+        t:eq(scheduler:pending(), 0, "and no rest pass is armed")
     end)
 
     t:case("a budget-exhausted immediate cleanup is not held", function()
