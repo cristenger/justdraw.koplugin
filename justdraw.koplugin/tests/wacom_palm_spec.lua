@@ -141,6 +141,34 @@ return function(ctx)
             "touch", "and everything else is touch")
     end)
 
+    --[[--
+    Which of the two things an ERASER tool is, counted apart.
+
+    KOReader rewrites PEN to ERASER while BTN_STYLUS is held and never writes
+    PEN back, so the value survives the button. Nothing here can undo that; the
+    counters exist so a diagnostics report says whether the erases came from a
+    button that was down or from a tool value on its own.
+    ]]
+    t:case("erases are counted by where the eraser tool came from", function()
+        Capture:resetEraserCounts()
+        local held = support.newInput{ wacom_protocol = true }
+        held.stylus_eraser_active = true
+        t:eq(Capture:eraserToolSource(held), "button", "the latch is readable")
+        t:eq(Capture:noteEraserContact(held), "button", "and counted as its own")
+        local bare = support.newInput{ wacom_protocol = true }
+        t:eq(Capture:eraserToolSource(bare), "tool",
+            "a rear eraser or a stuck value looks the same, and is not the button")
+        Capture:noteEraserContact(bare)
+        Capture:noteEraserContact(bare)
+        local by_button, by_tool = Capture:eraserCounts()
+        t:eq(by_button, 1, "one erase came from the held button")
+        t:eq(by_tool, 2, "two came from the tool value alone")
+        Capture:resolveTools(bare)
+        by_button, by_tool = Capture:eraserCounts()
+        t:eq(by_button, 0, "a new lease starts the count over")
+        t:eq(by_tool, 0, "on both halves")
+    end)
+
     t:case("a Wacom runtime with no pen slot is refused, not guessed at", function()
         local input = support.newInput{ wacom_protocol = true }
         input.pen_slot = nil

@@ -1260,7 +1260,13 @@ function JustDraw:classifyStylusContact(x, y, tool, coherent)
     if self.canvas_open and self.router and not self.router:penDraws() then
         return "block"
     end
-    if tool == Capture.TOOL_ERASER or self.eraser then return "draw", "erase" end
+    if tool == Capture.TOOL_ERASER then
+        -- Once per contact, and only for a tool the pen reported: the toolbar
+        -- toggle below is our own state and says nothing about the hardware.
+        Capture:noteEraserContact(self.capture_input)
+        return "draw", "erase"
+    end
+    if self.eraser then return "draw", "erase" end
     return "draw", "ink"
 end
 
@@ -1370,6 +1376,7 @@ function JustDraw:diagnosticReport()
         -- one sent readers chasing a plugin conflict that did not exist.
         callback_taken = self:stylusCallbackIsForeign(input),
     }
+    r.eraser_by_button, r.eraser_by_tool = Capture:eraserCounts()
 
     -- The first unmet precondition, in the order the user can act on them.
     if r.mode == "finger" then
@@ -1396,6 +1403,13 @@ function JustDraw:diagnosticLines()
         "Pen digitizer flag: " .. tostring(r.wacom)
             .. "   pen slot: " .. tostring(r.pen_slot),
         "Callback owned by another plugin: " .. tostring(r.callback_taken),
+        -- Splits erases by where the ERASER tool came from. KOReader never
+        -- writes PEN back after a barrel-button press (Capture:eraserToolSource),
+        -- so a session that erased with the button once and then reports a
+        -- growing "by tool value" count with no rear-eraser use is looking at
+        -- that stuck value, not at a plugin decision.
+        "Erases by held pen button: " .. tostring(r.eraser_by_button)
+            .. "   by tool value: " .. tostring(r.eraser_by_tool),
     }
     if r.blocker then lines[#lines + 1] = "" ; lines[#lines + 1] = r.blocker end
     return lines, r

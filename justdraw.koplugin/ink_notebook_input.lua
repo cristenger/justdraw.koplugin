@@ -474,8 +474,13 @@ from -- nothing here latches, so the answer is the same either way.
 function Adapter:_classifyStylus(sx, sy, tool)
     if self.pending_domain_reason ~= nil then return "block" end
     if self:_passesStylus(sx, sy) then return "pass" end
-    local erasing = tool == Capture.TOOL_ERASER
-        or truthy(self.get_eraser, self.active_session)
+    local by_tool = tool == Capture.TOOL_ERASER
+    if by_tool then
+        -- Once per contact, and only for a tool the pen reported. The rail's
+        -- own eraser toggle is our state and says nothing about the hardware.
+        Capture:noteEraserContact(self.capture_input)
+    end
+    local erasing = by_tool or truthy(self.get_eraser, self.active_session)
     return "draw", erasing and "erase" or "ink"
 end
 

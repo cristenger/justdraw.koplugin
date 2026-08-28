@@ -51,6 +51,11 @@ local Capture = {
     TOOL_PEN = TOOL_TYPE_PEN,
     TOOL_ERASER = TOOL_TYPE_ERASER,
     TOOL_HIGHLIGHTER = TOOL_TYPE_HIGHLIGHTER,
+
+    -- How many erases came from a held barrel button and how many from a bare
+    -- tool value. See eraserToolSource.
+    eraser_by_button = 0,
+    eraser_by_tool = 0,
 }
 
 -- ------------------------------------------------------------ capability
@@ -84,6 +89,7 @@ function Capture:resolveTools(input)
     self.TOOL_PEN         = pick(input.TOOL_TYPE_PEN, TOOL_TYPE_PEN)
     self.TOOL_ERASER      = pick(input.TOOL_TYPE_ERASER, TOOL_TYPE_ERASER)
     self.TOOL_HIGHLIGHTER = pick(input.TOOL_TYPE_HIGHLIGHTER, TOOL_TYPE_HIGHLIGHTER)
+    self:resetEraserCounts()
 end
 
 --[[--
@@ -167,6 +173,49 @@ function Capture:physicalSlotRole(slot, input)
     if tool == self.TOOL_PEN then return "trusted_stylus", "tool_type" end
     if stylus_tool then return "routed_palm", "panel_tool_not_pen" end
     return "touch", "touch_slot"
+end
+
+--[[--
+Which of the two things an ERASER-valued tool on a trusted pen is.
+
+KOReader rewrites a PEN into an ERASER for as long as `BTN_STYLUS` is held,
+writing it into the persistent `ev_slots` table it also hands us (input.lua @
+60ce80ed: routeStylusEvents mutates the slot, addSlot inserts the persistent
+table by reference). It never writes PEN back, because the restore is guarded
+by `slot.tool == TOOL_TYPE_PEN` and the rewrite has already made that false. On
+Wacom the value therefore stays ERASER until BTN_TOOL_PEN fires again -- until
+the pen leaves proximity -- so one brush of the barrel button can make every
+stroke after it erase.
+
+A plugin cannot repair that, and cannot tell a stuck value from a genuine rear
+eraser: both are tool 2 with the latch clear. What it can do is count the two
+apart, so a diagnostics report names which one the reader is looking at instead
+of leaving it to be guessed. Two integers, no allocation, bumped once per
+contact that actually erases.
+]]
+function Capture:eraserToolSource(input)
+    input = input or self.input or Device.input
+    if input and input.stylus_eraser_active == true then return "button" end
+    return "tool"
+end
+
+function Capture:noteEraserContact(input)
+    local source = self:eraserToolSource(input)
+    if source == "button" then
+        self.eraser_by_button = self.eraser_by_button + 1
+    else
+        self.eraser_by_tool = self.eraser_by_tool + 1
+    end
+    return source
+end
+
+function Capture:eraserCounts()
+    return self.eraser_by_button, self.eraser_by_tool
+end
+
+function Capture:resetEraserCounts()
+    self.eraser_by_button = 0
+    self.eraser_by_tool = 0
 end
 
 --[[--
