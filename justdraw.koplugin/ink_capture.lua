@@ -150,10 +150,22 @@ function Capture:physicalSlotRole(slot, input)
         return "touch", "touch_slot"
     end
 
-    if stylus_tool then return "trusted_stylus", "tool_type" end
+    -- Off Wacom nothing synthesizes a tool value for us: it was copied straight
+    -- out of the panel's ABS_MT_TOOL_TYPE (input.lua @ 60ce80ed, handleTouchEv,
+    -- `setCurrentMtSlot("tool", ev.value)` with no range check). In that
+    -- namespace 0 is MT_TOOL_FINGER and 1 is MT_TOOL_PEN, but 2 is
+    -- MT_TOOL_PALM and 3 is MT_TOOL_DIAL -- the two values KOReader exports as
+    -- ERASER and HIGHLIGHTER, which it only ever means for the tools it writes
+    -- itself (BTN_TOOL_RUBBER and the BTN_STYLUS latches, both gated on
+    -- `wacom_protocol or isSDL`). A panel reporting 2 is reporting a hand, so
+    -- believing it here would be the defect ADR-22 closed for Wacom, one
+    -- device class over. The dedicated pen slot still decides first: that is
+    -- where SDL puts its synthesized eraser.
     if pen_slot ~= nil and slot.slot == pen_slot then
         return "trusted_stylus", "configured_pen_slot"
     end
+    if tool == self.TOOL_PEN then return "trusted_stylus", "tool_type" end
+    if stylus_tool then return "routed_palm", "panel_tool_not_pen" end
     return "touch", "touch_slot"
 end
 

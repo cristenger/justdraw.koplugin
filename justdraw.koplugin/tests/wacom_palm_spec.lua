@@ -106,13 +106,35 @@ return function(ctx)
             "routed_palm", "so is a highlighter")
     end)
 
-    t:case("off Wacom the tool keeps deciding, as it always has", function()
+    --[[--
+    Off Wacom the tool value is the panel's, unedited.
+
+    KOReader copies ABS_MT_TOOL_TYPE through without a range check, and only
+    writes tool values of its own where `wacom_protocol or isSDL` holds. So on
+    an ordinary panel the number means what the Linux UAPI says it means:
+    0 finger, 1 pen, 2 MT_TOOL_PALM, 3 MT_TOOL_DIAL. Reading 2 as an eraser
+    there is the same mistake ADR-22 closed for Wacom, one device class over --
+    a resting hand that erases.
+    ]]
+    t:case("off Wacom only a pen-valued tool is a pen", function()
         local input = support.newInput{ wacom_protocol = false }
         Capture:resolveTools(input)
         local role, reason = Capture:physicalSlotRole(
-            { slot = 1, id = 2, tool = 2 }, input)
-        t:eq(role, "trusted_stylus", "a Kobo stylus reports through the tool")
+            { slot = 1, id = 2, tool = 1 }, input)
+        t:eq(role, "trusted_stylus", "a Kobo stylus reports MT_TOOL_PEN")
         t:eq(reason, "tool_type", "named as such")
+        local palm_role, palm_reason = Capture:physicalSlotRole(
+            { slot = 1, id = 2, tool = 2 }, input)
+        t:eq(palm_role, "routed_palm", "MT_TOOL_PALM is a hand, not an eraser")
+        t:eq(palm_reason, "panel_tool_not_pen", "and says which namespace it read")
+        t:eq(Capture:physicalSlotRole({ slot = 1, id = 2, tool = 3 }, input),
+            "routed_palm", "so is MT_TOOL_DIAL")
+        local sdl_role, sdl_reason = Capture:physicalSlotRole(
+            { slot = 4, id = 2, tool = 2 }, input)
+        t:eq(sdl_role, "trusted_stylus",
+            "an eraser on the dedicated pen slot is still the pen: that is "
+                .. "where KOReader puts its own BTN_TOOL_RUBBER on SDL")
+        t:eq(sdl_reason, "configured_pen_slot", "named by the slot, not the tool")
         t:eq(Capture:physicalSlotRole({ slot = 4, id = 2, tool = 0 }, input),
             "trusted_stylus", "a configured pen slot still counts")
         t:eq(Capture:physicalSlotRole({ slot = 1, id = 2, tool = 0 }, input),
