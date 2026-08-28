@@ -41,6 +41,14 @@ may change how it behaves.
     loop. The plugin unhooks itself, reports once, and leaves reading working.
 12. Activation must fail safely and visibly if another plugin already owns the
     single stylus callback. Never overwrite it.
+13. A physical pen contact may retain at most 8,192 ink points and process at
+    most 32,768 owner samples. Exceeding either limit must not persist a partial
+    ink stroke or release palm rejection before the physical boundary.
+14. Corrupt or extreme coordinates must not make raster work proportional to
+    their distance. Render and refresh coverage stays finite and clipped to the
+    active buffer.
+15. Notebook/canvas writes must have hard admission bounds and must not begin a
+    SQLite transaction synchronously from the stylus callback.
 
 ## Must not
 
@@ -60,4 +68,4 @@ may change how it behaves.
 - Highlighter as a distinct tool: KOReader can report it, it draws as a pen.
 - Certified support for stylus devices other than the Kindle Scribe.
 - Vector export, PDF flattening, colour.
-- A separate notes canvas (that is what `notes.koplugin` already does).
+- Notebook export, synchronization, page reordering and multi-page thumbnails.

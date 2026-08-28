@@ -322,10 +322,14 @@ It also only knows one Scribe model. `KindleScribe3` and `KindleScribeColorSoft`
 were added in v2026.07, so on v2026.03 those two are not detected as Scribes and
 never get their pen set up in the first place.
 
-The same screen also arms a log: one line per pen event for a minute, capped at
-500 lines, then it stops on its own. Each line carries the digitizer's slot,
-tracking id, tool, position and whether that position repeated the last lift —
-nothing about the book you have open.
+The same screen also arms a local log: one line per pen event for one minute,
+capped at 8,192 events, then it stops on its own. It is available from the
+standalone notebook editor's **More** menu as well as the reader menu. Each
+line contains scalar digitizer data (frame, slot, tracking id, tool, position
+and time), the state transition and the routing decision. It contains no book
+title, path, xpointer or notebook content and JustDraw does not upload it.
+Coordinates can still reveal the shape and timing of handwriting, so inspect
+the warning before recording and treat a shared KOReader log as sensitive.
 "Start drawing" closes the menu on purpose — an open menu is useless once
 single-finger taps are going to ink.
 
@@ -343,9 +347,19 @@ since two-finger gestures keep working while drawing.
 - **Sheets are for reflowable books only.** In a PDF or another fixed layout
   the menu entry is greyed out; draw on the page instead.
 - **Standalone notebook ergonomics still require the physical Scribe gate.**
-  The emulator and automated suites verify discovery, geometry, lifecycle,
-  persistence and routing, but not Wacom latency, palm feel, e-ink ghosting or
-  whether the resize-independent control rail is comfortable on real hardware.
+  The emulator and automated suites verify discovery, bounded rendering,
+  lifecycle, persistence and synthetic routing, but not Wacom latency, palm
+  feel, e-ink ghosting or whether the resize-independent control rail is
+  comfortable on real hardware.
+- **Stylus contact-boundary hardening is trace-gated.** KOReader gives plugins
+  accumulated `{x, y}` slot state but no per-frame changed-axis mask. JustDraw
+  now has bounded diagnostics, a persistent-slot replay harness and a shared
+  fail-closed sequence normalizer, but the existing drawing routes are not
+  switched to that normalizer until a real Scribe trace identifies a geometry
+  rule that does not discard legitimate dots, horizontal lines or vertical
+  lines. Until that physical gate is completed, a missing or reordered Wacom
+  boundary may still join two contacts. This limitation is not hidden by a
+  distance or fixed-sample heuristic.
 - **You cannot draw over the text on a sheet.** The sheet is blank paper: the
   pen inks on it and does nothing over the book itself.
 - **Opening a sheet is refused while a book is still being indexed.** On a book
@@ -353,11 +367,14 @@ since two-finger gestures keep working while drawing.
   greyed out until it finishes, so you cannot accidentally make a second sheet
   on a paragraph that already has one.
 - Single-page view only. Scroll mode is not handled.
-- Fast refresh uses the DU waveform: grainy, and ghosting builds up until the
-  next page turn. Turn it off in the menu if you would rather have clean strokes
-  slowly. On a sheet, each segment is refreshed as it is drawn, the same as on
-  the page; whether coalescing several segments per refresh feels better is a
-  question for real hardware and has not been answered.
+- Fast refresh uses the DU waveform: grainy, and ghosting can build up. Turn it
+  off in the menu if you would rather use quality partial refreshes while
+  drawing. Standalone notebooks use the selected mode for live ink; after fast
+  ink they schedule one regional partial cleanup for the accumulated burst
+  (after 350 ms of idle, eight completed contacts, or 25% of the paper area).
+  The cleanup is deferred while the pen is down or a modal covers the paper.
+  Direct page ink and EPUB sheets retain their existing per-segment behavior;
+  whether further coalescing feels better remains a hardware measurement.
 - **Finger route: no palm rejection.** There is no tool-type data on that
   hardware to do it with, so a palm landing as a second contact cancels the
   stroke in progress. The stylus route does reject palms, by suppressing all
@@ -408,10 +425,11 @@ a KOReader without the stylus API, the pen claims come back unchecked and the
 stylus route is still only covered by fakes. A `MISMATCH` means a fake lies;
 fix the fake.
 
-The suite covers rasterisation, the stroke store and hit test, the rotation
-transform for all four rotations, both capture backends, ownership-safe install
-and removal, error containment, the pen state machine (latching, sticky tracking
-ids, the physical eraser), the residual contact bookkeeping, the widget-layer
+The suite covers clipped rasterisation, live-raster generation tokens, bounded
+write admission, the stroke store and hit test, the rotation transform for all
+four rotations, both capture backends, ownership-safe install and removal,
+error containment, the current pen route, the isolated sequence normalizer,
+the residual contact bookkeeping, notebook quality refreshes, the widget-layer
 suppression rule, and toolbar reachability — that a tap starting on the bar
 passes through and inks nothing, that a stroke dragged onto it is truncated
 rather than painted over the buttons, and that a resting palm cannot make Stop
@@ -424,6 +442,11 @@ landed on the right button is what the physical test matrix is for.
 The pen tests drive synthetic slots that reproduce KOReader's real slot
 lifetime: one persistent table per slot, reused across frames, with `id`, `x`
 and `y` surviving a lift.
+
+Synthetic replay proves the state-machine invariants but cannot choose a safe
+initial geometry policy: KOReader's public callback does not say which axes
+changed in a frame. The shared normalizer therefore remains fail-closed and is
+not wired into production drawing hosts until the Scribe trace gate is met.
 
 **Not covered:** real Wacom hardware, e-ink ghosting and latency, and Kindle
 firmware. Those need a physical Kindle Scribe.

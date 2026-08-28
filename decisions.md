@@ -497,10 +497,20 @@ way. Giving a slot back makes it open a fresh contact and emit a spurious tap
 on lift; taking one away strands a contact that never sees its lift, leaving a
 hold timer that blocks the slot until the next `dropContacts()`.
 
-**Decision.** A contact is classified once, on the first frame that carries
-real coordinates, and never reclassified. Order: dialog, toolbar, handle,
-canvas, book. A stroke dragged onto the toolbar presses no button; a tap that
-began on a button never becomes a stroke.
+**Decision.** A contact is classified once, on the first frame whose coordinate
+pair the active route considers usable, and never reclassified. Order: dialog,
+toolbar, handle, canvas, book. A stroke dragged onto the toolbar presses no
+button; a tap that began on a button never becomes a stroke.
+
+"Usable" is a routing precondition, not a freshness claim. KOReader's public
+stylus callback does not say which axis changed in a frame, so the presence of
+both accumulated coordinates cannot prove that they describe one physical
+sample. ADR-21 defines the eventual migration of physical slot, tracking-ID and
+proximity ownership to a shared normalizer, but keeps its geometry policy
+trace-gated. Until a physical Scribe trace establishes a reproducible coherence
+rule, the production hosts retain their documented legacy geometry routes
+rather than claiming that this classification makes hybrid coordinates
+impossible.
 
 The toolbar's position in that order is the safety invariant. A new finger
 while the pen is down becomes a palm anywhere on the page — but never on the
@@ -557,8 +567,14 @@ The notebook has its own hardware-neutral input adapter, not a second widget
 state machine. It converts pen, physical eraser and the compatibility finger
 route into logical surface operations, converting screen-sized nib and eraser
 preferences once at contact start. Coordinate-less downs remain unclassified
-and fail closed until fresh geometry arrives; any contact already forwarded to
-GestureDetector is explicitly retired if capture is aborted. Automatic mode selects the modern route
+and fail closed until a coordinate pair arrives; its presence alone is not
+evidence that both axes are fresh in that frame. ADR-21 therefore keeps the
+shared normalizer's geometry policy disabled pending a physical trace, while
+the notebook adapter retains its documented legacy geometry handling. Domain
+classification remains notebook-specific; physical slot, tracking-ID and
+proximity ownership are the boundary that will be shared. Any contact already
+forwarded to GestureDetector is explicitly retired if capture is aborted.
+Automatic mode selects the modern route
 only when KOReader exposes both `registerStylusCallback` and
 `wacom_protocol`; callback availability by itself is not proof that the current
 device has a pen. A ReaderUI notebook opening preflights repository metadata and
@@ -654,11 +670,19 @@ the same physical pen action from also activating a touch control.
 Paint and stylus callbacks use only the session's cached snapshot. Page
 neighbour availability is refreshed when a page becomes ready, not queried from
 the drawing path. Live ink blits the changed cache source rectangle and requests
-a matching regional fast refresh; state and chrome use UI/full refreshes. The
-v1 information strip omits Saved/Not saved instead of scheduling repeated
-status refreshes after short commit batches. Save, load and input failures
-remain explicit retry surfaces, and the editor cannot close around a failed
-durability gate.
+a matching regional `fast` refresh only while the live-fast preference is
+enabled; otherwise it uses `partial`. Fast regions accumulate into one O(1)
+union and receive one generation-safe regional `partial` cleanup after 350 ms
+of inactivity, eight completed contacts or 25% paper coverage. Cleanup waits
+for the physical contact to end and for modal coverage to be removed. Direct
+framebuffer blits pause under every visual window, including toasts; one O(1)
+page/cache/transform-bound union is presented after uncover. A direct blit that
+touches the paper border restores only the intersecting chrome pixels before
+the panel refresh. State and other chrome use UI/full refreshes. The v1
+information strip omits Saved/Not saved
+instead of scheduling repeated status refreshes after short commit batches.
+Save, load and input failures remain explicit retry surfaces, and the editor
+cannot close around a failed durability gate.
 
 **Consequences.** Opening the library acquires no digitizer callback and
 allocates no page raster. At scale, the visible library holds at most one
@@ -719,6 +743,87 @@ must not remain installed beside the new one: KOReader would discover both as
 separate plugins before either can coordinate ownership. A previously disabled
 FingerInk plugin may appear enabled once under the new directory identity; that
 loader-level preference cannot be migrated by code that has not yet run.
+
+## ADR-21 — Normalize stylus sequences before routing ink
+
+**Context.** KOReader reuses a mutable table for every input slot and updates
+its fields independently between `SYN_REPORT` frames. Its stylus callback
+exposes accumulated `{slot,id,x,y,tool,timev}` state, not a changed-axis mask.
+The three JustDraw drawing hosts previously maintained similar but separate
+contact state. Rejecting one coordinate pair equal to the last lift cannot
+prove that a later X/Y pair is coherent, and a delayed boundary can therefore
+place points from two physical moments in one stored stroke. The renderer then
+correctly joins those points, producing a persistent connector.
+
+**Decision.** Physical ownership will be normalized once, before domain
+routing, by the pure `InkStylusSequence` layer. It owns scalar snapshots,
+slot/tracking-ID boundaries, the Kindle Wacom proximity-out fallback,
+forwarded-contact monotonicity, logical versus physical completion and point /
+sample budgets. Direct ink, EPUB sheets and standalone notebooks retain their
+separate routing, cache and persistence policies. Expected domain failures are
+reported after the frame so the callback is not unregistered from inside
+KOReader's multi-slot `routeStylusEvents` loop.
+
+Activation is conditional. The public API does not reveal whether both axes are
+fresh in a frame, so the default geometry policy is fail-closed and the current
+production handlers remain in place with bounded diagnostics. A trace from a
+physical Kindle Scribe must demonstrate a public, reproducible coherence rule
+before any host is migrated. If it does not, JustDraw will request freshness
+metadata upstream rather than infer contact boundaries from a fixed number of
+samples, elapsed time or distance. Synthetic replay proves ownership and
+failure semantics but cannot satisfy this hardware evidence gate.
+
+Independent safety work does not wait for that migration. An open ink stroke is
+limited to 8,192 points and a physical owner to 32,768 samples; oversize ink is
+repaired without persisting a prefix. Rendering clips before DDA iteration,
+live cache tokens prevent a second complete rasterization at lift, and bounded
+queues defer SQLite work out of the input callback. Standalone notebooks honor
+the live-fast preference and follow fast bursts with one generation-safe
+regional partial cleanup.
+
+**Consequences.** The known contact-joining mechanism remains explicitly open
+until a Scribe trace selects the geometry policy; this ADR does not claim it is
+fixed by synthetic tests. Meanwhile corrupt geometry and missing lifts have
+bounded memory, CPU and write amplification, diagnostic evidence can be
+captured from every host without document metadata, and the eventual host
+migration has a single conformance matrix. Pressure, tilt and changed-axis
+freshness remain outside KOReader's public callback contract.
+
+**Mutation-gate evidence status (2026-08-27).** All 22 mutations below were
+executed separately in an isolated temporary copy under both Lua and KOReader's
+LuaJIT. The first pass killed 21; retaining the mutable KOReader slot table
+survived and exposed a real assertion gap. After adding a weak-reference/GC
+case, that exact mutation failed in both runtimes (`3410 passed, 1 failed` in
+the current expanded suite). Collectively, 22/22 mutations are now detected.
+No mutation was applied to this implementation worktree.
+
+| Input mutation | Detecting case |
+| --- | --- |
+| Accept the first sticky pair | `default policy cannot persist the adversarial hybrid L` |
+| Accept an X-only update as coherent geometry | `persistent Y-then-X axis updates also remain unproven` |
+| Remove the Wacom `TOOL_FINGER` boundary | `Wacom FINGER closes only the owning pen slot and keeps tool` |
+| Apply the Wacom boundary to every finger | `TOOL_FINGER is not a boundary off Wacom or another slot` |
+| Ignore positive tracking-ID replacement | `positive tracking-id replacement splits before the new begin` |
+| Let a foreign lift close the owner | `hover is inert and foreign slots cannot end the owner` |
+| Retain the mutable slot table in Diagnostics | `diagnostics retain no mutable KOReader slot`; `events are post-decision, frame-numbered, and immutable` |
+| Consume proximity-out for an active pass | `Wacom pass proximity preserves Contact until lift or safe reclaim` |
+| Ignore the `dropContact` result | `failed or raising drop stays forwarded and reports afterFrame` |
+| Remove the point budget | `point budget aborts ink before point N+1 and never splits` |
+| Throw an expected domain failure to the outer guard | `contact-start failure dominates and notifies only after frame`; `point failure suspends and defers domain error` |
+| Report suspended contact as lifecycle-idle | `finish and abort actions suspend without ending physical contact` |
+
+| Raster, queue or refresh mutation | Detecting case |
+| --- | --- |
+| Repaint a valid live raster at registration | `a complete live raster token avoids repaint at registration` |
+| Accept a token from another cache or generation | `an old raster generation repaints once and returns coverage` |
+| Remove DDA clipping or derive dirty geometry from raw endpoints | `a billion-pixel crossing costs only viewport-sized work`; `dirty boxes and cache blits are clipped to the paper` |
+| Flush SQLite synchronously from `addStroke` | `a finished stroke is held, not written`; `queue backpressure leaves cache and sequence untouched until commit` |
+| Ignore the hard admission ceiling | `synchronous producers cannot cross the hard operation ceiling` |
+| Hardcode notebook live refresh to `fast` | `live-fast off uses partial for ink and eraser with no cleanup` |
+| Remove the regional partial cleanup | `fast ink cleans one exact union after 350 ms of inactivity` |
+| Increment the burst budget per segment | `stroke budget replaces one delayed action with one immediate action` |
+| Allow an old generation callback to refresh a new editor | `page, rotation and close invalidate scheduled generations` |
+| Re-arm cleanup for every segment during contact | `an active-contact timeout latches without reschedule storms` |
 
 ## Deferred
 

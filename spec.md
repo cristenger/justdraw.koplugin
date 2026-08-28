@@ -241,7 +241,12 @@ convenience, not the exit route — the toolbar is.
 
 ## Contact arbitration — stylus backend
 
-### Pen: `onStylusEvent(slot)`
+### Pen: current trace-gated route
+
+`onStylusEvent(slot)` remains the production route while the Scribe trace gate
+below is open. Its behavior is retained for compatibility and instrumented so
+the missing evidence can be collected; this table is not the target contact
+model.
 
 | Condition | Action | Return |
 | --- | --- | --- |
@@ -258,16 +263,20 @@ convenience, not the exit route — the toolbar is.
 | `id < 0`, not active | nothing (idempotent) | latched value |
 
 Coordinates are sticky, so a contact-down frame that only carried `BTN_TOUCH`
-still presents the position where the *previous* sequence ended. Latching
-geometry from it can swallow the whole next stroke (if that position was on the
-toolbar) or ink a phantom dot at the old spot. `stylus_lift_x/y` remembers the
-last lift and the next contact-down refuses to trust an identical pair.
+still presents the position where the *previous* sequence ended. The current
+route's `stylus_lift_x/y` check rejects one identical pair, but it cannot prove
+that a later pair, or independently updated X and Y, belongs to the new physical
+sample. Diagnostics records this route until a trace-backed geometry policy can
+replace it safely.
 
 A dialog appearing mid-stroke aborts the ink but keeps dominating to the lift —
 handing the slot back at that point is the `true` → `false` flip described
 below.
 
-**Once a frame has been dominated, the decision cannot change before the lift.**
+**Delivery must be monotonic once GestureDetector has received the contact.** A
+pending contact may be dominated before it is ever delivered. After delivery,
+JustDraw may reclaim it only when `Capture:dropContact(slot)` confirms that the
+exact Contact was removed; otherwise it remains forwarded through the lift.
 This is correctness, not style. `GestureDetector:feedEvent` creates a `Contact`
 the first time it sees a slot:
 
@@ -276,6 +285,32 @@ the first time it sees a slot:
 - `false` → `true` mid-sequence: the existing contact never sees its lift and
   stays in `active_contacts` with a live `pending_hold_timer`, firing a phantom
   hold and blocking the slot until the next `dropContacts()`.
+
+### Shared sequence normalizer (activation pending physical evidence)
+
+`ink_stylus_sequence.lua` is a pure contact-boundary layer shared by design
+across direct ink, EPUB sheets and standalone notebooks. It snapshots the six
+public slot fields immediately and models `idle`, contact/geometry pending,
+draw, block, pass, suspended, Wacom proximity wait and forwarded-wait-lift.
+The isolated implementation already covers slot/ID ownership, positive
+tracking-ID replacement, the narrow Wacom `TOOL_TYPE_FINGER` proximity-out
+fallback, pass-through/drop semantics, physical versus logical completion and
+bounded work.
+
+It is deliberately not connected to production hosts yet. KOReader exposes
+`{slot,id,x,y,tool,timev}` but no mask saying whether X and Y changed in this
+`SYN_REPORT`. The default geometry policy therefore accepts no points. A real
+Kindle Scribe trace must select a policy that preserves dots and legitimate
+horizontal/vertical strokes; if the trace provides no public freshness signal,
+the correct next step is an upstream KOReader API proposal, not a sample-count,
+time or distance guess inside JustDraw.
+
+Both the current route and the future normalizer enforce a maximum of 8,192
+retained ink points and 32,768 owner samples per physical contact. Ink that
+exceeds a budget is repaired and not saved as a partial stroke; an eraser keeps
+already accepted deletions and closes once. The physical contact remains owned
+until its real boundary so palm rejection and lifecycle gates cannot reopen
+mid-contact.
 
 ### Touch: `onStylusTouchFrame(slots)`
 
@@ -396,14 +431,30 @@ arguments — ReaderView is full-screen, so the view origin is always `0, 0`.
 
 ## Rendering
 
-- `Render.segment` walks a DDA between two points painting `w × w` rects.
-  Integer locals only, no table allocation, no `math.abs` on the hot path.
+- `Render.segment` clips finite geometry to the effective BlitBuffer viewport
+  before walking its DDA. Work is proportional to visible coverage rather than
+  raw endpoint distance, including for corrupt extreme coordinates. It returns
+  a half-open scalar dirty coverage and creates no per-sample table.
 - Live feedback paints straight into `Screen.bb` and calls
   `Screen:refreshFast(x, y, w, h)` (DU) over the padded segment bounding box,
   clamped to screen bounds. `refreshPartial` if the user prefers quality.
 - `paintTo(bb)` replays every stroke on the current page. This is the
   authoritative path — direct `Screen.bb` painting is only a latency shortcut
   and is always recoverable by a repaint.
+- Canvas and notebook live ink carries cache identity, cache generation and a
+  completeness flag into registration. A matching token avoids repainting the
+  full stroke at lift; a mismatch rasterizes once and propagates the actual
+  coverage for an immediate visible blit. A bare boolean is never sufficient.
+- Canvas/notebook queues estimate encoded bytes before admission, enforce hard
+  operation/byte ceilings and schedule SQLite work for a later UI turn. A
+  rejected operation does not mutate IDs or queue state; its live raster is
+  repaired and the next stroke can recover after the queue drains.
+
+Standalone notebook live dirties use `fast` only while the live-fast setting
+is enabled; otherwise they use `partial`. Fast regions are accumulated as one
+O(1) union and receive one regional `partial` cleanup after 350 ms idle, eight
+completed physical contacts or 25% of the paper area. Cleanup is bound to the
+editor/session/cache generation and waits for contact end and modal uncover.
 
 ## Erasing
 
@@ -631,6 +682,8 @@ Top menu → JustDraw:
   drawing**)
 - Pen width: thin (2) / medium (4) / thick (7)
 - Fast refresh while drawing (toggle, default on)
+- Stylus diagnostics (also available from a standalone notebook's More menu;
+  opt-in local coordinate log, 60 seconds / 8,192 events)
 - Drawing sheet (reflowable documents only; disabled otherwise)
   - Open sheet here / Close sheet, Delete this sheet
   - Sheets on this page (when the position has more than one)
