@@ -1451,7 +1451,8 @@ function support.install()
     package.preload["ui/size"] = function()
         return {
             radius = { button = 4, window = 6 },
-            border = { window = 2 },
+            border = { window = 2, button = 2 },
+            margin = { button = 0 },
             padding = { default = 5, small = 2, large = 8, button = 2 },
             item = { height_default = 30, height_big = 40, height_large = 50 },
             span = { horizontal_default = 10, vertical_default = 2 },
@@ -1486,10 +1487,23 @@ function support.install()
         return false
     end
     function Button:setText(text) self.text = text; self.texts[#self.texts + 1] = text end
-    function Button:getSize() return { w = self.width or 60, h = self.height or 30 } end
+    --- KOReader's Button is asymmetric about the box it is given: it subtracts
+    --- its chrome from `width` so the widget is exactly that wide, but treats
+    --- `height` as the *label* box and adds the chrome on top. A stub that
+    --- hands back the requested height is the reason a column of buttons could
+    --- overflow the screen with every assertion still green.
+    function Button:chromeHeight()
+        local padding = self.padding_v or self.padding or 0
+        local border = self.bordersize or 2
+        return 2 * (padding + border + (self.margin or 0))
+    end
+    function Button:getSize()
+        return { w = self.width or 60, h = (self.height or 30) + self:chromeHeight() }
+    end
     function Button:paintTo(_, x, y)
         if self.enabled_func then self.enabled = self.enabled_func() and true or false end
-        self.dimen = { x = x or 0, y = y or 0, w = self.width or 60, h = self.height or 30 }
+        local size = self:getSize()
+        self.dimen = { x = x or 0, y = y or 0, w = size.w, h = size.h }
     end
     function Button:enable() self.enabled = true end
     function Button:disable() self.enabled = false end
