@@ -81,6 +81,9 @@ local INPUT_ERRORS = {
     -- answer to "my pen does nothing", given before the user has to ask.
     pen_unavailable = _("Pen input needs KOReader v2026.07 or newer. Drawing with finger."),
     no_input = _("JustDraw: cannot hook touch input"),
+    -- A Wacom runtime that names no pen slot cannot tell the pen from a
+    -- resting hand, so the pen route refuses rather than guessing per tool.
+    wacom_pen_slot_missing = _("This device does not say which input slot its pen uses, so the pen route is unavailable."),
     already_installed = _("JustDraw: input is already captured"),
     handler_error = _("JustDraw: drawing stopped after an input error"),
 }
@@ -802,8 +805,11 @@ function JustDraw:setDrawing(on)
                 on_error = function(err) self:disarmInput(err) end,
             })
         end
-        -- Drawing only goes on after a complete install, never before.
+        -- Drawing only goes on after a complete install, never before. A
+        -- refused lease must not leave a contact machine holding the Input it
+        -- was built for; that is exactly what buildStylusMachine forbids.
         if not lease then
+            self:releaseStylusMachine()
             return self:reportInputFailure(reason)
         end
 

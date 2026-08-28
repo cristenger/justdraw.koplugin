@@ -784,7 +784,14 @@ function Editor:_actionAvailability(action, snapshot)
     if not snapshot then return false, "loading" end
     if action == "undo" then
         if snapshot.can_undo then return true end
-        return false, snapshot.navigation_block_reason or "unavailable"
+        -- Undo is not gated on contact: it is unavailable when there is simply
+        -- nothing to undo, and telling somebody to lift their hand would not
+        -- help with that. Only a session that is not ready borrows the
+        -- session's own reason.
+        if snapshot.state ~= "ready" then
+            return false, snapshot.navigation_block_reason or "unavailable"
+        end
+        return false, "unavailable"
     end
     if not snapshot.can_navigate then
         return false, snapshot.navigation_block_reason or "unavailable"

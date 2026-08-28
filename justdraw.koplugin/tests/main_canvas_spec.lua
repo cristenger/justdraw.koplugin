@@ -209,9 +209,16 @@ return function(ctx)
         p:onJustDrawUndo()
         t:eq(p.session:pendingWrites(), 0, "Undo cannot enqueue a premature delete")
         t:eq(#p.session:cache():strokes(), 1, "unvalidated metadata stays intact")
+        -- Drive the pen the way capture would if it were installed, so this
+        -- reaches the readiness guard rather than an absent machine.
+        p:buildStylusMachine(Device.input)
+        seedPenBaseline(p)
         penDown(p, SHEET.x, SHEET.y)
-        penLift(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 30, SHEET.y + 30)
+        t:eq(p.canvas_stroke, nil, "an unvalidated cache accepts no live stroke")
+        penLift(p, SHEET.x + 30, SHEET.y + 30)
         t:eq(p.session:pendingWrites(), 0, "a premature pen sample was ignored")
+        p:releaseStylusMachine()
         env.UIManager:flush()
         t:eq(p.session:cache():isReady(), true, "the stored stroke validated")
         t:eq(p.drawing, true, "only then is capture enabled")
@@ -300,9 +307,12 @@ return function(ctx)
             pages = { ["/body/p[7]"] = 1, ["/body/p[8]"] = 2 },
         }
         p:openCanvas(first)
+        p:setDrawing(true)
+        seedPenBaseline(p)
         penDown(p, SHEET.x, SHEET.y)
-        penFrame(p, SHEET.x + 20, SHEET.y)
-        penLift(p, SHEET.x + 20, SHEET.y)
+        penFrame(p, SHEET.x + 20, SHEET.y + 20)
+        penLift(p, SHEET.x + 20, SHEET.y + 20)
+        t:eq(p.session:pendingWrites(), 1, "a real stroke is waiting behind the switch")
         store.fail_transaction = "begin"
         local old_overlay, old_bar = p.session:overlay(), p.bar
         local opened = p:openCanvas(second)
@@ -391,8 +401,11 @@ return function(ctx)
         }
         p:openCanvas(canvas)
         env.UIManager:flush()
+        p:setDrawing(true)
+        seedPenBaseline(p)
         penDown(p, SHEET.x, SHEET.y)
-        penFrame(p, SHEET.x + 20, SHEET.y)
+        penFrame(p, SHEET.x + 20, SHEET.y + 20)
+        t:check(p.canvas_stroke ~= nil, "a stroke is in flight when the screen turns")
         local old_w, old_h = Device.screen.w, Device.screen.h
         Device.screen.w, Device.screen.h = old_h, old_w
         p:onScreenResize()
@@ -828,6 +841,13 @@ return function(ctx)
         t:eq(ok, true, "the full routeStylusEvents loop survived: " .. tostring(err))
         t:eq(input.stylus_callback, cb, "the callback remains registered in-frame")
         t:eq(Capture.active, false, "but it is already inert")
+        -- The pen's own contact continues into the next frame while the hook
+        -- is still installed and already disarmed. That is the shape that
+        -- crashed KOReader when the callback unregistered itself in place.
+        local continued, continue_err = pcall(input.stylus_callback, input,
+            { slot = 4, id = 2, x = sx + 2, y = sy + 3, tool = Capture.TOOL_ERASER })
+        t:eq(continued, true,
+            "a later sample of the same contact is safe: " .. tostring(continue_err))
         env.UIManager:flush()
         t:eq(input.stylus_callback, nil, "it unhooks on the safe tick")
         t:eq(p.drawing, false, "the failed sheet no longer captures")

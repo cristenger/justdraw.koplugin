@@ -38,9 +38,9 @@ you have the reproduction: it records all raw input and the log grows very
 quickly. Traces contain coordinates; they never contain document or notebook
 identity.
 
-Fixes to stylus behaviour are validated on real hardware before release. If
-something here does not match what your device does, the trace above is the
-useful thing to attach.
+Stylus behaviour is device behaviour, and the palm and coordinate handling
+described here has not yet been through a hardware pass. If something above
+does not match what your device does, the trace is the useful thing to attach.
 
 ## Install
 
