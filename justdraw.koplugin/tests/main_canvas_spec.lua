@@ -55,8 +55,43 @@ return function(ctx)
         p:onStylusEvent{ slot = 4, id = 1, x = x, y = y, tool = tool or 1 }
     end
 
+    --[[--
+    A pen contact-down, shaped the way a Wacom one is.
+
+    KOReader's slot table is persistent and BTN_TOUCH can arrive before any
+    ABS update, so the frame that opens a contact still presents the previous
+    contact's position. InkStylusGeometry treats it as a baseline rather than
+    a point, and the stroke starts at the first pair it can prove -- which is
+    the one the caller actually names here.
+    ]]
+    local function penDown(p, x, y, tool)
+        p:onStylusEvent{ slot = 4, id = 1, tool = tool or 1 }
+        p:onStylusEvent{ slot = 4, id = 1, x = x, y = y, tool = tool or 1 }
+    end
+
     local function penLift(p, x, y)
         p:onStylusEvent{ slot = 4, id = -1, x = x, y = y }
+    end
+
+    --- Give the policy the trusted boundary a real pen leaves behind. Without
+    --- one, a lease's very first contact spends a coordinate pair proving
+    --- where it is -- true, and covered by its own case, but not what the
+    --- cases below are about.
+    local function seedPenBaseline(p)
+        local geometry = p.stylus_geometry
+        if not geometry then return end
+        geometry:observe(-1, -1)
+        geometry:reset(false)
+    end
+
+    --- A sheet open and the pen route actually installed. The stylus callback
+    --- only runs while a lease is held, and the lease is what builds the
+    --- contact machine, so a case that drives onStylusEvent needs one.
+    local function openForPen(p)
+        local overlay = p:openCanvasHere()
+        p:setDrawing(true)
+        seedPenBaseline(p)
+        return overlay
     end
 
     local function touchFrame(p, slots)
@@ -174,7 +209,7 @@ return function(ctx)
         p:onJustDrawUndo()
         t:eq(p.session:pendingWrites(), 0, "Undo cannot enqueue a premature delete")
         t:eq(#p.session:cache():strokes(), 1, "unvalidated metadata stays intact")
-        penFrame(p, SHEET.x, SHEET.y)
+        penDown(p, SHEET.x, SHEET.y)
         penLift(p, SHEET.x, SHEET.y)
         t:eq(p.session:pendingWrites(), 0, "a premature pen sample was ignored")
         env.UIManager:flush()
@@ -231,8 +266,8 @@ return function(ctx)
 
     t:case("a failed Hide keeps the sheet and its retry controls alive", function()
         local p, store = canvasPlugin()
-        p:openCanvasHere()
-        penFrame(p, SHEET.x, SHEET.y)
+        openForPen(p)
+        penDown(p, SHEET.x, SHEET.y)
         penFrame(p, SHEET.x + 20, SHEET.y)
         penLift(p, SHEET.x + 20, SHEET.y)
         store.fail_transaction = "begin"
@@ -265,7 +300,7 @@ return function(ctx)
             pages = { ["/body/p[7]"] = 1, ["/body/p[8]"] = 2 },
         }
         p:openCanvas(first)
-        penFrame(p, SHEET.x, SHEET.y)
+        penDown(p, SHEET.x, SHEET.y)
         penFrame(p, SHEET.x + 20, SHEET.y)
         penLift(p, SHEET.x + 20, SHEET.y)
         store.fail_transaction = "begin"
@@ -356,7 +391,7 @@ return function(ctx)
         }
         p:openCanvas(canvas)
         env.UIManager:flush()
-        penFrame(p, SHEET.x, SHEET.y)
+        penDown(p, SHEET.x, SHEET.y)
         penFrame(p, SHEET.x + 20, SHEET.y)
         local old_w, old_h = Device.screen.w, Device.screen.h
         Device.screen.w, Device.screen.h = old_h, old_w
@@ -386,8 +421,8 @@ return function(ctx)
 
     t:case("a failed active delete changes neither UI nor pending ink", function()
         local p, store = canvasPlugin()
-        p:openCanvasHere()
-        penFrame(p, SHEET.x, SHEET.y)
+        openForPen(p)
+        penDown(p, SHEET.x, SHEET.y)
         penFrame(p, SHEET.x + 20, SHEET.y)
         penLift(p, SHEET.x + 20, SHEET.y)
         store.fail_delete_canvas = "disk full"
@@ -452,8 +487,8 @@ return function(ctx)
 
     t:case("the pen inks on the sheet and the stroke is queued on lift", function()
         local p = canvasPlugin()
-        p:openCanvasHere()
-        penFrame(p, SHEET.x, SHEET.y)
+        openForPen(p)
+        penDown(p, SHEET.x, SHEET.y)
         penFrame(p, SHEET.x + 40, SHEET.y + 40)
         t:check(p.canvas_stroke ~= nil, "a stroke is in progress")
         t:eq(p.canvas_stroke.n, 2, "with both points")
@@ -464,9 +499,9 @@ return function(ctx)
 
     t:case("canvas lift reuses a complete live raster", function()
         local p = canvasPlugin()
-        p:openCanvasHere()
+        openForPen(p)
         local cache = p.session:cache()
-        penFrame(p, SHEET.x, SHEET.y)
+        penDown(p, SHEET.x, SHEET.y)
         penFrame(p, SHEET.x + 40, SHEET.y + 40)
         local before = #cache:buffer().writes
         penLift(p, SHEET.x + 40, SHEET.y + 40)
@@ -477,9 +512,9 @@ return function(ctx)
 
     t:case("canvas generation mismatch repaints and presents fallback coverage", function()
         local p = canvasPlugin()
-        p:openCanvasHere()
+        openForPen(p)
         local cache = p.session:cache()
-        penFrame(p, SHEET.x, SHEET.y)
+        penDown(p, SHEET.x, SHEET.y)
         penFrame(p, SHEET.x + 40, SHEET.y + 40)
         cache.generation = cache.generation + 1
         local before_writes = #cache:buffer().writes
@@ -493,9 +528,9 @@ return function(ctx)
 
     t:case("canvas fallback repaint waits until a modal uncovers the overlay", function()
         local p = canvasPlugin()
-        local overlay = p:openCanvasHere()
+        local overlay = openForPen(p)
         local cache = p.session:cache()
-        penFrame(p, SHEET.x, SHEET.y)
+        penDown(p, SHEET.x, SHEET.y)
         penFrame(p, SHEET.x + 40, SHEET.y + 40)
         cache.generation = cache.generation + 1
 
@@ -580,14 +615,14 @@ return function(ctx)
 
     t:case("canvas backpressure repairs ink and recovers after urgent commit", function()
         local p = canvasPlugin()
-        p:openCanvasHere()
+        openForPen(p)
         local surface = p.session.surface_session
-        penFrame(p, SHEET.x, SHEET.y)
+        penDown(p, SHEET.x, SHEET.y)
         penFrame(p, SHEET.x + 20, SHEET.y)
         penLift(p, SHEET.x + 20, SHEET.y)
         surface.queue.hard_ops = 1
 
-        penFrame(p, SHEET.x, SHEET.y + 40)
+        penDown(p, SHEET.x, SHEET.y + 40)
         penFrame(p, SHEET.x + 20, SHEET.y + 40)
         penLift(p, SHEET.x + 20, SHEET.y + 40)
         t:eq(surface.queue:isFailed(), false, "transient pressure is not save_failed")
@@ -600,7 +635,7 @@ return function(ctx)
         t:check(env.notifications[1]:find("write queue is busy", 1, true) ~= nil,
             "warning names the recoverable condition")
 
-        penFrame(p, SHEET.x, SHEET.y + 80)
+        penDown(p, SHEET.x, SHEET.y + 80)
         penLift(p, SHEET.x, SHEET.y + 80)
         t:eq(surface:pendingWrites(), 1, "the next physical contact is accepted")
         t:eq(#surface:cache():strokes(), 2, "durable and new ink remain visible")
@@ -608,13 +643,13 @@ return function(ctx)
 
     t:case("canvas backpressure repair never punches through a modal", function()
         local p = canvasPlugin()
-        local overlay = p:openCanvasHere()
+        local overlay = openForPen(p)
         local surface = p.session.surface_session
-        penFrame(p, SHEET.x, SHEET.y)
+        penDown(p, SHEET.x, SHEET.y)
         penLift(p, SHEET.x, SHEET.y)
         surface.queue.hard_ops = 1
 
-        penFrame(p, SHEET.x, SHEET.y + 40)
+        penDown(p, SHEET.x, SHEET.y + 40)
         penFrame(p, SHEET.x + 20, SHEET.y + 40)
         local modal = { handleEvent = function() return true end }
         env.UIManager:show(modal)
@@ -631,8 +666,8 @@ return function(ctx)
 
     t:case("an oversized canvas operation disarms capture after the frame", function()
         local p = canvasPlugin()
-        p:openCanvasHere()
-        penFrame(p, SHEET.x, SHEET.y)
+        openForPen(p)
+        penDown(p, SHEET.x, SHEET.y)
         penFrame(p, SHEET.x + 20, SHEET.y)
         p.session.addStroke = function() return nil, "operation_too_large" end
 
@@ -713,8 +748,8 @@ return function(ctx)
 
     t:case("the stroke reaches the database when settings are saved", function()
         local p, store = canvasPlugin()
-        p:openCanvasHere()
-        penFrame(p, SHEET.x, SHEET.y)
+        openForPen(p)
+        penDown(p, SHEET.x, SHEET.y)
         penFrame(p, SHEET.x + 40, SHEET.y + 40)
         penLift(p, SHEET.x + 40, SHEET.y + 40)
         p:onSaveSettings()
@@ -724,15 +759,15 @@ return function(ctx)
 
     t:case("a save failure repairs live ink and blocks capture until retry", function()
         local p, store = canvasPlugin()
-        p:openCanvasHere()
-        penFrame(p, SHEET.x, SHEET.y)
+        openForPen(p)
+        penDown(p, SHEET.x, SHEET.y)
         penFrame(p, SHEET.x + 20, SHEET.y)
         penLift(p, SHEET.x + 20, SHEET.y)
         t:eq(p.session:pendingWrites(), 1, "one durable operation is pending")
 
         -- Begin another stroke before the first one's timer fires. It exists
         -- only in the raster and must be repaired if that timer fails.
-        penFrame(p, SHEET.x, SHEET.y + 30)
+        penDown(p, SHEET.x, SHEET.y + 30)
         penFrame(p, SHEET.x + 20, SHEET.y + 30)
         t:check(p.canvas_stroke ~= nil, "a second live stroke is visible")
         store.fail_transaction = "begin"
@@ -772,12 +807,20 @@ return function(ctx)
         p:openCanvas(canvas)
         env.UIManager:flush()
         p:setEraser(true)
+        p:setDrawing(true)
+        seedPenBaseline(p)
         store.fail_stroke_chunk = 0
         local sx, sy = p.session:transform():toScreen(150, 100)
         local input, cb = Device.input, Device.input.stylus_callback
+        -- Land the contact first: the frame that opens it carries no fresh
+        -- position, so nothing erases until the next pair.
+        input.stylus_callback(input, { slot = 4, id = 2, tool = Capture.TOOL_ERASER })
+        -- Slot 4 is the digitizer's own and really erases. Slot 0 is the palm
+        -- KOReader routes here wearing the eraser's tool number; it must not
+        -- be handed a callback that unregistered itself earlier in the frame.
         local frame = {
-            { slot = 2, id = 1, x = sx, y = sy, tool = Capture.TOOL_ERASER },
-            { slot = 4, id = 2, x = sx + 1, y = sy, tool = Capture.TOOL_PEN },
+            { slot = 4, id = 2, x = sx, y = sy, tool = Capture.TOOL_ERASER },
+            { slot = 0, id = 3, x = sx + 1, y = sy, tool = Capture.TOOL_ERASER },
         }
         local ok, err = pcall(function()
             for i = 1, #frame do input.stylus_callback(input, frame[i]) end
@@ -793,8 +836,8 @@ return function(ctx)
 
     t:case("stored coordinates are the sheet's, not the screen's", function()
         local p, store = canvasPlugin()
-        p:openCanvasHere()
-        penFrame(p, SHEET.x, SHEET.y)
+        openForPen(p)
+        penDown(p, SHEET.x, SHEET.y)
         penFrame(p, SHEET.x + 40, SHEET.y)
         penLift(p, SHEET.x + 40, SHEET.y)
         p:onSaveSettings()
@@ -808,8 +851,8 @@ return function(ctx)
 
     t:case("the pen over the book text does not ink", function()
         local p = canvasPlugin()
-        p:openCanvasHere()
-        penFrame(p, READER.x, READER.y)
+        openForPen(p)
+        penDown(p, READER.x, READER.y)
         t:eq(p.canvas_stroke, nil, "no stroke started")
     end)
 
@@ -817,14 +860,14 @@ return function(ctx)
         -- Handing the slot back there would let a hold reach the reader from
         -- the same hand that is holding the pen.
         local p = canvasPlugin()
-        p:openCanvasHere()
+        openForPen(p)
         t:eq(p:onStylusEvent{ slot = 4, id = 1, x = READER.x, y = READER.y, tool = 1 },
             true, "kept from the gesture detector")
     end)
 
     t:case("the pen starting on the toolbar passes through", function()
         local p = canvasPlugin()
-        p:openCanvasHere()
+        openForPen(p)
         local bar = p.bar.dimen
         t:eq(p:onStylusEvent{ slot = 4, id = 1, x = bar.x + 5, y = bar.y + 5, tool = 1 },
             false, "so the button gets its tap")
@@ -833,15 +876,15 @@ return function(ctx)
 
     t:case("the pen starting on the handle passes through", function()
         local p = canvasPlugin()
-        p:openCanvasHere()
+        openForPen(p)
         t:eq(p:onStylusEvent{ slot = 4, id = 1, x = HANDLE.x, y = HANDLE.y, tool = 1 },
             false, "so the sheet can be resized with the pen")
     end)
 
     t:case("a stroke dragged off the sheet ends at the edge", function()
         local p = canvasPlugin()
-        p:openCanvasHere()
-        penFrame(p, SHEET.x, SHEET.y)
+        openForPen(p)
+        penDown(p, SHEET.x, SHEET.y)
         penFrame(p, SHEET.x, SHEET.y + 40)
         penFrame(p, READER.x, READER.y)
         t:eq(p.canvas_stroke, nil, "the stroke was closed rather than clamped")
@@ -850,8 +893,8 @@ return function(ctx)
 
     t:case("undo removes the last stroke from the sheet", function()
         local p, store = canvasPlugin()
-        p:openCanvasHere()
-        penFrame(p, SHEET.x, SHEET.y)
+        openForPen(p)
+        penDown(p, SHEET.x, SHEET.y)
         penFrame(p, SHEET.x + 40, SHEET.y)
         penLift(p, SHEET.x + 40, SHEET.y)
         p:onJustDrawUndo()
@@ -875,14 +918,14 @@ return function(ctx)
         -- The point of the whole design: the book is readable with the sheet
         -- open.
         local p = canvasPlugin()
-        p:openCanvasHere()
+        openForPen(p)
         local kept = touchFrame(p, { { slot = 0, id = 1, x = READER.x, y = READER.y } })
         t:eq(#kept, 1, "the contact goes to gesture detection")
     end)
 
     t:case("a palm on the sheet is withheld from gesture detection", function()
         local p = canvasPlugin()
-        p:openCanvasHere()
+        openForPen(p)
         local kept = touchFrame(p, { { slot = 0, id = 1, x = SHEET.x, y = SHEET.y } })
         t:eq(#kept, 0, "no contact, so no hold timer and no page turn")
     end)
@@ -891,7 +934,7 @@ return function(ctx)
         -- The detector never opened a contact for it; handing it a lift for
         -- one that does not exist is the kind of thing that strands slots.
         local p = canvasPlugin()
-        p:openCanvasHere()
+        openForPen(p)
         touchFrame(p, { { slot = 0, id = 1, x = SHEET.x, y = SHEET.y } })
         local kept = touchFrame(p, { { slot = 0, id = -1, x = SHEET.x, y = SHEET.y } })
         t:eq(#kept, 0, "nothing to hand back")
@@ -899,7 +942,7 @@ return function(ctx)
 
     t:case("a finger on the toolbar always gets through", function()
         local p = canvasPlugin()
-        p:openCanvasHere()
+        openForPen(p)
         local bar = p.bar.dimen
         local kept = touchFrame(p, { { slot = 0, id = 1, x = bar.x + 5, y = bar.y + 5 } })
         t:eq(#kept, 1, "Stop is always pressable")
@@ -907,28 +950,100 @@ return function(ctx)
 
     t:case("a finger landing while the pen is down is withheld anywhere", function()
         local p = canvasPlugin()
-        p:openCanvasHere()
-        penFrame(p, SHEET.x, SHEET.y)
+        openForPen(p)
+        penDown(p, SHEET.x, SHEET.y)
         local kept = touchFrame(p, { { slot = 0, id = 1, x = READER.x, y = READER.y } })
         t:eq(#kept, 0, "the hand does not turn the page mid-stroke")
     end)
 
     t:case("a finger already reading when the pen lands has its contact dropped", function()
         local p = canvasPlugin()
-        p:openCanvasHere()
+        openForPen(p)
         touchFrame(p, { { slot = 0, id = 1, x = READER.x, y = READER.y } })
         local gd = Device.input.gesture_detector
         gd.active_contacts[0] = { slot = 0, pending_hold_timer = true }
         gd.dropped = {}
-        penFrame(p, SHEET.x, SHEET.y)
+        penDown(p, SHEET.x, SHEET.y)
         touchFrame(p, {})
         t:eq(gd.dropped[1], 0, "its hold timer goes with it")
     end)
 
+    t:case("a promoted palm on the sheet is not the eraser", function()
+        -- Linux gives a rejected touch MT_TOOL_PALM, whose value is KOReader's
+        -- ERASER, so a hand resting on the sheet arrives at the stylus
+        -- callback looking exactly like the pen's other end. The recording
+        -- that motivated this had it erasing whole pages.
+        local Replays = require("wacom_scribe_replays")
+        local p = canvasPlugin()
+        openForPen(p)
+        penDown(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 40, SHEET.y + 40)
+        penLift(p, SHEET.x + 40, SHEET.y + 40)
+        local before = #p.session:cache():strokes()
+        t:eq(before, 1, "one stroke on the sheet to erase")
+
+        local input = Device.input
+        local replay = Replay.new{ input = input, capture = Capture }
+        replay:set(0, { id = 50, x = SHEET.x, y = SHEET.y, tool = Replays.TOOL_FINGER })
+        replay:syn()
+        replay:set(0, { x = SHEET.x + 5, y = SHEET.y + 5, tool = Replays.TOOL_ERASER })
+        replay:syn()
+
+        t:eq(p:hasActivePhysicalContact(), true, "the hand is on the glass")
+        t:eq(#p.session:cache():strokes(), before, "and it erased nothing")
+        t:eq(p.canvas_stroke, nil, "and drew nothing")
+        t:eq(p.canvas_erase_ctx, nil, "and opened no erase context")
+
+        replay:set(0, { id = -1 })
+        replay:syn()
+        t:eq(p:hasActivePhysicalContact(), false, "its lift releases the sheet")
+        t:eq(#p.session:cache():strokes(), before, "with the ink still there")
+        t:eq(p.router:touchCount(), 0, "and no router ownership left behind")
+    end)
+
+    t:case("the recorded stale pen pair draws no line across the sheet", function()
+        local Replays = require("wacom_scribe_replays")
+        local p = canvasPlugin()
+        openForPen(p)
+        local input = Device.input
+        local replay = Replay.new{ input = input, capture = Capture }
+        local tr = p.session:transform()
+
+        -- The recorded numbers are screen coordinates from a Scribe; map the
+        -- two that matter onto this sheet so both contacts land on paper.
+        local stale_x, stale_y = SHEET.x, SHEET.y
+        local real_x, real_y = SHEET.x + 300, SHEET.y + 120
+        replay:set(4, { id = 4, x = stale_x - 4, y = stale_y - 4, tool = Replays.TOOL_PEN })
+        replay:syn()
+        replay:set(4, { x = stale_x, y = stale_y })
+        replay:syn()
+        replay:set(4, { id = -1 })
+        replay:syn()
+
+        -- A palm in between, then a contact-down frame with no ABS update at
+        -- all: the slot still presents the pen's previous position.
+        replay:set(0, { id = 40, x = SHEET.x + 10, y = SHEET.y + 10, tool = Replays.TOOL_ERASER })
+        replay:syn()
+        replay:set(0, { id = -1 })
+        replay:syn()
+        replay:set(4, { id = 5, tool = Replays.TOOL_PEN })
+        replay:syn()
+        t:eq(p.canvas_stroke, nil, "the sticky pair started nothing")
+        replay:set(4, { x = real_x, y = real_y })
+        replay:syn()
+
+        local stroke = p.canvas_stroke
+        t:check(stroke ~= nil, "the second contact draws where the pen really is")
+        local cx, cy = tr:toCanvas(real_x, real_y)
+        t:check(math.abs(stroke[1] - cx) < 1, "starting at the real x")
+        t:check(math.abs(stroke[2] - cy) < 1, "and the real y")
+        t:eq(stroke.n, 1, "with no segment back to the previous contact")
+    end)
+
     t:case("touch navigation comes back when the pen lifts", function()
         local p = canvasPlugin()
-        p:openCanvasHere()
-        penFrame(p, SHEET.x, SHEET.y)
+        openForPen(p)
+        penDown(p, SHEET.x, SHEET.y)
         penLift(p, SHEET.x, SHEET.y)
         local kept = touchFrame(p, { { slot = 1, id = 2, x = READER.x, y = READER.y } })
         t:eq(#kept, 1, "reading works again straight away")
@@ -936,7 +1051,7 @@ return function(ctx)
 
     t:case("a pen slot handed back is not counted as touch", function()
         local p = canvasPlugin()
-        p:openCanvasHere()
+        openForPen(p)
         local kept = touchFrame(p, { { slot = 4, id = 1, x = READER.x, y = READER.y, tool = 1 } })
         t:eq(#kept, 1, "it is the pen, not a finger")
     end)
@@ -1000,8 +1115,8 @@ return function(ctx)
 
     t:case("a rerender rebuilds the index and reads no ink", function()
         local p, store, doc = canvasPlugin()
-        p:openCanvasHere()
-        penFrame(p, SHEET.x, SHEET.y)
+        openForPen(p)
+        penDown(p, SHEET.x, SHEET.y)
         penFrame(p, SHEET.x + 40, SHEET.y)
         penLift(p, SHEET.x + 40, SHEET.y)
         p:onSaveSettings()
@@ -1018,8 +1133,8 @@ return function(ctx)
 
     t:case("teardown closes the session and writes what is pending", function()
         local p, store = canvasPlugin()
-        p:openCanvasHere()
-        penFrame(p, SHEET.x, SHEET.y)
+        openForPen(p)
+        penDown(p, SHEET.x, SHEET.y)
         penFrame(p, SHEET.x + 40, SHEET.y)
         penLift(p, SHEET.x + 40, SHEET.y)
         local canvas_id = p.session:activeCanvas().id
@@ -1039,8 +1154,8 @@ return function(ctx)
 
     t:case("suspending stops drawing and leaves the sheet consistent", function()
         local p = canvasPlugin()
-        p:openCanvasHere()
-        penFrame(p, SHEET.x, SHEET.y)
+        openForPen(p)
+        penDown(p, SHEET.x, SHEET.y)
         p:onSuspend()
         t:eq(p.drawing, false, "drawing stopped")
         t:eq(p.canvas_stroke, nil, "and no half a stroke is left dangling")

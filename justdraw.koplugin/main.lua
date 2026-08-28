@@ -34,6 +34,9 @@ local InputController = require("ink_input_controller")
 local InkBar = require("ink_bar")
 local NotebookController = require("ink_notebook_controller")
 local NotebookInput = require("ink_notebook_input")
+local PalmGate = require("ink_wacom_palm")
+local StylusGeometry = require("ink_stylus_geometry")
+local StylusSequence = require("ink_stylus_sequence")
 local Limits = require("ink_limits")
 local Render = require("ink_render")
 local Router = require("ink_contact_router")
@@ -121,24 +124,18 @@ function JustDraw:init()
     self.draw_slot = nil
     self.stroke = nil
 
-    self.stylus_active = false
-    self.stylus_passthrough = false
-    self.stylus_dominated = false
-    self.stylus_geom_latched = false
-    self.stylus_suspended = false
-    self.stylus_stale_xy = false
-    self.stylus_inked = false
-    self.stylus_tool = nil
-    self.stylus_lift_x, self.stylus_lift_y = nil, nil
+    -- One contact normalizer, one palm ledger and one geometry policy per
+    -- capture lease, shared with the notebook route. See buildStylusMachine.
+    self.stylus_sequence = nil
+    self.palm_gate = nil
+    self.stylus_geometry = nil
+    self.capture_input = nil
     self.max_open_points = Limits.MAX_OPEN_POINTS
     self.max_contact_samples = Limits.MAX_CONTACT_SAMPLES
-    self.stylus_sample_count = 0
     self.stylus_budget_notified = false
-    self.trace_route_reason = nil
 
     self.stylus_trace = nil
-    self.trace_event_ordinal = 0
-    self.trace_frame_ordinal = 0
+    self.trace_instance = nil
     self.trace_source = nil
     self.pen_notice_shown = false
 
@@ -713,7 +710,11 @@ function JustDraw:resolveInputBackend()
         return "stylus"
     end
 
-    if has_api and Device.input.wacom_protocol == true then
+    -- A Wacom runtime that does not name its pen slot cannot tell a real
+    -- eraser from a palm promoted to MT_TOOL_PALM, so `auto` treats it as a
+    -- device without a usable pen rather than guessing per tool value.
+    if has_api and Device.input.wacom_protocol == true
+        and Capture:validateStylusInput(Device.input) then
         return "stylus"
     end
     return "finger"
@@ -780,18 +781,24 @@ function JustDraw:setDrawing(on)
 
         local lease
         if backend == "stylus" then
+            self:buildStylusMachine(Device.input)
             lease, reason = InputController:acquire(self, {
                 backend = "stylus",
                 stylus_handler = function(slot) return self:onStylusEvent(slot) end,
                 frame_handler = function(slots) return self:onStylusTouchFrame(slots) end,
-                has_active_contact = function() return self.stylus_active end,
+                has_active_contact = function()
+                    return self:hasActivePhysicalContact()
+                end,
                 on_error = function(err) self:disarmInput(err) end,
             })
         else
+            self:releaseStylusMachine()
             lease, reason = InputController:acquire(self, {
                 backend = "finger",
                 frame_handler = function(slots) return self:onTouchFrame(slots) end,
-                has_active_contact = function() return self.n_contacts > 0 end,
+                has_active_contact = function()
+                    return self:hasActivePhysicalContact()
+                end,
                 on_error = function(err) self:disarmInput(err) end,
             })
         end
@@ -889,20 +896,129 @@ function JustDraw:resetContacts()
     if self.router then self.router:reset() end
 end
 
---- Per-sequence pen state. `stylus_lift_x/y` deliberately survives, because it
---- is how the next contact-down detects stale coordinates.
-function JustDraw:resetStylusState()
-    self.stylus_active = false
-    self.stylus_passthrough = false
-    self.stylus_dominated = false
-    self.stylus_geom_latched = false
-    self.stylus_suspended = false
-    self.stylus_stale_xy = false
-    self.stylus_inked = false
-    self.stylus_tool = nil
-    self.stylus_sample_count = 0
+--[[--
+Build this lease's pen machine over one Input.
+
+`input` is read once, here, rather than per sample: the slot classifier, the
+Wacom proximity rule and the finger-tool constant all describe the device we
+are about to hook, and re-reading Device.input from inside the callback would
+let a lease outlive the thing it was built for.
+
+The three parts are shared with the notebook route on purpose. A second copy
+of the pen state machine is how the surfaces came to disagree about what a
+Scribe palm is.
+]]
+function JustDraw:buildStylusMachine(input)
+    self.capture_input = input
+    self.stylus_geometry = StylusGeometry.new()
+    self.palm_gate = PalmGate.new{
+        classify = function(slot) return Capture:physicalSlotRole(slot, input) end,
+        retire_touch = function(slot_number) self:retireTouchSlot(slot_number) end,
+    }
+    self.stylus_sequence = StylusSequence.new{
+        wacom_protocol = input ~= nil and input.wacom_protocol == true,
+        pen_slot = input and input.pen_slot,
+        tool_finger = input and input.TOOL_TYPE_FINGER or 0,
+        to_screen = Capture.toScreen,
+        max_open_points = self.max_open_points,
+        max_contact_samples = self.max_contact_samples,
+        geometry = self.stylus_geometry,
+        classify = function(x, y, tool, coherent)
+            return self:classifyStylusContact(x, y, tool, coherent)
+        end,
+        on_contact_start = function() return self:onStylusContactStart() end,
+        on_point = function(x, y, tool, is_first)
+            return self:onStylusPoint(x, y, tool, is_first)
+        end,
+        on_finish = function(reason) return self:onStylusFinish(reason) end,
+        on_abort = function(reason) return self:onStylusAbort(reason) end,
+        on_contact_end = function(reason) return self:onStylusContactEnd(reason) end,
+        on_domain_error = function(reason, phase)
+            logger.warn("JustDraw: stylus contact reported", reason, phase)
+        end,
+        drop_contact = function(slot) return Capture:dropContact(slot) end,
+    }
+    self.trace_instance = self:activeStylusTrace(self:diagnosticSource())
+    self.stylus_sequence:setTrace(self.trace_instance)
     self.stylus_budget_notified = false
-    self.trace_route_reason = nil
+    return self.stylus_sequence
+end
+
+function JustDraw:releaseStylusMachine()
+    self.stylus_sequence = nil
+    self.palm_gate = nil
+    self.stylus_geometry = nil
+    self.capture_input = nil
+    self.trace_instance = nil
+    self.stylus_budget_notified = false
+end
+
+--[[--
+End this lease's pen state.
+
+Reached with capture already released or made inert, so a contact still
+forwarded to GestureDetector will never see its physical lift here; retire it
+explicitly rather than leaving a pending hold timer behind. The geometry
+baseline goes with the lease: nothing about the coordinates of the old Input
+describes the next one.
+]]
+function JustDraw:resetStylusState()
+    local sequence = self.stylus_sequence
+    if sequence then
+        local forwarded = sequence:forwardedSlot()
+        if forwarded ~= nil then Capture:dropContact(forwarded) end
+        sequence:abort("reset", true)
+    end
+    if self.palm_gate then self.palm_gate:reset() end
+    self:releaseStylusMachine()
+end
+
+--[[--
+Is anything still on the glass?
+
+The lease asks this before letting a notebook take the capture over, and every
+term was a way to answer it wrongly: a trusted pen, a pen handed to the UI, a
+palm the tool-based bookkeeping used to lose track of at its lift, and ordinary
+touch on either route.
+]]
+function JustDraw:hasActivePhysicalContact()
+    local sequence = self.stylus_sequence
+    if sequence and (sequence:hasOwnedPhysicalContact()
+        or sequence:hasForwardedContact()) then
+        return true
+    end
+    if self.palm_gate and self.palm_gate:hasActiveContact() then return true end
+    if self.n_contacts > 0 then return true end
+    return self.router ~= nil and self.router:touchCount() > 0
+end
+
+--- A touch slot has just been promoted to a palm. Give back everything the
+--- ordinary touch route had already granted it, exactly once.
+function JustDraw:retireTouchSlot(slot_number)
+    local forwarded = false
+    local router = self.router
+    if self.canvas_open and router then
+        local dest = router:destinationOf(slot_number)
+        forwarded = dest ~= nil and dest ~= "palm"
+        router:touchUp(slot_number)
+    end
+    if self.contacts[slot_number] ~= nil then
+        -- The direct route hands every touch frame to GestureDetector and
+        -- suppresses per gesture at the widget layer, so a counted contact is
+        -- always one the detector has already opened.
+        forwarded = true
+        self.contacts[slot_number] = nil
+        self.n_contacts = self.n_contacts - 1
+        if self.n_contacts <= 0 then
+            self.n_contacts = 0
+            self.passthrough = false
+        end
+        if self.draw_slot == slot_number then
+            self:endStroke()
+            self.draw_slot = nil
+        end
+    end
+    if forwarded then Capture:dropContact(slot_number) end
 end
 
 function JustDraw:onJustDrawToggle()
@@ -1024,223 +1140,157 @@ end
 -- ------------------------------------------------------------- stylus input
 
 --[[--
-Called for every pen slot KOReader routes to us, before gesture detection.
+Called for every slot KOReader routes to us, before gesture detection.
 Returning true dominates the slot: KOReader drops it from MTSlots and the
 gesture detector never sees it.
 
-Two properties of the slot data shape this function, and both are easy to get
-wrong (c.f. frontend/device/input.lua:1381-1450):
+Classification comes first, and that ordering is the whole point.
+`Input:routeStylusEvents` routes any slot whose tool is PEN, ERASER or
+HIGHLIGHTER, and Linux gives a rejected touch MT_TOOL_PALM, which is the same
+number as ERASER. So on a Kindle Scribe a resting hand arrives here looking
+exactly like the rear eraser, and a physical trace shows it running the erase
+path over a page of somebody's notes. InkWacomPalm answers "is this the pen?"
+before InkStylusSequence is allowed to answer anything at all.
+
+Two properties of the slot data shape everything downstream, and both are easy
+to get wrong (c.f. frontend/device/input.lua:1381-1450):
 
   * the table is Input's own persistent `ev_slots[n]`, reused frame after
     frame, so `id`, `x` and `y` all survive a contact lift. Only transitions of
-    `id` open and close strokes; coordinates alone never mean "there is
-    contact", and a repeated lift must be idempotent because hover frames keep
-    re-delivering `id == -1`.
+    `id` open and close strokes, and X and Y are written independently, which
+    is why InkStylusGeometry has to prove a pair before it is drawn from.
   * `tool` can be TOOL_TYPE_FINGER on the pen slot, because leaving proximity
     writes exactly that, and the slot is still routed here by slot number. So
     `tool` picks ink-or-erase, never draw-or-not.
-
-The domination decision is latched at contact-down and cannot change before the
-lift. Flipping it mid-sequence corrupts GestureDetector's bookkeeping: true to
-false makes it open a fresh contact mid-stroke and emit a spurious tap on lift,
-and false to true strands a contact that never sees its lift, leaving a pending
-hold timer that blocks the slot until the next dropContacts().
 ]]
-function JustDraw:_routeLegacyStylusEvent(slot)
-    local id, x, y, tool = slot.id, slot.x, slot.y, slot.tool
-
-    -- Hover before this slot ever carried a tracking id. Consume, change nothing.
-    if id == nil then return true end
-
-    if id >= 0 and self.canvas_pending_capture_stop then
-        self.stylus_suspended = true
-        self.stylus_dominated = true
-        return true
-    end
-
-    if id >= 0 then
-        if not self.stylus_active then
-            self.stylus_active = true
-            -- The pen is on the page from this frame, even though where is
-            -- not known yet. A finger arriving in that window is no less of a
-            -- palm for being one frame early.
-            if self.router and self.canvas_open then self.router:penContact(nil, nil) end
-            self.stylus_passthrough = self:dialogOnTop()
-            self.stylus_geom_latched = self.stylus_passthrough
-            self.stylus_sample_count = 0
-            self.stylus_budget_notified = false
-            self.stylus_dominated = false
-            self.stylus_suspended = false
-            -- Coordinates are sticky. A contact-down frame that only carried
-            -- BTN_TOUCH still presents the *previous* sequence's position, and
-            -- latching or painting from it would either lose this whole stroke
-            -- or ink a phantom dot at the old spot.
-            self.stylus_stale_xy = x ~= nil
-                and x == self.stylus_lift_x and y == self.stylus_lift_y
-        end
-        if self.stylus_passthrough then return false end
-
-        if self.stylus_sample_count >= (self.max_contact_samples or Limits.MAX_CONTACT_SAMPLES) then
-            if not self.stylus_suspended then
-                self:abortStroke()
-                self.stylus_suspended = true
-                self.trace_route_reason = "sample_budget"
-                if not self.stylus_budget_notified then
-                    self.stylus_budget_notified = true
-                    self:notifyStrokeBudget()
-                end
+function JustDraw:onStylusEvent(slot)
+    local trace = self:syncStylusTrace()
+    local gate = self.palm_gate
+    if gate then
+        local handled, _dominate, _decision, reason = gate:routeStylus(slot)
+        if handled then
+            -- Dominated before any host state exists. A palm must not become
+            -- ink, an erase, a dirty box, a queued write, or a baseline the
+            -- next pen contact is measured against.
+            if trace and self.stylus_sequence then
+                self.stylus_sequence:tracePalm(slot, reason)
             end
-            self.stylus_dominated = true
             return true
         end
-        self.stylus_sample_count = self.stylus_sample_count + 1
+    end
+    local sequence = self.stylus_sequence
+    if not sequence then return true end
+    return sequence:feed(slot)
+end
 
-        -- Remember the last tool that was not the TOOL_TYPE_FINGER a pen slot
-        -- reports on its way out of proximity. The lift frame often carries
-        -- exactly that, and a point recovered from it must not silently become
-        -- ink when the user was erasing.
-        if tool ~= nil and tool ~= Capture.TOOL_FINGER then
-            self.stylus_tool = tool
+--- Publish the active bounded trace to the sequence once per change. The
+--- source can flip mid-lease when a sheet opens, and a trace recorded for the
+--- other surface must not be continued into this one.
+function JustDraw:syncStylusTrace()
+    local trace = self:activeStylusTrace(self:diagnosticSource())
+    if trace ~= self.trace_instance then
+        self.trace_instance = trace
+        if self.stylus_sequence then self.stylus_sequence:setTrace(trace) end
+    end
+    return trace
+end
+
+function JustDraw:afterStylusFrame()
+    if self.stylus_sequence then self.stylus_sequence:afterFrame() end
+end
+
+--[[--
+What a trusted pen contact means, decided on its first coherent point and
+latched for the rest of the sequence.
+
+"pass" is what keeps Stop pressable with a pen: the toolbar, the sheet's resize
+handle and a dialog all need their taps, so those contacts go to
+GestureDetector untouched. Over the book's text with a sheet open the pen stays
+dominated -- the palm rule depends on it and no page may turn under the
+reader's hand -- but the text is not a drawing surface in v1, so it blocks.
+
+`coherent` is false when InkStylusGeometry is asking only whether this contact
+belongs to somebody else, from a pair it would not draw from. Nothing may latch
+on that: the router's pen destination decides where the *stroke* goes and
+cancels resting fingers with it, so it waits for a pair the policy vouches for.
+]]
+function JustDraw:classifyStylusContact(x, y, tool, coherent)
+    if self.canvas_pending_capture_stop then return "block" end
+    if self.canvas_open and self.router and coherent then
+        self.router:penContact(x, y)
+    end
+    if self:dialogOnTop() then return "pass" end
+    if self:penPassesThrough(x, y) then return "pass" end
+    if not coherent then return "draw", "ink" end
+    if self.canvas_open and self.router and not self.router:penDraws() then
+        return "block"
+    end
+    if tool == Capture.TOOL_ERASER or self.eraser then return "draw", "erase" end
+    return "draw", "ink"
+end
+
+function JustDraw:onStylusContactStart()
+    self.stylus_budget_notified = false
+    if self.canvas_open and self.router then
+        -- The pen is on the page from this frame, even though where is not
+        -- known yet. A finger arriving in that window is no less of a palm.
+        self.router:penContact(nil, nil)
+    end
+    return true
+end
+
+--[[--
+One accepted point from the pen.
+
+Where the contact started is already settled by the classification latch, so
+the only cases left are a stroke dragged *onto* the toolbar, which ends at the
+edge rather than scribbling over the buttons, and a dialog that appeared after
+the contact began, which stops the ink without handing the slot back.
+]]
+function JustDraw:onStylusPoint(x, y, tool, is_first)
+    if self.canvas_pending_capture_stop then return "abort_suspend" end
+    if not is_first and self:dialogOnTop() then return "abort_suspend" end
+
+    if self.canvas_open then
+        local region = self:regionAt(x, y)
+        if region == "bar" or region == "handle" then
+            return "finish_suspend"
         end
-
-        -- A dialog opened mid-stroke. Stop inking, but keep dominating to the
-        -- lift: handing the slot back now would make GestureDetector open a
-        -- fresh contact mid-stroke and emit a spurious tap.
-        if self.stylus_dominated and not self.stylus_suspended and self:dialogOnTop() then
-            self:abortStroke()
-            self.stylus_suspended = true
-        end
-
-        if x and y and not self.stylus_stale_xy then
-            local sx, sy = Capture.toScreen(x, y)
-            if not self.stylus_geom_latched then
-                self.stylus_geom_latched = true
-                -- Only reachable before the first dominated frame, so the
-                -- decision can still go to passthrough without a flip.
-                if self.router and self.canvas_open then
-                    self.router:penContact(sx, sy)
-                end
-                if not self.stylus_dominated and self:penPassesThrough(sx, sy) then
-                    self.stylus_passthrough = true
-                    return false
-                end
-            end
-            self:onStylusPoint(sx, sy, tool)
-        end
-        -- Only the contact-down frame can be carrying stale coordinates.
-        self.stylus_stale_xy = false
-        self.stylus_dominated = true
-        return true
+        self:applyCanvasPoint(x, y, tool)
+        return "continue"
     end
 
-    -- Contact lift. Remember where it happened, for the staleness check above.
-    if x and y then
-        self.stylus_lift_x, self.stylus_lift_y = x, y
-    end
-    if not self.stylus_active then
-        return not self.stylus_passthrough
-    end
-    local was_passthrough = self.stylus_passthrough
-    -- A contact-down frame judged stale is sometimes a false positive: the pen
-    -- really did come back down where it lifted last time. If the sequence
-    -- produced no point at all, recover it from the lift frame, which by now
-    -- carries a real position.
-    if not was_passthrough and not self.stylus_inked
-        and not self.stylus_suspended and x and y then
-        local sx, sy = Capture.toScreen(x, y)
-        self:onStylusPoint(sx, sy, self.stylus_tool)
-    end
-    if not was_passthrough then
-        self:endStroke()
-    end
+    if self:inBar(x, y) then return "finish_suspend" end
+    self:applyPoint(x, y, tool)
+    return "continue"
+end
+
+--- Both budgets mean the same thing to the reader -- the contact never ended
+--- -- and repeating it per sample would be worse than saying nothing.
+function JustDraw:noteStylusBudget(reason)
+    if reason ~= "point_budget" and reason ~= "sample_budget" then return end
+    if self.stylus_budget_notified then return end
+    self.stylus_budget_notified = true
+    self:notifyStrokeBudget()
+end
+
+function JustDraw:onStylusFinish(reason)
+    self:noteStylusBudget(reason)
+    self:endStroke()
+    return true
+end
+
+function JustDraw:onStylusAbort(reason)
+    self:noteStylusBudget(reason)
+    self:abortStroke()
+    return true
+end
+
+function JustDraw:onStylusContactEnd()
     if self.router then self.router:penUp() end
-    self:resetStylusState()
-    return not was_passthrough
-end
---- Describe the existing host FSM without retaining KOReader's mutable slot.
-function JustDraw:_legacyStylusTraceState()
-    if self.stylus_passthrough then return "active_pass" end
-    if self.stylus_suspended then return "suspended" end
-    if self.stylus_active then
-        if not self.stylus_geom_latched then return "geometry_pending" end
-        if self.stylus_inked then return "active_draw" end
-        return "active_block"
-    end
-    return "idle"
+    return true
 end
 
-local function legacyTraceDelivery(state)
-    return state ~= "active_pass" and state ~= "forwarded_wait_lift"
-end
-
-function JustDraw:_recordLegacyStylusTrace(trace, slot_number, id, tool,
-        x, y, timev, before_state, before_delivery, delivery, decision, reason)
-    self.trace_event_ordinal = self.trace_event_ordinal + 1
-    local dx, dy, dt = trace:deltas(slot_number, id, tool, x, y, timev)
-    trace:record(self.trace_event_ordinal, self.trace_frame_ordinal + 1,
-        slot_number, id, tool, x, y, timev,
-        before_state, self:_legacyStylusTraceState(),
-        before_delivery, delivery, decision, reason, dx, dy, dt)
-end
-
---- Trace the current production route until a Scribe recording selects a
---- geometry policy for InkStylusSequence. With Diagnostics off this is one
---- nil check plus the existing host call and allocates no per-sample tables.
-function JustDraw:onStylusEvent(slot)
-    local trace = self:activeStylusTrace(self:diagnosticSource())
-    if not trace then return self:_routeLegacyStylusEvent(slot) end
-
-    local slot_number, id = slot.slot, slot.id
-    local x, y, tool, timev = slot.x, slot.y, slot.tool, slot.timev
-    local before_state = self:_legacyStylusTraceState()
-    local before_delivery = legacyTraceDelivery(before_state)
-    local dialog_before = self:dialogOnTop()
-    self.trace_route_reason = nil
-    local delivery = self:_routeLegacyStylusEvent(slot)
-    local after_state = self:_legacyStylusTraceState()
-    local decision, reason
-    if id == nil then
-        decision, reason = "discard", "hover"
-    elseif id < 0 then
-        if before_state == "idle" then
-            decision, reason = "discard", "late_lift"
-        elseif before_state == "geometry_pending" then
-            decision = "lift"
-            reason = x ~= nil and y ~= nil and "pending_dot" or "pending_discard"
-        else
-            decision, reason = "lift", "owner_lift"
-        end
-    elseif delivery == false then
-        decision, reason = "pass", "route_pass"
-    elseif after_state == "geometry_pending" then
-        decision, reason = "pending", "geometry_pending"
-    elseif after_state == "suspended" then
-        if self.trace_route_reason == "point_budget"
-            or self.trace_route_reason == "sample_budget" then
-            decision, reason = "abort_budget", self.trace_route_reason
-        else
-            decision = "suspend"
-            reason = dialog_before and "abort_suspend" or "finish_suspend"
-        end
-    elseif after_state == "active_draw" then
-        decision = before_state == "active_draw" and "append" or "begin"
-        reason = "accepted"
-    elseif after_state == "active_block" then
-        decision, reason = "accept", "route_block"
-    else
-        decision, reason = "accept", "route_draw"
-    end
-    self:_recordLegacyStylusTrace(trace, slot_number, id, tool, x, y, timev,
-        before_state, before_delivery, delivery, decision, reason)
-    return delivery
-end
-
-function JustDraw:_afterLegacyStylusFrame()
-    local trace = self:activeStylusTrace(self:diagnosticSource())
-    if not trace then return end
-    trace:afterFrame()
-    self.trace_frame_ordinal = self.trace_frame_ordinal + 1
-end
 
 --[[--
 Whether a pen contact starting here belongs to somebody else.
@@ -1281,7 +1331,9 @@ function JustDraw:diagnosticReport()
         wacom     = input.wacom_protocol == true,
         pen_slot  = input.pen_slot,
         tool_types = input.TOOL_TYPE_PEN ~= nil,
-        callback_taken = input.stylus_callback ~= nil,
+        -- Our own active lease is not a foreign owner, and reporting it as
+        -- one sent readers chasing a plugin conflict that did not exist.
+        callback_taken = self:stylusCallbackIsForeign(input),
     }
 
     -- The first unmet precondition, in the order the user can act on them.
@@ -1337,9 +1389,10 @@ function JustDraw:startDiagnostics(source, opts)
         duration_seconds = opts.duration_seconds,
         max_events = opts.max_events,
     }
-    self.trace_event_ordinal = 0
-    self.trace_frame_ordinal = 0
     self.trace_source = source
+    -- The sequence owns event/frame ordinals; publishing the new trace resets
+    -- them and starts a fresh contact epoch in one place.
+    self:syncStylusTrace()
     emit("JUSTDRAW-STYLUS trace_start source=" .. source)
     return lines
 end
@@ -1361,11 +1414,19 @@ function JustDraw:resetStylusTraceContactHistory()
     end
 end
 
+--- Correct the one diagnostic line that could accuse JustDraw of the problem
+--- it is reporting: our own registered callback is not a foreign owner.
+function JustDraw:stylusCallbackIsForeign(input)
+    local callback = input and input.stylus_callback
+    if callback == nil then return false end
+    return callback ~= Capture.stylus_callback
+end
+
 --- Warn before coordinates enter the local log, then show the capability report.
 function JustDraw:showDiagnostics(source)
     local dialog
     dialog = ConfirmBox:new{
-        text = _("Pen coordinates will be written to the local KOReader log for up to 60 seconds. JustDraw does not upload them; shared logs may contain them."),
+        text = _("Pen coordinates will be written to the local KOReader log for up to 60 seconds. JustDraw does not upload them; shared logs may contain them. Turn KOReader's debug logging off again afterwards: it records all raw input and the file grows very quickly."),
         ok_text = _("Start"),
         ok_callback = function()
             UIManager:close(dialog)
@@ -1375,41 +1436,6 @@ function JustDraw:showDiagnostics(source)
     }
     UIManager:show(dialog)
     return dialog
-end
-
---[[--
-One drawing point from the pen. Starting on the toolbar is already settled by
-the latch, so the only case left is a stroke dragged *onto* the bar, which ends
-at the edge rather than scribbling over the buttons.
-]]
-function JustDraw:onStylusPoint(x, y, tool)
-    if self.stylus_suspended then return end
-
-    if self.canvas_open then
-        local region = self:regionAt(x, y)
-        if region == "bar" or region == "handle" then
-            -- Dragged onto the toolbar or the handle: end at the edge rather
-            -- than scribbling over them.
-            self:endCanvasStroke()
-            self.stylus_suspended = true
-            return
-        end
-        -- Over the book's text the pen stays dominated -- so the palm rule
-        -- holds and no page turns under the reader's hand -- but the text is
-        -- not a drawing surface in v1.
-        if self:applyCanvasPoint(x, y, tool) then
-            self.stylus_inked = true
-        end
-        return
-    end
-
-    if self:inBar(x, y) then
-        self:endStroke()
-        self.stylus_suspended = true
-        return
-    end
-    self.stylus_inked = true
-    self:applyPoint(x, y, tool)
 end
 
 --[[--
@@ -1430,7 +1456,7 @@ started on the toolbar. Always returns true.
 function JustDraw:onStylusTouchFrame(slots)
     if self.canvas_open then
         local kept = self:routeCanvasTouch(slots)
-        self:_afterLegacyStylusFrame()
+        self:afterStylusFrame()
         self:_flushPendingCanvasCaptureStop()
         return kept
     end
@@ -1439,10 +1465,16 @@ function JustDraw:onStylusTouchFrame(slots)
         self.passthrough = true
     end
 
+    local gate = self.palm_gate
+    local input = self.capture_input
     for i = 1, #slots do
         local ev = slots[i]
-        -- A pen slot handed back to the UI is not residual touch.
-        if not Capture:isStylusSlot(ev) then
+        -- A promoted palm is nobody's contact: it was retired from this ledger
+        -- when it was promoted and it must not re-enter here under a finger
+        -- tool. A trusted pen slot handed back to the UI is not touch either.
+        local palm = gate ~= nil and gate:filterResidual(ev)
+        if not palm
+            and Capture:physicalSlotRole(ev, input) ~= "trusted_stylus" then
             local slot = ev.slot or 0
             local id = ev.id
 
@@ -1477,7 +1509,7 @@ function JustDraw:onStylusTouchFrame(slots)
         end
     end
 
-    self:_afterLegacyStylusFrame()
+    self:afterStylusFrame()
     return true
 end
 
@@ -1501,9 +1533,14 @@ function JustDraw:routeCanvasTouch(slots)
     if not router then return true end
 
     local kept = {}
+    local gate = self.palm_gate
+    local input = self.capture_input
     for i = 1, #slots do
         local ev = slots[i]
-        if Capture:isStylusSlot(ev) then
+        if gate and gate:filterResidual(ev) then
+            -- A promoted palm reaches nothing: not the detector, not the
+            -- router, not the sheet.
+        elseif Capture:physicalSlotRole(ev, input) == "trusted_stylus" then
             -- A pen slot handed back to the UI is not residual touch.
             kept[#kept + 1] = ev
         else
@@ -1594,13 +1631,11 @@ function JustDraw:addPoint(x, y)
     local px, py = s[i - 1], s[i]
     if px == x and py == y then return true end
     if s.n >= (self.max_open_points or Limits.MAX_OPEN_POINTS) then
-        self.trace_route_reason = "point_budget"
+        -- The pen route reaches its budget inside InkStylusSequence, which
+        -- aborts and suspends the contact itself; this is the finger route's
+        -- half of the same rule.
         self:abortStroke()
-        if self.stylus_active then
-            self.stylus_suspended = true
-        else
-            self.draw_slot = SUSPENDED
-        end
+        self.draw_slot = SUSPENDED
         self:notifyStrokeBudget()
         return false
     end
@@ -1935,13 +1970,9 @@ function JustDraw:addCanvasPoint(cx, cy, tr)
     local px, py = s[i - 1], s[i]
     if px == cx and py == cy then return true end
     if s.n >= (self.max_open_points or Limits.MAX_OPEN_POINTS) then
-        self.trace_route_reason = "point_budget"
+        -- See addPoint: the pen route's budget lives in InkStylusSequence.
         self:abortCanvasStroke()
-        if self.stylus_active then
-            self.stylus_suspended = true
-        else
-            self.draw_slot = SUSPENDED
-        end
+        self.draw_slot = SUSPENDED
         self:notifyStrokeBudget()
         return false
     end

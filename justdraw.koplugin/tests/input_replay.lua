@@ -119,7 +119,9 @@ end
 
 function Replay:_isStylus(slot)
     if self.is_stylus then return self.is_stylus(slot, self.input) end
-    if self.capture then return self.capture:isStylusSlot(slot, self.input) end
+    if self.capture then
+        return self.capture:isKORoutedStylusSlot(slot, self.input)
+    end
     return true
 end
 

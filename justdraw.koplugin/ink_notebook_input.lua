@@ -1,10 +1,20 @@
 --[[--
 Hardware-input adapter for a standalone notebook surface.
 
-It deliberately knows no widget.  NotebookWindow will provide viewport,
-touch-pass-through and dirty-region callbacks; this module owns the proven
-pen/finger/eraser state machine and turns completed contacts into
-InkSurfaceSession operations.
+It deliberately knows no widget.  NotebookWindow provides viewport,
+touch-pass-through and dirty-region callbacks; this module turns completed
+contacts into InkSurfaceSession operations.
+
+The pen contact machine itself is not here.  Slot ownership, Wacom proximity,
+budgets and delivery monotonicity live in InkStylusSequence, the palm ledger in
+InkWacomPalm and the axis-coherence rule in InkStylusGeometry, all three shared
+with the reader's direct and canvas routes.  A second copy of that logic here
+is what let the three surfaces disagree about what a Scribe palm is, so what
+remains in this file is only the notebook's own domain: what a point does to a
+surface, and when the editor is allowed to hear about it.
+
+The finger backend is unchanged and deliberately separate: it is the
+compatibility floor for devices with no pen at all.
 ]]
 
 local Capture = require("ink_capture")
@@ -12,6 +22,9 @@ local Device = require("device")
 local Geom = require("ui/geometry")
 local time = require("ui/time")
 local Limits = require("ink_limits")
+local PalmGate = require("ink_wacom_palm")
+local Sequence = require("ink_stylus_sequence")
+local StylusGeometry = require("ink_stylus_geometry")
 
 local Adapter = {}
 Adapter.__index = Adapter
@@ -57,17 +70,13 @@ function Adapter.new(opts)
         max_contact_samples = opts.max_contact_samples or Limits.MAX_CONTACT_SAMPLES,
         active_session = nil,
         transform = nil,
-        stylus_active = false,
-        stylus_pass_latched = false,
-        stylus_dominated = false,
-        stylus_geom_latched = false,
-        stylus_suspended = false,
-        stylus_inked = false,
-        stylus_slot = nil,
-        stylus_tool = nil,
-        last_lift_x = nil,
-        last_lift_y = nil,
-        stale_down = false,
+        -- One contact normalizer, one palm ledger and one geometry policy per
+        -- capture lease. Never reused across leases; see captureSpec.
+        sequence = nil,
+        sequence_factory = nil,
+        palm_gate = nil,
+        geometry = nil,
+        capture_input = nil,
         last_stylus_lift_time = nil,
         stroke = nil,
         erase_ctx = nil,
@@ -79,12 +88,8 @@ function Adapter.new(opts)
         residual = {},
         physical_contact_active = false,
         trace_instance = nil,
-        trace_event_ordinal = 0,
-        trace_frame_ordinal = 0,
-        stylus_sample_count = 0,
         stylus_budget_notified = false,
         backpressure_notified = false,
-        trace_route_reason = nil,
         pending_domain_reason = nil,
         pending_domain_session = nil,
     }, Adapter)
@@ -333,12 +338,26 @@ function Adapter:abort(session)
     if session and self.active_session and session ~= self.active_session then return true end
     local had_contact = self.physical_contact_active or self:hasActiveContact(session)
     local active_session = self.active_session
+    -- One aggregate boundary per abort. Suppress the sequence's own end so the
+    -- editor hears about it exactly once, after every latch is already clear.
+    self.physical_contact_active = false
     -- Contacts already forwarded to GestureDetector have armed its Contact
     -- state and timers. If a resize/error tears down capture before their
     -- physical lift, retire them explicitly rather than suppressing that lift
     -- after the adapter latches are reset.
-    if self.stylus_pass_latched and self.stylus_slot ~= nil then
-        Capture:dropContact(self.stylus_slot)
+    local sequence = self.sequence
+    if sequence then
+        local forwarded = sequence:forwardedSlot()
+        if forwarded ~= nil then Capture:dropContact(forwarded) end
+        sequence:abort("external_abort", true)
+        if sequence:isLifecycleBlocked() or sequence:hasForwardedContact() then
+            -- The GestureDetector contact could not be reclaimed, normally
+            -- because capture is already gone. A stranded owner would keep
+            -- hasActiveContact true for as long as this adapter lives, which
+            -- is the exact failure this route exists to remove, so the lease's
+            -- machine starts over instead.
+            self.sequence = self.sequence_factory and self.sequence_factory() or nil
+        end
     end
     for slot, state in pairs(self.contacts) do
         if state.pass then Capture:dropContact(slot) end
@@ -346,19 +365,9 @@ function Adapter:abort(session)
     for slot, pass in pairs(self.residual) do
         if pass then Capture:dropContact(slot) end
     end
+    if self.palm_gate then self.palm_gate:reset() end
     self:_discardLiveInk()
-    self.stylus_active = false
-    self.stylus_pass_latched = false
-    self.stylus_dominated = false
-    self.stylus_geom_latched = false
-    self.stylus_suspended = false
-    self.stylus_inked = false
-    self.stylus_slot = nil
-    self.stylus_tool = nil
-    self.stale_down = false
-    self.stylus_sample_count = 0
     self.stylus_budget_notified = false
-    self.trace_route_reason = nil
     self.pending_domain_reason = nil
     self.pending_domain_session = nil
     self.contacts = {}
@@ -372,14 +381,30 @@ function Adapter:abort(session)
     return true
 end
 
+--[[--
+Is any part of the reader still touching the device?
+
+Every term matters, and each one was a way to answer wrongly. The sequence
+covers a trusted pen whether it is drawing or has been handed to the UI; the
+palm ledger covers a promoted palm, whose lift the tool-based bookkeeping used
+to miss entirely, leaving Add page disabled with nothing on the glass; and the
+finger/residual tables cover ordinary touch.
+]]
 function Adapter:hasActiveContact(session)
     if session and self.active_session and session ~= self.active_session then return false end
-    return self.stylus_active or self.stylus_pass_latched
-        or self.contact_count > 0 or next(self.residual) ~= nil
+    local sequence = self.sequence
+    if sequence and (sequence:hasOwnedPhysicalContact()
+        or sequence:hasForwardedContact()) then
+        return true
+    end
+    if self.palm_gate and self.palm_gate:hasActiveContact() then return true end
+    return self.contact_count > 0 or next(self.residual) ~= nil
 end
 
 function Adapter:isStylusContactActive()
-    return self.stylus_active or self.stylus_pass_latched
+    local sequence = self.sequence
+    return sequence ~= nil and (sequence:hasOwnedPhysicalContact()
+        or sequence:hasForwardedContact())
 end
 
 function Adapter:controlTouchAllowed()
@@ -391,27 +416,14 @@ function Adapter:controlTouchAllowed()
     return true
 end
 
-function Adapter:_legacyStylusTraceState()
-    if self.stylus_pass_latched then return "active_pass" end
-    if self.stylus_suspended then return "suspended" end
-    if self.stylus_active then
-        if not self.stylus_geom_latched then return "geometry_pending" end
-        if self.stylus_inked then return "active_draw" end
-        return "active_block"
-    end
-    return "idle"
-end
-
-local function legacyTraceDelivery(state)
-    return state ~= "active_pass" and state ~= "forwarded_wait_lift"
-end
-
+--- Resolve the active bounded trace and hand it to the sequence once per
+--- change, so diagnostics costs one comparison per event rather than a
+--- formatted line.
 function Adapter:_activeStylusTrace()
     local trace = self.get_stylus_trace and self.get_stylus_trace() or nil
     if trace ~= self.trace_instance then
         self.trace_instance = trace
-        self.trace_event_ordinal = 0
-        self.trace_frame_ordinal = 0
+        if self.sequence then self.sequence:setTrace(trace) end
     end
     return trace
 end
@@ -433,234 +445,162 @@ function Adapter:_deliverPendingDomainError()
     end
 end
 
-function Adapter:_recordLegacyStylusTrace(trace, slot_number, id, tool,
-        x, y, timev, before_state, before_delivery, delivery, decision, reason)
-    self.trace_event_ordinal = self.trace_event_ordinal + 1
-    local dx, dy, dt = trace:deltas(slot_number, id, tool, x, y, timev)
-    trace:record(self.trace_event_ordinal, self.trace_frame_ordinal + 1,
-        slot_number, id, tool, x, y, timev,
-        before_state, self:_legacyStylusTraceState(),
-        before_delivery, delivery, decision, reason, dx, dy, dt)
+-- ------------------------------------------------- stylus domain callbacks
+
+--- Notify a budget stop once per contact. Both budgets mean the same thing to
+--- the reader -- the contact never ended -- and repeating it per sample would
+--- be worse than saying nothing.
+function Adapter:_noteStylusBudget(reason)
+    if reason ~= "point_budget" and reason ~= "sample_budget" then return end
+    if self.stylus_budget_notified then return end
+    self.stylus_budget_notified = true
+    if self.on_error then self.on_error(reason) end
 end
 
---- Instrument the current route without choosing an unproven geometry policy.
+function Adapter:_stylusContactStart()
+    self.stylus_budget_notified = false
+    self:_markPhysicalContact()
+    return true
+end
+
+--[[--
+What a trusted pen contact means here, latched for the whole sequence.
+
+"pass" hands the contact to GestureDetector so the rail keeps working; anything
+on the paper draws. `coherent` is false when the geometry policy is asking only
+whether this contact belongs to somebody else, from a pair it would not draw
+from -- nothing here latches, so the answer is the same either way.
+]]
+function Adapter:_classifyStylus(sx, sy, tool)
+    if self.pending_domain_reason ~= nil then return "block" end
+    if self:_passesStylus(sx, sy) then return "pass" end
+    local erasing = tool == Capture.TOOL_ERASER
+        or truthy(self.get_eraser, self.active_session)
+    return "draw", erasing and "erase" or "ink"
+end
+
+function Adapter:_stylusPoint(sx, sy, tool, is_first)
+    if self.pending_domain_reason ~= nil then return "abort_suspend" end
+    -- A modal or the rail can appear over the paper after a contact began.
+    -- The contact stays dominated -- handing it back mid-sequence would make
+    -- GestureDetector emit a spurious tap -- but it stops leaving ink under
+    -- the new overlay.
+    if not is_first and self:_stylusRegionPasses(sx, sy) then
+        return "abort_suspend"
+    end
+    if is_first then
+        self:_beginInk(sx, sy, tool)
+        return "continue"
+    end
+    local continued, reason = self:_continueInk(sx, sy, tool)
+    if continued then return "continue" end
+    if reason == "outside" then return "finish_suspend" end
+    if reason == "point_budget" then return "abort_suspend" end
+    return "continue"
+end
+
+function Adapter:_finishStylusInk(reason)
+    self:_noteStylusBudget(reason)
+    -- A rejected operation reports itself through on_error and, when fatal,
+    -- through the deferred domain error; it is not a sequence failure.
+    self:_finishInk()
+    return true
+end
+
+function Adapter:_abortStylusInk(reason)
+    self:_noteStylusBudget(reason)
+    self:_discardLiveInk()
+    return true
+end
+
+function Adapter:_stylusContactEnd(reason)
+    self.last_stylus_lift_time = self.now()
+    -- Logical ink end is not physical contact end: a palm or a finger may
+    -- still be down, and the editor must not re-enable anything until the
+    -- glass is clear.
+    self:_maybeEmitPhysicalContactEnd(reason, self.active_session)
+    self:_maybeEmitEditChanged()
+    return true
+end
+
+--- A touch slot has just been promoted to a palm. Give back everything the
+--- ordinary touch route had already granted it, exactly once.
+function Adapter:_retireTouchSlot(slot_number)
+    local pass = self.residual[slot_number]
+    if pass ~= nil then
+        self.residual[slot_number] = nil
+        -- Only a forwarded contact exists inside GestureDetector; a dominated
+        -- one never opened a Contact and has no hold timer to cancel.
+        if pass then Capture:dropContact(slot_number) end
+    end
+    local state = self.contacts[slot_number]
+    if state then
+        self.contacts[slot_number] = nil
+        self.contact_count = self.contact_count - 1
+        if self.contact_count < 0 then self.contact_count = 0 end
+        if self.finger_slot == slot_number then self.finger_slot = nil end
+        if state.pass then Capture:dropContact(slot_number) end
+    end
+end
+
+-- ------------------------------------------------------------ stylus route
+
+--[[--
+One slot KOReader routed to the stylus callback. Returning true dominates it.
+
+The order is the fix. Classification comes first, because a callback
+invocation is not proof of pen identity: on Wacom a resting hand is promoted to
+MT_TOOL_PALM, whose value is KOReader's ERASER, and it is routed here exactly
+like a pen. Only what survives that reaches the contact machine.
+]]
 function Adapter:_stylus(slot)
     local trace = self:_activeStylusTrace()
-    if not trace then return self:_routeLegacyStylus(slot) end
-
-    local slot_number, id = slot.slot, slot.id
-    local x, y, tool, timev = slot.x, slot.y, slot.tool, slot.timev
-    local before_state = self:_legacyStylusTraceState()
-    local before_delivery = legacyTraceDelivery(before_state)
-    local before_owner = self.stylus_slot
-    self.trace_route_reason = nil
-    local delivery = self:_routeLegacyStylus(slot)
-    local after_state = self:_legacyStylusTraceState()
-    local decision, reason
-    if id == nil then
-        decision, reason = "discard", "hover"
-    elseif id < 0 then
-        if before_owner ~= nil and slot_number ~= before_owner then
-            decision, reason = "lift", "foreign_lift"
-        elseif before_state == "idle" then
-            decision, reason = "discard", "late_lift"
-        elseif before_state == "geometry_pending" then
-            decision = "lift"
-            reason = x ~= nil and y ~= nil and "pending_dot" or "pending_discard"
-        else
-            decision, reason = "lift", "owner_lift"
-        end
-    elseif before_owner ~= nil and slot_number ~= before_owner then
-        decision, reason = "discard", "foreign_slot"
-    elseif delivery == false then
-        decision, reason = "pass", "route_pass"
-    elseif after_state == "geometry_pending" then
-        decision, reason = "pending", "geometry_pending"
-    elseif after_state == "suspended" then
-        if self.trace_route_reason == "point_budget"
-            or self.trace_route_reason == "sample_budget" then
-            decision, reason = "abort_budget", self.trace_route_reason
-        else
-            decision, reason = "suspend", "abort_suspend"
-        end
-    elseif after_state == "active_draw" then
-        decision = before_state == "active_draw" and "append" or "begin"
-        reason = "accepted"
-    elseif after_state == "active_block" then
-        decision, reason = "accept", "route_block"
-    else
-        decision, reason = "accept", "route_draw"
-    end
-    self:_recordLegacyStylusTrace(trace, slot_number, id, tool, x, y, timev,
-        before_state, before_delivery, delivery, decision, reason)
-    return delivery
-end
-
-function Adapter:_afterLegacyStylusFrame()
-    local trace = self:_activeStylusTrace()
-    if not trace then return end
-    trace:afterFrame()
-    self.trace_frame_ordinal = self.trace_frame_ordinal + 1
-end
-function Adapter:_routeLegacyStylus(slot)
-    local id = slot.id
-    -- Hover before BTN_TOUCH is not a lift. In particular it must not replace
-    -- the previous lift coordinates used to identify sticky contact-down data.
-    if id == nil then return true end
-
-    -- A fatal operation from an earlier stylus slot in this SYN is delivered
-    -- only after residual filtering. Dominate any remaining positive slots;
-    -- they must not start new work or leak into GestureDetector meanwhile.
-    if id >= 0 and self.pending_domain_reason then
-        self:_markPhysicalContact()
-        self.stylus_suspended = true
-        self.stylus_dominated = true
-        return true
-    end
-
-    if id >= 0 then
-        self:_markPhysicalContact()
-        if self.stylus_pass_latched then return false end
-        if not self.stylus_active then
-            self.stylus_active = true
-            self.stylus_slot = slot.slot
-            self.stylus_sample_count = 0
-            self.stylus_budget_notified = false
-            self.stylus_dominated = false
-            self.stylus_geom_latched = false
-            self.stylus_suspended = false
-            self.stylus_inked = false
-            self.stale_down = slot.x ~= nil and slot.y ~= nil
-                and slot.x == self.last_lift_x and slot.y == self.last_lift_y
-        elseif slot.slot ~= self.stylus_slot then
-            return false
-        end
-
-        if self.stylus_sample_count >= self.max_contact_samples then
-            if not self.stylus_suspended then
-                self:_discardLiveInk()
-                self.stylus_suspended = true
-                self.trace_route_reason = "sample_budget"
-                if not self.stylus_budget_notified and self.on_error then
-                    self.stylus_budget_notified = true
-                    self.on_error("sample_budget")
-                end
+    local gate = self.palm_gate
+    if gate then
+        local handled, _dominate, _decision, reason = gate:routeStylus(slot)
+        if handled then
+            if trace and self.sequence then
+                self.sequence:tracePalm(slot, reason)
             end
-            self.stylus_dominated = true
-            return true
-        end
-        self.stylus_sample_count = self.stylus_sample_count + 1
-
-        if slot.tool ~= nil and slot.tool ~= Capture.TOOL_FINGER then
-            self.stylus_tool = slot.tool
-        end
-        -- Some Wacom frames carry BTN_TOUCH before ABS_X/Y. Own that frame but
-        -- postpone classification; handing it to GestureDetector would create
-        -- a contact and arm its hold timer before paper/chrome is known.
-        if slot.x == nil or slot.y == nil then
-            self.stylus_dominated = true
-            return true
-        end
-        if self.stale_down then
-            -- Only the tracking-id frame can carry the previous contact's
-            -- sticky coordinates. GestureDetector has not seen that frame,
-            -- so the next frame can still become its coherent contact-down,
-            -- even when the pen really returned to the exact same pixel.
-            self.stale_down = false
-            return true
-        end
-
-        local sx, sy = Capture.toScreen(slot.x, slot.y)
-        if not self.stylus_geom_latched then
-            self.stylus_geom_latched = true
-            if self:_passesStylus(sx, sy) then
-                if not self.stylus_dominated then
-                    self.stylus_active = false
-                    self.stylus_pass_latched = true
-                    return false
-                end
-                -- A coordinate-less first frame was already dominated. Never
-                -- hand that undecidable half-contact back to gestures. A
-                -- stale coordinate frame returns earlier without setting the
-                -- dominated latch, so its first fresh successor may pass.
-                self.stylus_suspended = true
-                return true
-            end
-        end
-        -- A modal/control can appear after a contact began. Never flip a
-        -- dominated sequence back into GestureDetector mid-contact, but also
-        -- never leave live ink underneath the new overlay.
-        if not self.stylus_suspended and self.stylus_geom_latched
-            and self:_stylusRegionPasses(sx, sy) then
-            self:_discardLiveInk()
-            self.stylus_suspended = true
-        end
-        if not self.stylus_suspended then
-            local continued, reason
-            if self.stroke or self.erase_ctx then
-                continued, reason = self:_continueInk(sx, sy, self.stylus_tool)
+            if reason == "palm_lift" then
+                self:_maybeEmitPhysicalContactEnd("palm_lift", self.active_session)
+                self:_maybeEmitEditChanged()
             else
-                continued = self:_beginInk(sx, sy, self.stylus_tool)
+                self:_markPhysicalContact()
             end
-            if continued then
-                self.stylus_inked = true
-            elseif reason == "outside" then
-                self:_finishInk()
-                self.stylus_suspended = true
-            elseif reason == "point_budget" then
-                self.stylus_suspended = true
-                self.trace_route_reason = reason
-                if not self.stylus_budget_notified and self.on_error then
-                    self.stylus_budget_notified = true
-                    self.on_error(reason)
-                end
-            end
-        end
-        self.stylus_dominated = true
-        return true
-    end
-
-    -- Contact lift. A passthrough sequence stays entirely somebody else's.
-    local was_passthrough = self.stylus_pass_latched
-    local dominated = not was_passthrough
-        and (self.stylus_active or self.stylus_suspended)
-    if self.stylus_active and not self.stylus_inked
-        and not self.stylus_suspended and slot.x ~= nil and slot.y ~= nil then
-        local sx, sy = Capture.toScreen(slot.x, slot.y)
-        if not self:_passesStylus(sx, sy) and self:_accepts(sx, sy) then
-            self.stylus_inked = self:_beginInk(
-                sx, sy, self.stylus_tool or slot.tool) and true or false
+            return true
         end
     end
-    if self.stylus_active and not self.stylus_suspended then self:_finishInk() end
-    if slot.x ~= nil and slot.y ~= nil then
-        self.last_lift_x, self.last_lift_y = slot.x, slot.y
-    end
-    self.stylus_active = false
-    self.stylus_pass_latched = false
-    self.stylus_dominated = false
-    self.stylus_geom_latched = false
-    self.stylus_suspended = false
-    self.stylus_inked = false
-    self.stylus_slot = nil
-    self.stylus_tool = nil
-    self.stale_down = false
-    self.stylus_sample_count = 0
-    self.stylus_budget_notified = false
-    self.last_stylus_lift_time = self.now()
-    self:_maybeEmitPhysicalContactEnd("owner_lift", self.active_session)
-    self:_maybeEmitEditChanged()
-    return dominated
+    local sequence = self.sequence
+    if not sequence then return true end
+    return sequence:feed(slot)
 end
 
+function Adapter:_afterStylusFrame()
+    if self.sequence then self.sequence:afterFrame() end
+end
+
+--[[--
+Residual touch on the pen route, after the stylus decision for this frame.
+
+Three kinds of slot arrive here. A tracked palm is withheld entirely, down
+frame and lift alike: forwarding only one half would leave GestureDetector a
+contact it never opened or one that never ends. A trusted pen slot handed back
+to the UI is not touch at all and must not be counted as one. Everything else
+is ordinary touch and keeps the behaviour it always had.
+]]
 function Adapter:_filterResidual(slots)
     local kept = {}
+    local gate = self.palm_gate
+    local input = self.capture_input
     for i = 1, #slots do
         local event = slots[i]
-        if Capture:isStylusSlot(event) then
+        local key = event.slot or 0
+        if gate and gate:filterResidual(event) then
+            if gate:isTracked(key) then self:_markPhysicalContact() end
+        elseif Capture:physicalSlotRole(event, input) == "trusted_stylus" then
             kept[#kept + 1] = event
         else
-            local key = event.slot or 0
             local down = event.id ~= nil and event.id >= 0
             if down then self:_markPhysicalContact() end
             local pass = self.residual[key]
@@ -681,6 +621,7 @@ function Adapter:_filterResidual(slots)
     self:_maybeEmitEditChanged()
     return kept
 end
+
 
 function Adapter:_fingerFrame(slots)
     local kept = {}
@@ -768,17 +709,77 @@ function Adapter:_fingerFrame(slots)
     return kept
 end
 
+--[[--
+Build this lease's contact machine over one Input.
+
+`input` is read once, here, rather than per sample: the slot classifier, the
+proximity rule and the finger-tool constant all describe the device we are
+about to hook, and re-reading Device.input inside the callback would let a
+lease outlive the thing it was built for.
+]]
+function Adapter:_buildStylusMachine(input)
+    self.capture_input = input
+    self.geometry = StylusGeometry.new()
+    self.palm_gate = PalmGate.new{
+        classify = function(slot) return Capture:physicalSlotRole(slot, input) end,
+        retire_touch = function(slot_number) self:_retireTouchSlot(slot_number) end,
+    }
+    local spec = {
+        wacom_protocol = input ~= nil and input.wacom_protocol == true,
+        pen_slot = input and input.pen_slot,
+        tool_finger = input and input.TOOL_TYPE_FINGER or 0,
+        to_screen = Capture.toScreen,
+        max_open_points = self.max_open_points,
+        max_contact_samples = self.max_contact_samples,
+        geometry = self.geometry,
+        classify = function(x, y, tool, coherent)
+            return self:_classifyStylus(x, y, tool, coherent)
+        end,
+        on_contact_start = function() return self:_stylusContactStart() end,
+        on_point = function(x, y, tool, is_first)
+            return self:_stylusPoint(x, y, tool, is_first)
+        end,
+        on_finish = function(reason) return self:_finishStylusInk(reason) end,
+        on_abort = function(reason) return self:_abortStylusInk(reason) end,
+        on_contact_end = function(reason) return self:_stylusContactEnd(reason) end,
+        on_domain_error = function(reason)
+            if self.on_domain_error then
+                self.on_domain_error(reason, self.active_session)
+            end
+        end,
+        drop_contact = function(slot) return Capture:dropContact(slot) end,
+    }
+    self.sequence_factory = function()
+        local sequence = Sequence.new(spec)
+        sequence:setTrace(self.trace_instance)
+        return sequence
+    end
+    self.sequence = self.sequence_factory()
+    return self.sequence
+end
+
 function Adapter:captureSpec(session, _, transform)
+    -- Clear the factory before aborting: a new lease must not be handed a
+    -- machine rebuilt against the previous lease's Input.
+    self.sequence_factory = nil
     self:abort()
+    self.sequence = nil
+    self.palm_gate = nil
+    self.geometry = nil
+    self.capture_input = nil
     self.active_session = session
     self.transform = transform
     local mode = self.get_mode(session)
     local backend = mode
+    local input = Device.input
     if backend == "auto" then
         -- Match the reader route: availability of the callback alone does not
         -- prove that the current device exposes a Wacom-compatible stylus.
+        -- A Wacom runtime that does not name its pen slot cannot tell a real
+        -- eraser from a promoted palm, so it is not a stylus device either.
         backend = Capture:supportsStylus()
-            and Device.input and Device.input.wacom_protocol == true
+            and input and input.wacom_protocol == true
+            and Capture:validateStylusInput(input)
             and "stylus" or "finger"
     end
     if backend ~= "stylus" and backend ~= "finger" then backend = "finger" end
@@ -791,10 +792,11 @@ function Adapter:captureSpec(session, _, transform)
         end,
     }
     if backend == "stylus" then
+        self:_buildStylusMachine(input)
         spec.stylus_handler = function(slot) return self:_stylus(slot) end
         spec.frame_handler = function(slots)
             local kept = self:_filterResidual(slots)
-            self:_afterLegacyStylusFrame()
+            self:_afterStylusFrame()
             self:_deliverPendingDomainError()
             return kept
         end

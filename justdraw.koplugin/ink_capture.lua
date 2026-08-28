@@ -87,15 +87,17 @@ function Capture:resolveTools(input)
 end
 
 --[[--
-Mirrors the `is_stylus` test in Input:routeStylusEvents: a tool match, *or* the
-dedicated pen slot regardless of tool. The slot-number clause is the one that
-matters on Wacom, and it is why a frame can arrive here reporting
-TOOL_TYPE_FINGER.
+Mirrors the `is_stylus` test in Input:routeStylusEvents exactly: a tool match,
+*or* the dedicated pen slot regardless of tool. The slot-number clause is why a
+frame can arrive at the callback reporting TOOL_TYPE_FINGER.
 
-Used by the residual filter to skip pen slots that were handed back to the UI:
-they are not touch, and counting them as contacts corrupts the bookkeeping.
+This answers one question only -- *why did the callback run?* -- and it is not
+a trust decision. On Wacom, Linux reports a rejected touch as MT_TOOL_PALM,
+whose value is 2, which is also TOOL_TYPE_ERASER, so this predicate is true for
+a resting hand. Use `physicalSlotRole` for anything that draws, erases, or
+counts a contact; this exists for the replay harness and for diagnostics.
 ]]
-function Capture:isStylusSlot(slot, input)
+function Capture:isKORoutedStylusSlot(slot, input)
     if not slot then return false end
     local tool = slot.tool
     if tool == self.TOOL_PEN or tool == self.TOOL_ERASER or tool == self.TOOL_HIGHLIGHTER then
@@ -104,6 +106,71 @@ function Capture:isStylusSlot(slot, input)
     input = input or self.input or Device.input
     local pen_slot = input and input.pen_slot
     return pen_slot ~= nil and slot.slot == pen_slot
+end
+
+--[[--
+What this slot physically is, as far as JustDraw is willing to believe.
+
+Returns one interned role -- "trusted_stylus", "routed_palm" or "touch" -- and
+one interned reason. No table, no allocation, no coordinate.
+
+The Wacom rule is the whole point. That digitizer owns one dedicated
+`pen_slot`; BTN_TOOL selects it and BTN_TOUCH writes its fixed id on contact,
+so a real pen or a real rear eraser is *always* on that slot. A stylus-valued
+tool anywhere else is the palm collision above, and trusting it is what let a
+resting hand run the erase path on a Scribe. Tool 2 on the pen slot stays a
+real eraser; that is the case the strict rule has to keep working.
+
+Off Wacom the old tool-based classification is kept unchanged. Kobo styluses
+report through ABS_MT_TOOL_TYPE with no dedicated slot, and nothing has shown
+the palm collision there; narrowing them on a guess would break the one route
+those devices have. See ADR-22.
+]]
+function Capture:physicalSlotRole(slot, input)
+    if not slot then return "touch", "touch_slot" end
+    local tool = slot.tool
+    local stylus_tool = tool == self.TOOL_PEN or tool == self.TOOL_ERASER
+        or tool == self.TOOL_HIGHLIGHTER
+    input = input or self.input or Device.input
+    local pen_slot = input and input.pen_slot
+
+    if input and input.wacom_protocol == true then
+        if pen_slot == nil then
+            -- Activation refuses this runtime outright (validateStylusInput);
+            -- classify fail-closed anyway so no caller can draw from a guess.
+            return stylus_tool and "routed_palm" or "touch",
+                "wacom_pen_slot_missing"
+        end
+        if slot.slot == pen_slot then
+            return "trusted_stylus", "wacom_pen_slot"
+        end
+        if stylus_tool then
+            return "routed_palm", "wacom_non_pen_tool"
+        end
+        return "touch", "touch_slot"
+    end
+
+    if stylus_tool then return "trusted_stylus", "tool_type" end
+    if pen_slot ~= nil and slot.slot == pen_slot then
+        return "trusted_stylus", "configured_pen_slot"
+    end
+    return "touch", "touch_slot"
+end
+
+--[[--
+Whether the stylus backend may be installed over this Input at all.
+
+A Wacom runtime that does not say which slot is the pen cannot be told apart
+from one where every touch slot is a candidate eraser, and there is no safe
+default. Refuse before installing rather than run a route that cannot classify.
+]]
+function Capture:validateStylusInput(input)
+    input = input or Device.input
+    if not input then return nil, "no_input" end
+    if input.wacom_protocol == true and input.pen_slot == nil then
+        return nil, "wacom_pen_slot_missing"
+    end
+    return true
 end
 
 -- -------------------------------------------------------- error handling
@@ -304,6 +371,8 @@ function Capture:installStylus(stylus_handler, residual_frame_handler, on_error)
     if not gd or type(gd.feedEvent) ~= "function" then
         return false, "no_gesture_detector"
     end
+    local classifiable, classify_err = self:validateStylusInput(input)
+    if not classifiable then return false, classify_err end
     -- The callback is a singleton with no chaining and no owner query, so the
     -- only safe move against another plugin is to refuse. Our own callback is
     -- always nil here: we return early when active, and every removal path

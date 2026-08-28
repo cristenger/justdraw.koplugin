@@ -97,11 +97,15 @@ return function(ctx)
     t:case("stylus points become one queued logical stroke", function()
         local session, _, adapter, spec, dirties, _, _, edits, edit_contacts = fixture("stylus")
         t:eq(spec.backend, "stylus", "modern route selected")
+        -- The frame that opens a contact carries whatever the persistent slot
+        -- last held, so it is a baseline; the stroke starts at the first pair
+        -- that has moved on both axes.
         t:eq(spec.stylus_handler{
             slot = 4, id = 9, x = 10, y = 10, tool = 1,
         }, true, "pen dominated")
         spec.stylus_handler{ slot = 4, id = 9, x = 20, y = 30, tool = 1 }
-        spec.stylus_handler{ slot = 4, id = -1, x = 20, y = 30, tool = 0 }
+        spec.stylus_handler{ slot = 4, id = 9, x = 40, y = 60, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 40, y = 60, tool = 0 }
         t:eq(session:surface():pendingWrites(), 1, "one durable operation queued")
         t:eq(#session:surface():cache():strokes(), 1, "one raster stroke")
         t:check(dirties() >= 2, "live ink requested repaint")
@@ -258,20 +262,21 @@ return function(ctx)
             fixture("stylus", { max_open_points = 2 })
         spec.stylus_handler{ slot = 4, id = 1, x = 10, y = 10, tool = 1 }
         spec.stylus_handler{ slot = 4, id = 1, x = 20, y = 20, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 1, x = 30, y = 30, tool = 1 }
         t:eq(spec.stylus_handler{
-            slot = 4, id = 1, x = 30, y = 30, tool = 1,
+            slot = 4, id = 1, x = 40, y = 40, tool = 1,
         }, true, "over-budget sample stays dominated")
         t:eq(errors[1], "point_budget", "the bounded reason is reported")
         t:eq(session:surface():pendingWrites(), 0, "no prefix is persisted")
         t:eq(#session:surface():cache():strokes(), 0, "live prefix is repaired")
         t:eq(adapter:hasActiveContact(session), true,
             "lifecycle remains blocked until the physical boundary")
-        spec.stylus_handler{ slot = 4, id = -1, x = 30, y = 30, tool = 0 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 40, y = 40, tool = 0 }
         t:eq(physical_ends[1], "owner_lift", "one physical end is published")
         t:eq(adapter:hasActiveContact(session), false, "lift clears the gate")
 
-        spec.stylus_handler{ slot = 4, id = 2, x = 40, y = 40, tool = 1 }
-        spec.stylus_handler{ slot = 4, id = -1, x = 40, y = 40, tool = 0 }
+        spec.stylus_handler{ slot = 4, id = 2, x = 60, y = 70, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 60, y = 70, tool = 0 }
         t:eq(session:surface():pendingWrites(), 1, "the next contact rearms normally")
     end)
 

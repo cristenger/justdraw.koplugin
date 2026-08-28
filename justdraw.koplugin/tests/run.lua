@@ -508,11 +508,32 @@ end)
 -- main.lua : stylus state machine
 -- =====================================================================
 
-local function drawingPlugin()
+--- `limits` has to be applied before drawing starts: InkStylusSequence
+--- snapshots the budgets of the lease it is built for rather than re-reading
+--- two plugin fields on every sample.
+local function drawingPlugin(limits)
     local p = realBarPlugin{ wacom_protocol = true }
+    if limits then
+        if limits.max_open_points then p.max_open_points = limits.max_open_points end
+        if limits.max_contact_samples then
+            p.max_contact_samples = limits.max_contact_samples
+        end
+    end
     p:setDrawing(true)
     return p
 end
+
+--[[--
+A note that applies to every pen sequence below.
+
+KOReader hands the callback its own persistent slot table and writes X and Y
+into it independently, so a contact-down frame presents whatever the previous
+contact left there. InkStylusGeometry therefore treats the first pair of a
+contact as a baseline and draws from the first pair that has moved on *both*
+axes -- which is also why these fixtures move both, the way a digitizer does.
+The classification latch (draw / pass / block) moves with it: it is decided on
+the first coherent point, not on the contact-down frame.
+]]
 
 t:describe("main / stylus state machine")
 
@@ -522,7 +543,8 @@ t:case("pen down, move and lift produce exactly one stroke", function()
     t:eq(p.input_backend, "stylus", "stylus backend active")
 
     t:eq(p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 1 })), true, "down dominated")
-    t:eq(p:onStylusEvent(bus:set(4, { x = 150, y = 100 })), true, "move dominated")
+    t:eq(p:onStylusEvent(bus:set(4, { x = 150, y = 120 })), true, "first coherent point dominated")
+    t:eq(p:onStylusEvent(bus:set(4, { x = 200, y = 140 })), true, "move dominated")
     t:eq(p:onStylusEvent(bus:set(4, { id = -1 })), true, "lift dominated")
 
     local list = p.store:get(1)
@@ -531,18 +553,18 @@ t:case("pen down, move and lift produce exactly one stroke", function()
 end)
 
 t:case("an over-budget direct stroke is repaired and owns through lift", function()
-    local p = drawingPlugin()
+    local p = drawingPlugin{ max_open_points = 2 }
     local bus = support.newSlotBus()
-    p.max_open_points = 2
 
     p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 1 }))
-    p:onStylusEvent(bus:set(4, { x = 200, y = 100 }))
-    t:eq(p:onStylusEvent(bus:set(4, { x = 300, y = 100 })), true,
+    p:onStylusEvent(bus:set(4, { x = 200, y = 120 }))
+    p:onStylusEvent(bus:set(4, { x = 300, y = 140 }))
+    t:eq(p:onStylusEvent(bus:set(4, { x = 400, y = 160 })), true,
         "over-budget frame remains dominated")
     t:eq(p.stroke, nil, "the complete live stroke was abandoned")
     t:eq(p.store:get(1), nil, "no prefix was persisted")
-    t:eq(p.stylus_active, true, "physical contact remains owned")
-    t:eq(p.stylus_suspended, true, "host work is suspended until lift")
+    t:eq(p:hasActivePhysicalContact(), true, "physical contact remains owned")
+    t:eq(p.stylus_sequence.state, "suspended", "host work is suspended until lift")
     t:eq(#env.notifications, 0, "notification is not opened inside the callback")
     env.UIManager:flush()
     t:eq(#env.notifications, 1, "one deferred notice is visible")
@@ -550,33 +572,32 @@ t:case("an over-budget direct stroke is repaired and owns through lift", functio
         "the notice explains the orphaned contact")
 
     p:onStylusEvent(bus:set(4, { id = -1 }))
-    t:eq(p.stylus_active, false, "lift releases ownership")
-    p:onStylusEvent(bus:set(4, { id = 5, x = 400, y = 100, tool = 1 }))
+    t:eq(p:hasActivePhysicalContact(), false, "lift releases ownership")
+    p:onStylusEvent(bus:set(4, { id = 5, x = 500, y = 300, tool = 1 }))
+    p:onStylusEvent(bus:set(4, { x = 600, y = 400 }))
     p:onStylusEvent(bus:set(4, { id = -1 }))
     t:eq(#p.store:get(1), 1, "the next physical contact works")
 end)
 
 t:case("the sample cap preserves direct erases and stops further work", function()
-    local p = drawingPlugin()
+    local p = drawingPlugin{ max_contact_samples = 2 }
     local bus = support.newSlotBus()
-    p.max_contact_samples = 2
     p.store:add(1, { n = 1, w = 4, 100, 100 })
 
     p:onStylusEvent(bus:set(4, { id = 4, x = 105, y = 100, tool = 2 }))
-    p:onStylusEvent(bus:set(4, { x = 106, y = 100 }))
-    p:onStylusEvent(bus:set(4, { x = 107, y = 100 }))
+    p:onStylusEvent(bus:set(4, { x = 106, y = 101 }))
+    p:onStylusEvent(bus:set(4, { x = 107, y = 102 }))
     t:eq(p.store:get(1), nil, "accepted eraser work is not rolled back")
-    t:eq(p.stylus_sample_count, 2, "sample counter saturates at its bound")
-    t:eq(p.stylus_suspended, true, "further samples do no host work")
+    t:eq(p.stylus_sequence.sample_count, 2, "sample counter saturates at its bound")
+    t:eq(p.stylus_sequence.state, "suspended", "further samples do no host work")
     p:onStylusEvent(bus:set(4, { id = -1 }))
-    t:eq(p.stylus_active, false, "lift rearms the route")
+    t:eq(p:hasActivePhysicalContact(), false, "lift rearms the route")
 end)
 
 t:case("a passed stylus contact is never reclaimed by the sample cap", function()
-    local p = drawingPlugin()
+    local p = drawingPlugin{ max_contact_samples = 2 }
     local bus = support.newSlotBus()
     local bar = p.bar.dimen
-    p.max_contact_samples = 1
     t:eq(p:onStylusEvent(bus:set(4, {
         id = 4, x = bar.x + 5, y = bar.y + 5, tool = 1,
     })), false, "control down passes")
@@ -594,14 +615,15 @@ t:case("a frame with id=nil neither starts nor ends a stroke", function()
     local bus = support.newSlotBus()
     t:eq(p:onStylusEvent(bus:set(4, { x = 10, y = 10, tool = 1 })), true, "hover consumed")
     t:eq(p.stroke, nil, "no stroke started")
-    t:eq(p.stylus_active, false, "not marked active")
+    t:eq(p:hasActivePhysicalContact(), false, "not marked active")
 end)
 
 t:case("repeated id<0 frames after a lift stay idempotent", function()
     local p = drawingPlugin()
     local bus = support.newSlotBus()
     p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 1 }))
-    p:onStylusEvent(bus:set(4, { x = 150, y = 100 }))
+    p:onStylusEvent(bus:set(4, { x = 150, y = 120 }))
+    p:onStylusEvent(bus:set(4, { x = 200, y = 140 }))
     p:onStylusEvent(bus:set(4, { id = -1 }))
     -- The slot table is persistent: id stays -1 and x/y keep the last point.
     p:onStylusEvent(bus:slot(4))
@@ -617,7 +639,8 @@ t:case("sticky x/y on a lifted slot never paint", function()
     -- Two points, so the stroke is committed and a stray hover point would be
     -- visible as a third point or a second stroke.
     p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 1 }))
-    p:onStylusEvent(bus:set(4, { x = 150, y = 100 }))
+    p:onStylusEvent(bus:set(4, { x = 150, y = 120 }))
+    p:onStylusEvent(bus:set(4, { x = 200, y = 140 }))
     p:onStylusEvent(bus:set(4, { id = -1 }))
     local before = #Device.screen.bb.rects
 
@@ -634,7 +657,7 @@ t:case("pen slot reporting tool=FINGER with id<0 is a lift, not a point", functi
     local p = drawingPlugin()
     local bus = support.newSlotBus()
     p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 1 }))
-    p:onStylusEvent(bus:set(4, { x = 140, y = 100 }))
+    p:onStylusEvent(bus:set(4, { x = 140, y = 120 }))
     -- Leaving proximity: KOReader writes TOOL_TYPE_FINGER into the pen slot.
     t:eq(p:onStylusEvent(bus:set(4, { id = -1, tool = 0 })), true, "treated as a lift")
     t:eq(p.stroke, nil, "stroke closed")
@@ -645,7 +668,7 @@ t:case("highlighter behaves as a pen in this release", function()
     local p = drawingPlugin()
     local bus = support.newSlotBus()
     p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 3 }))
-    p:onStylusEvent(bus:set(4, { x = 150, y = 100 }))
+    p:onStylusEvent(bus:set(4, { x = 150, y = 120 }))
     p:onStylusEvent(bus:set(4, { id = -1 }))
     t:eq(#p.store:get(1), 1, "highlighter drew a normal stroke")
 end)
@@ -680,7 +703,11 @@ t:case("a sequence starting on the toolbar stays passthrough to the lift", funct
     local bar = p.bar.dimen
     local bx, by = bar.x + 5, bar.y + 5
 
-    t:eq(p:onStylusEvent(bus:set(4, { id = 4, x = bx, y = by, tool = 1 })), false, "down passes through")
+    -- The contact-down pair is not good enough to draw from, but it is good
+    -- enough to answer "is this somebody else's?", which is what keeps the
+    -- toolbar tappable with a pen.
+    t:eq(p:onStylusEvent(bus:set(4, { id = 4, x = bx, y = by, tool = 1 })), false,
+        "down passes through")
     t:eq(p:onStylusEvent(bus:set(4, { x = 100, y = 100 })), false, "still passthrough outside the bar")
     t:eq(p:onStylusEvent(bus:set(4, { id = -1 })), false, "lift passes through too")
     t:eq(p.store:get(1), nil, "no ink at all")
@@ -692,7 +719,8 @@ t:case("a sequence dragged onto the toolbar stays dominated and truncates", func
     local bar = p.bar.dimen
 
     t:eq(p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 1 })), true, "down dominated")
-    t:eq(p:onStylusEvent(bus:set(4, { x = 150, y = 100 })), true, "move dominated")
+    t:eq(p:onStylusEvent(bus:set(4, { x = 150, y = 120 })), true, "first coherent point dominated")
+    t:eq(p:onStylusEvent(bus:set(4, { x = 200, y = 140 })), true, "move dominated")
     t:eq(p:onStylusEvent(bus:set(4, { x = bar.x + 5, y = bar.y + 5 })), true, "over the bar, still dominated")
     t:eq(p:onStylusEvent(bus:set(4, { x = bar.x + 20, y = bar.y + 20 })), true, "and stays dominated")
     t:eq(p:onStylusEvent(bus:set(4, { id = -1 })), true, "lift dominated")
@@ -706,7 +734,8 @@ t:case("a dialog on top hands the pen to the UI", function()
     local p = drawingPlugin()
     local bus = support.newSlotBus()
     showDialog("some dialog")
-    t:eq(p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 1 })), false, "pen passes through")
+    t:eq(p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 1 })), false,
+        "pen passes through")
     t:eq(p.store:get(1), nil, "no ink")
 end)
 
@@ -722,7 +751,7 @@ t:case("an empty residual frame changes nothing", function()
     -- Start a real stroke first: asserting on a stroke that was never started
     -- proves nothing about "never closes a stroke".
     p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 1 }))
-    p:onStylusEvent(bus:set(4, { x = 150, y = 100 }))
+    p:onStylusEvent(bus:set(4, { x = 150, y = 120 }))
     t:check(p.stroke ~= nil, "stroke in flight")
 
     p:onStylusTouchFrame({})
@@ -775,7 +804,7 @@ t:case("a palm never aborts the pen stroke in flight", function()
     local p = drawingPlugin()
     local bus = support.newSlotBus()
     p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 1 }))
-    p:onStylusEvent(bus:set(4, { x = 150, y = 100 }))
+    p:onStylusEvent(bus:set(4, { x = 150, y = 120 }))
     t:check(p.stroke ~= nil, "stroke in flight")
 
     bus:set(0, { id = 1, x = 300, y = 600 })
@@ -783,7 +812,8 @@ t:case("a palm never aborts the pen stroke in flight", function()
     t:eq(p.bar:suppresses{ ges = "tap", pos = { x = 300, y = 600 } }, true, "palm suppressed")
     t:check(p.stroke ~= nil, "stroke survived the palm")
 
-    p:onStylusEvent(bus:set(4, { x = 200, y = 100 }))
+    p:onStylusEvent(bus:set(4, { x = 200, y = 140 }))
+    p:onStylusEvent(bus:set(4, { x = 250, y = 160 }))
     p:onStylusEvent(bus:set(4, { id = -1 }))
     t:eq(p.store:get(1)[1].n, 3, "all three pen points kept")
 end)
@@ -807,7 +837,7 @@ t:case("a pen tap on the toolbar does not release a simultaneous palm", function
     local bus = support.newSlotBus()
     local bar = p.bar.dimen
     p:onStylusEvent(bus:set(4, { id = 4, x = bar.x + 5, y = bar.y + 5, tool = 1 }))
-    t:eq(p.stylus_passthrough, true, "pen latched to passthrough")
+    t:eq(p.stylus_sequence.state, "active_pass", "pen latched to passthrough")
 
     bus:set(0, { id = 1, x = 100, y = 400 })
     p:onStylusTouchFrame(bus:frame(0))
@@ -835,7 +865,8 @@ t:case("stop releases capture and resets both state machines", function()
     t:eq(p.drawing, false, "drawing off")
     t:eq(p.input_backend, nil, "backend cleared")
     t:eq(p.stroke, nil, "stroke aborted")
-    t:eq(p.stylus_active, false, "stylus state reset")
+    t:eq(p:hasActivePhysicalContact(), false, "stylus state reset")
+    t:eq(p.stylus_sequence, nil, "the lease's contact machine went with it")
     t:eq(input.stylus_callback, nil, "callback unregistered")
     t:eq(Capture.active, false, "capture removed")
 end)
@@ -862,7 +893,7 @@ t:case("teardown aborts the in-flight stroke and resets contacts", function()
     p:teardown()
     t:eq(p.stroke, nil, "stroke aborted, not leaked")
     t:eq(p.n_contacts, 0, "contacts reset")
-    t:eq(p.stylus_active, false, "stylus state reset")
+    t:eq(p:hasActivePhysicalContact(), false, "stylus state reset")
     t:eq(p.drawing, false, "drawing off")
     t:eq(input.stylus_callback, nil, "callback unregistered")
 end)
@@ -1055,7 +1086,7 @@ local function pumpFrame(input, bus, slot_specs)
     -- Input:routeStylusEvents: offer every stylus slot, remove the dominated.
     local dominated = {}
     for i, slot in ipairs(mtslots) do
-        if Capture:isStylusSlot(slot, input) then
+        if Capture:isKORoutedStylusSlot(slot, input) then
             -- Core re-reads the callback on each slot; mirror that.
             if input.stylus_callback and input.stylus_callback(input, slot) then
                 dominated[#dominated + 1] = i
@@ -1125,7 +1156,7 @@ t:case("a palm during a pen stroke emits nothing and keeps the stroke", function
 
     pumpFrame(input, bus, { { slot = 4, fields = { id = 4, x = 100, y = 100, tool = 1 } } })
     local palm = pumpFrame(input, bus, {
-        { slot = 4, fields = { x = 150, y = 100 } },
+        { slot = 4, fields = { x = 150, y = 120 } },
         { slot = 0, fields = { id = 1, x = 300, y = 600 } },
     })
     t:eq(palm, 0, "the palm produced no gesture")
@@ -1368,7 +1399,8 @@ t:case("the lift frame only contributes a point when nothing was drawn", functio
     local bus = support.newSlotBus()
 
     pumpFrame(input, bus, { { slot = 4, fields = { id = 4, x = 100, y = 100, tool = 1 } } })
-    pumpFrame(input, bus, { { slot = 4, fields = { x = 200, y = 100 } } })
+    pumpFrame(input, bus, { { slot = 4, fields = { x = 200, y = 120 } } })
+    pumpFrame(input, bus, { { slot = 4, fields = { x = 300, y = 140 } } })
     pumpFrame(input, bus, { { slot = 4, fields = { id = -1, x = 900, y = 900 } } })
 
     t:eq(p.store:get(p:currentPage())[1].n, 2, "the lift position was not appended")
@@ -1390,25 +1422,25 @@ t:case("a dot placed where the last one lifted is not lost", function()
 end)
 
 t:case("an error disarm resets the pen state machine, not just the hooks", function()
-    -- disarmInput has to undo the pen's per-sequence state too. Leaving
-    -- stylus_active set makes the next session's contact-down skip its own
-    -- initialisation, so a stale passthrough latch silently eats the first
-    -- stroke after the error.
+    -- disarmInput has to undo the pen's per-sequence state too. A surviving
+    -- passthrough latch would silently eat the first stroke of the next
+    -- session, and a surviving geometry baseline would measure it against a
+    -- position from a lease that no longer exists.
     local p = drawingPlugin()
     local bus = support.newSlotBus()
     local d = p.bar.dimen
     p:onStylusEvent(bus:set(4, { id = 4, x = d.x + 5, y = d.y + 5, tool = 1 }))
-    t:eq(p.stylus_passthrough, true, "latched over the toolbar mid-sequence")
+    t:eq(p.stylus_sequence.state, "active_pass", "latched over the toolbar mid-sequence")
 
     Capture:fail("boom")
     env.UIManager:flush()
-    t:eq(p.stylus_active, false, "the pen sequence was closed out")
-    t:eq(p.stylus_passthrough, false, "and its latch released")
+    t:eq(p.stylus_sequence, nil, "the pen sequence was closed out")
+    t:eq(p:hasActivePhysicalContact(), false, "and its latch released")
 
     p:setDrawing(true)
     local next_bus = support.newSlotBus()
     p:onStylusEvent(next_bus:set(4, { id = 9, x = 400, y = 400, tool = 1 }))
-    p:onStylusEvent(next_bus:set(4, { x = 450, y = 400 }))
+    p:onStylusEvent(next_bus:set(4, { x = 450, y = 430 }))
     p:onStylusEvent(next_bus:set(4, { id = -1 }))
     t:eq(#p.store:get(p:currentPage()), 1, "the next session's first stroke survives")
 end)
@@ -1463,6 +1495,8 @@ t:case("a contact-down frame carrying the previous stroke's coordinates never in
     p:onStylusEvent(bus:set(4, { x = 140, y = 140 }))
     p:onStylusEvent(bus:set(4, { id = -1 }))
     t:eq(#p.store:get(1), 1, "first stroke committed")
+    -- The lift position is the next contact's baseline, which is what makes
+    -- the sticky pair below detectable at all.
 
     -- New contact, no fresh coordinates: x/y are still 140,140.
     p:onStylusEvent(bus:set(4, { id = 4 }))
@@ -1481,14 +1515,18 @@ t:case("a stale contact-down over the toolbar does not swallow the next stroke",
 
     -- End a stroke by dragging onto the bar, so the lift position is inside it.
     p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 1 }))
+    p:onStylusEvent(bus:set(4, { x = 140, y = 130 }))
     p:onStylusEvent(bus:set(4, { x = bar.x + 5, y = bar.y + 5 }))
     p:onStylusEvent(bus:set(4, { id = -1 }))
 
-    -- Next contact-down repeats those coordinates without meaning to.
+    -- Next contact-down repeats those coordinates without meaning to. Matching
+    -- the baseline on both axes is the one case that proves nothing at all, so
+    -- it neither inks nor hands the contact to the toolbar.
     p:onStylusEvent(bus:set(4, { id = 4 }))
-    t:eq(p.stylus_passthrough, false, "the stale bar position did not latch passthrough")
+    t:eq(p.stylus_sequence.state, "geometry_pending",
+        "the stale bar position did not latch passthrough")
     p:onStylusEvent(bus:set(4, { x = 200, y = 200 }))
-    p:onStylusEvent(bus:set(4, { x = 250, y = 200 }))
+    p:onStylusEvent(bus:set(4, { x = 250, y = 220 }))
     p:onStylusEvent(bus:set(4, { id = -1 }))
     t:eq(#p.store:get(1), 2, "the second stroke was drawn, not lost")
 end)
@@ -1498,11 +1536,11 @@ t:case("a dialog opening mid-stroke stops the ink but keeps the slot", function(
     local bus = support.newSlotBus()
 
     p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 1 }))
-    p:onStylusEvent(bus:set(4, { x = 150, y = 100 }))
+    p:onStylusEvent(bus:set(4, { x = 150, y = 120 }))
     t:check(p.stroke ~= nil, "stroke in flight")
 
     showDialog("a dialog that just opened")
-    t:eq(p:onStylusEvent(bus:set(4, { x = 200, y = 100 })), true,
+    t:eq(p:onStylusEvent(bus:set(4, { x = 200, y = 140 })), true,
          "still dominating: handing the slot back mid-sequence corrupts the detector")
     t:eq(p.stroke, nil, "the stroke was aborted rather than drawn over the dialog")
 
