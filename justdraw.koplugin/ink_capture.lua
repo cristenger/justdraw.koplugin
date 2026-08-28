@@ -58,10 +58,10 @@ local Capture = {
     eraser_by_tool = 0,
 
     -- How many contacts ended without ever proving their geometry: finished as
-    -- a single dot, or discarded with no position at all. The axis policy
-    -- collapses a contact that never moves one axis away from the previous
-    -- boundary (ADR-22), and "my underline came out a dot" is not diagnosable
-    -- from a log without these two numbers.
+    -- a single dot, or discarded with no position at all. A deliberate tap is
+    -- a dot by design and lands in the same count; what these exist for is the
+    -- axis policy's collapse (ADR-22) -- "my underline came out a dot" is not
+    -- diagnosable from a log without them.
     collapsed_dots = 0,
     collapsed_discards = 0,
 }
@@ -246,11 +246,11 @@ end
 --[[--
 A contact ended without ever proving its geometry.
 
-`kind` is "dot" when it still delivered its single lift point (an underline
-that came out a dot -- the collapse a reader will actually report) and
-"discard" when it never had a position to deliver. Counted once per contact by
-the sequence's pending-finish callback; contacts handed to the UI are not
-counted, because a tap ending as a tap is not a collapse.
+`kind` is "dot" when it still delivered its single lift point -- a deliberate
+tap, or the axis collapse a reader will actually report as "my underline came
+out a dot" -- and "discard" when it never had a position to deliver. Counted
+once per contact by the sequence's pending-finish callback; contacts handed to
+the UI are not counted, because the UI's tap is not ink.
 ]]
 function Capture:noteCollapsedContact(kind)
     if kind == "dot" then

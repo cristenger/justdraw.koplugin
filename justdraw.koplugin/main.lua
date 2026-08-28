@@ -1429,10 +1429,12 @@ function JustDraw:diagnosticLines()
         "Erases by held pen button: " .. tostring(r.eraser_by_button)
             .. "   by tool value: " .. tostring(r.eraser_by_tool),
         -- A contact that never proves its geometry finishes as at most a dot
-        -- (ADR-22). "My underline came out a point" is this line being
-        -- non-zero; a hand-drawn stroke wobbles enough that it never is.
-        "Contacts that collapsed to a dot: " .. tostring(r.collapsed_dots)
-            .. "   discarded: " .. tostring(r.collapsed_discards),
+        -- (ADR-22). A deliberate tap lands here by design, so the number is
+        -- "contacts that ended as one dot", not "defects" -- what diagnoses a
+        -- collapsed underline is this growing while the reader wasn't dotting.
+        -- A hand-drawn stroke wobbles enough that it never lands here.
+        "Pen contacts ending as a single dot: " .. tostring(r.collapsed_dots)
+            .. "   with no position: " .. tostring(r.collapsed_discards),
     }
     if r.blocker then lines[#lines + 1] = "" ; lines[#lines + 1] = r.blocker end
     return lines, r
