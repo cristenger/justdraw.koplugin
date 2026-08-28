@@ -545,6 +545,141 @@ return function(ctx)
         t:eq(editor.quality_strokes, 0, "a setting boundary is not a stroke")
     end)
 
+    --[[--
+    A stroke that begins while the cleanup is armed pushes the cleanup back.
+
+    On the Kindle Scribe the cleanup's `partial` is GLR16, which the driver
+    promotes to a FULL update and blocks the process on until the panel is
+    done; the event loop reads no input meanwhile. Fired between two strokes of
+    a word, it eats the start of the second one. So the delay is measured from
+    the last lift of a run, not from each lift: a new contact cancels the armed
+    timer, and the boundary that ends it rearms.
+    ]]
+    t:case("a new contact holds the delayed cleanup until its own lift", function()
+        ctx.reset()
+        local Geom = require("ui/geometry")
+        local transform = {}
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local runtime = { live_fast = true, active_contact = false }
+        local editor, _, _, _, session, _, scheduler = newEditor{
+            transform = transform, cache = cache, runtime = runtime,
+        }
+        local function ink(x, y)
+            editor:onDirty(Geom:new{ x = x, y = y, w = 10, h = 10 },
+                "ink", session, transform, { x = 1, y = 1, w = 10, h = 10 })
+        end
+        -- First stroke: lift arms the delayed cleanup.
+        ink(100, 200)
+        runtime.active_contact = false
+        editor:onEditChanged(session)
+        t:eq(scheduler:pending(), 1, "the first lift arms the cleanup")
+
+        -- Second stroke starts 200 ms later, inside the delay window.
+        scheduler:advance(0.2)
+        runtime.active_contact = true
+        local before = #ctx.env.UIManager.dirty
+        ink(140, 240)
+        t:eq(scheduler:pending(), 0, "a new contact cancels the armed cleanup")
+        t:eq(editor.quality_waiting_for_contact_end, true,
+            "and hands it to the contact latch")
+        scheduler:advance(0.35)
+        t:eq(#ctx.env.UIManager.dirty, before + 1,
+            "only the fast segment refreshed; no partial fired mid-word")
+
+        -- Its lift rearms; the cleanup lands QUALITY_DELAY after *this* lift.
+        runtime.active_contact = false
+        editor:onEditChanged(session)
+        t:eq(scheduler:pending(), 1, "the second lift rearms exactly once")
+        scheduler:advance(0.349)
+        t:eq(ctx.env.UIManager.dirty[#ctx.env.UIManager.dirty][2], "fast",
+            "still nothing but fast ink before the delay")
+        scheduler:advance(0.001)
+        local cleanup = ctx.env.UIManager.dirty[#ctx.env.UIManager.dirty]
+        t:eq(cleanup[2], "partial", "one cleanup after the last lift")
+        t:eq(cleanup[3].x, 100, "covering the first stroke")
+        t:eq(cleanup[3].w, 50, "and the second: nothing was cleaned less, only later")
+        t:eq(editor.quality_strokes, 0, "the accumulator was consumed once")
+    end)
+
+    t:case("a budget-exhausted immediate cleanup is not held", function()
+        ctx.reset()
+        local Geom = require("ui/geometry")
+        local transform = {}
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local runtime = { live_fast = true, active_contact = false }
+        local editor, _, _, _, session, _, scheduler = newEditor{
+            transform = transform, cache = cache, runtime = runtime,
+        }
+        -- Eight completed contacts reach the stroke budget.
+        for i = 1, 8 do
+            editor:onDirty(Geom:new{ x = 100 + i, y = 200, w = 10, h = 10 },
+                "ink", session, transform, { x = 1, y = 1, w = 10, h = 10 })
+            editor:onEditChanged(session)
+        end
+        t:eq(editor.quality_scheduled_kind, "immediate", "the budget armed an immediate")
+        runtime.active_contact = true
+        editor:onDirty(Geom:new{ x = 300, y = 200, w = 10, h = 10 },
+            "ink", session, transform, { x = 1, y = 1, w = 10, h = 10 })
+        t:eq(editor.quality_scheduled_kind, "immediate",
+            "a new contact does not hold a budget-driven cleanup")
+    end)
+
+    --[[--
+    The timing trace is the only thing that can calibrate QUALITY_DELAY: it
+    records the lift-to-lift gap the delay has to beat and the moment the
+    cleanup fires. Off, it costs one nil check; on, one line per event.
+    ]]
+    t:case("the refresh trace records lift, arm, hold and fire with timings", function()
+        ctx.reset()
+        local Geom = require("ui/geometry")
+        local transform = {}
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local runtime = { live_fast = true, active_contact = false }
+        local clock = 10
+        local editor, _, _, _, session, _, scheduler = newEditor{
+            transform = transform, cache = cache, runtime = runtime,
+        }
+        editor.quality_trace = true
+        editor.quality_clock = function() return clock end
+        local lines = {}
+        local logger = require("logger")
+        local real_info = logger.info
+        logger.info = function(...)
+            local parts = {}
+            for i = 1, select("#", ...) do parts[#parts + 1] = tostring(select(i, ...)) end
+            lines[#lines + 1] = table.concat(parts, " ")
+        end
+        local function ink(x, y)
+            editor:onDirty(Geom:new{ x = x, y = y, w = 10, h = 10 },
+                "ink", session, transform, { x = 1, y = 1, w = 10, h = 10 })
+        end
+        ink(100, 200); editor:onEditChanged(session)
+        clock = 10.2; runtime.active_contact = true; ink(140, 240)
+        clock = 10.5; runtime.active_contact = false; editor:onEditChanged(session)
+        scheduler:advance(0.35)
+        logger.info = real_info
+
+        local events = {}
+        for i = 1, #lines do
+            local ev = lines[i]:match("JUSTDRAW%-REFRESH event=(%S+)")
+            if ev then events[#events + 1] = ev end
+        end
+        t:eq(table.concat(events, ","), "lift,arm,hold,lift,arm,fire",
+            "the whole sequence is on the log in order")
+        t:check(lines[4]:find("since_lift=0.500", 1, true) ~= nil,
+            "the second lift carries the lift-to-lift gap: " .. tostring(lines[4]))
+        t:check(lines[6]:find("box=50x50", 1, true) ~= nil,
+            "the fire names the region it cleaned: " .. tostring(lines[6]))
+        for i = 1, #lines do
+            t:check(not lines[i]:find("Notes", 1, true), "no notebook identity leaks")
+        end
+
+        editor.quality_trace = false
+        local n = #lines
+        ink(500, 500); editor:onEditChanged(session)
+        t:eq(#lines, n, "off, the trace writes nothing")
+    end)
+
     t:case("an active-contact timeout latches without reschedule storms", function()
         ctx.reset()
         local Geom = require("ui/geometry")

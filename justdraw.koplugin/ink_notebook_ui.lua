@@ -182,6 +182,12 @@ function NotebookUI:openNotebook(item)
             return self.plugin.notebook_input
                 and self.plugin.notebook_input:hasActiveContact() or false
         end,
+        -- The refresh timing trace rides on the stylus diagnostics: the same
+        -- 60-second window the reader already agreed to, in the same log, so a
+        -- calibration run needs one button and produces one file.
+        quality_trace_enabled = function()
+            return self.plugin:activeStylusTrace("notebook") ~= nil
+        end,
         control_touch_allowed = function()
             return not self.plugin.notebook_input
                 or self.plugin.notebook_input:controlTouchAllowed()

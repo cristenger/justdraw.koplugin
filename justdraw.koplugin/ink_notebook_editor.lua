@@ -15,6 +15,7 @@ local InputDialog = require("ui/widget/inputdialog")
 local Size = require("ui/size")
 local TextWidget = require("ui/widget/textwidget")
 local UIManager = require("ui/uimanager")
+local time = require("ui/time")
 local logger = require("logger")
 local T = require("ffi/util").template
 local _ = require("gettext")
@@ -64,6 +65,8 @@ function Editor:init()
         UIManager:unschedule(action)
     end
     self.show_stylus_diagnostics = self.show_stylus_diagnostics or function() end
+    -- Optional; when absent only an explicit `quality_trace = true` traces.
+    self.quality_trace_enabled = self.quality_trace_enabled
     self.set_rail_side = self.set_rail_side or function() end
     self.show_host_message = self.show_host_message or function(text)
         UIManager:show(InfoMessage:new{ text = text })
@@ -145,10 +148,54 @@ function Editor:_currentSession()
     return self.controller:activeSession()
 end
 
+--[[--
+Timing evidence for calibrating the cleanup against real hardware.
+
+Everything about the cleanup that matters to a reader is a duration this
+process cannot know from source: how long the panel holds the event loop
+during the partial, and how long a hand pauses between strokes of the same
+word. Both decide whether QUALITY_DELAY is right, and neither shows up in
+KOReader's own `refresh:` debug lines, which log the request but not the wait.
+This records what the plugin can see -- the lift, the arm, the hold, the fire
+-- as one line per event on the ordinary logger, off by default. The gap
+between consecutive lifts is the number to tune the delay to; the gap between
+"fire" and whatever event follows it is the panel's cost, because nothing runs
+in this process while the wait ioctl holds.
+
+Scalars only, no allocation past the format call, and nothing that could name
+a notebook.
+]]
+function Editor:_traceQuality(event, extra)
+    if not self.quality_trace
+        and not (self.quality_trace_enabled and self.quality_trace_enabled()) then
+        return
+    end
+    local now = self.quality_clock()
+    local since_lift = self.quality_last_lift_at
+        and (now - self.quality_last_lift_at) or -1
+    local has_union = self:_qualityHasUnion()
+    logger.info(string.format(
+        "JUSTDRAW-REFRESH event=%s t=%.3f since_lift=%.3f strokes=%d union=%dx%d%s",
+        event, now, since_lift, self.quality_strokes or 0,
+        has_union and (self.quality_max_x - self.quality_min_x) or 0,
+        has_union and (self.quality_max_y - self.quality_min_y) or 0,
+        extra or ""))
+end
+
 function Editor:_initQualityRefresh()
     self.quality_generation = 0
     self.quality_scheduled_kind = nil
     self.quality_scheduled_generation = nil
+    -- Off unless a caller turns it on; one nil check per event when off.
+    self.quality_trace = self.quality_trace or false
+    -- Seconds as a plain number. time.now() is fts-encoded on the device and a
+    -- plain number in the test harness; to_s exists only on the former.
+    self.quality_clock = self.quality_clock or function()
+        local now = time.now()
+        if time.to_s then return time.to_s(now) end
+        return now
+    end
+    self.quality_last_lift_at = nil
     self.quality_live_fast = self.get_live_fast() ~= false
     self.quality_action = function()
         local generation = self.quality_scheduled_generation
@@ -408,8 +455,37 @@ function Editor:_runQualityRefresh(generation)
         return
     end
     local box = self:_qualityBox()
+    self:_traceQuality("fire", string.format(" box=%dx%d", box.w, box.h))
     self:_resetQualityRefresh()
     UIManager:setDirty(nil, "partial", box)
+end
+
+--[[--
+A new contact while the delayed cleanup is armed pushes the cleanup back.
+
+The cleanup is a `partial`, and on the Kindle Scribe a partial is GLR16 --
+which the driver promotes to a FULL update and then blocks the whole process
+on MXCFB_WAIT_FOR_UPDATE_COMPLETE for. The event loop does not read input
+while that ioctl holds, so a cleanup that fires between two strokes of a word
+costs the reader the start of the next stroke: a flicker, and a glass that
+does not answer until the panel is done.
+
+Armed on the lift, the timer used to fire QUALITY_DELAY later whatever the pen
+was doing by then. Now a contact that begins while it is armed cancels it and
+hands ownership to the contact latch, so the boundary that ends *that*
+contact rearms it. The cleanup lands QUALITY_DELAY after the last lift of a
+run of strokes instead of QUALITY_DELAY after each one. The union keeps
+accumulating throughout, so nothing is cleaned less -- only later, once.
+
+Only the delayed kind is held. An "immediate" cleanup was armed because the
+budget is exhausted; that one has to land.
+]]
+function Editor:_holdQualityForContact()
+    if self.quality_scheduled_kind ~= "delayed" then return false end
+    self:_cancelQualityAction()
+    self.quality_waiting_for_contact_end = true
+    self:_traceQuality("hold")
+    return true
 end
 
 function Editor:_qualityCovered()
@@ -545,12 +621,16 @@ function Editor:_qualityContactBoundary(session)
         self.quality_contact_had_fast_dirty = false
     end
     self.quality_waiting_for_contact_end = false
+    self:_traceQuality("lift")
+    self.quality_last_lift_at = self.quality_clock()
     if Stack.visualAbove(self) then
         self:_qualityCovered()
         return
     end
-    self:_scheduleQualityAction(self:_qualityBudgetReached()
-        and "immediate" or "delayed", completed or was_waiting)
+    local kind = self:_qualityBudgetReached() and "immediate" or "delayed"
+    if self:_scheduleQualityAction(kind, completed or was_waiting) then
+        self:_traceQuality("arm", " kind=" .. kind)
+    end
 end
 
 --[[--
@@ -911,6 +991,7 @@ function Editor:onDirty(screen_box, kind, session, transform, source_box)
         -- Passing nil schedules only the panel update; repainting Editor here
         -- would redraw the full page and controls for every pen segment.
         UIManager:setDirty(nil, "fast", exact_box)
+        self:_holdQualityForContact()
         if self:_accumulateQualityBox(exact_box, session, transform, cache)
             and self:_qualityBudgetReached() then
             self:_scheduleQualityAction("immediate")
