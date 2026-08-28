@@ -180,6 +180,10 @@ function support.newInput(opts)
         main_finger_slot = 0,
         pen_slot = 4,
         wacom_protocol = opts.wacom_protocol or false,
+        -- Input's own persistent slot table. It outlives every capture, which
+        -- is why a contact-down frame can present the previous contact's
+        -- position and why the geometry policy seeds its boundary from here.
+        ev_slots = opts.ev_slots or {},
     }
     if opts.exports ~= false then
         input.TOOL_TYPE_FINGER = 0

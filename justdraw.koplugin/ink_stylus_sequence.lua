@@ -102,6 +102,7 @@ function Sequence.new(spec)
         geometry_observe = geometry.observe,
         geometry_on_lift = geometry.onLift,
         geometry_reset = geometry.reset,
+        geometry_note = geometry.note,
 
         classify = spec.classify or blockCallback,
         on_contact_start = spec.on_contact_start or trueCallback,
@@ -234,10 +235,16 @@ survive them intact.
 function Sequence:_traceForeign(delivery, decision, reason,
         slot, id, tool, x, y, timev)
     if not self.trace then return end
-    local previous = self.last_delivery
+    local delivery_before = self.last_delivery
+    local t_slot, t_id, t_tool = self.trace_slot, self.trace_id, self.trace_tool
+    local t_active = self.trace_contact_active
+    local t_x, t_y, t_timev = self.trace_x, self.trace_y, self.trace_timev
     self:_traceResult(delivery, decision, reason, self.state,
         slot, id, tool, x, y, timev)
-    self.last_delivery = previous
+    self.last_delivery = delivery_before
+    self.trace_slot, self.trace_id, self.trace_tool = t_slot, t_id, t_tool
+    self.trace_contact_active = t_active
+    self.trace_x, self.trace_y, self.trace_timev = t_x, t_y, t_timev
 end
 
 --[[--
@@ -291,6 +298,20 @@ function Sequence:_domainError(reason, phase)
         self.pending_domain_reason = reason or (phase .. "_failed")
         self.pending_domain_phase = phase
     end
+end
+
+--[[--
+Tell the policy where the owner's slot is, on every frame of its contact.
+
+A contact that latched into pass, block or suspended never reaches
+`_observeGeometry` again, so without this the policy's idea of "the last place
+the pen was" stops at whatever sample happened to be the last one it judged --
+and that frozen point becomes the next contact's trusted boundary while the
+slot itself keeps moving to the real lift position. The next stale
+contact-down then looks fresh on both axes and paints a line to it.
+]]
+function Sequence:_noteGeometry(x, y)
+    if self.geometry_note then self.geometry_note(self.geometry, x, y) end
 end
 
 function Sequence:_resetGeometry(clear_history)
@@ -706,6 +727,11 @@ function Sequence:feed(slot)
             id < 0 and "foreign_lift" or "foreign_slot", before,
             slot_number, id, tool, x, y, timev)
     end
+
+    -- Every frame of the owner's contact, whatever this sequence decides to do
+    -- with it. Only the trusted pen reaches here, so only the trusted pen ever
+    -- moves the boundary.
+    self:_noteGeometry(x, y)
 
     if self.state == "proximity_wait" then
         if id < 0 then

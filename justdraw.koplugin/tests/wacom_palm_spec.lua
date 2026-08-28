@@ -266,16 +266,19 @@ return function(ctx)
         t:eq(g:isAccepted(), false, "nothing was accepted")
     end)
 
-    t:case("one fresh axis may route but may never draw", function()
+    t:case("a half-fresh pair decides nothing at all", function()
+        -- It is a fresh axis wearing the previous contact's other one: a
+        -- position that never existed. Routing from it would hand a stroke to
+        -- whoever owns the region its stale axis points at.
         local g = Geometry.new()
         g:observe(405, 894)
         g:reset(false)
         local status, x, y, why = g:observe(1594, 894)
-        t:eq(status, "route", "enough to say whose contact this is")
-        t:eq(x, 1594, "reporting the pair it was asked about")
-        t:eq(y, 894, "including the axis it does not trust")
-        t:eq(why, "axis_y_pending", "and naming the one still unproven")
-        t:eq(g:isAccepted(), false, "but it is not a point")
+        t:eq(status, "pending", "refused for every purpose")
+        t:eq(x, nil, "with no pair offered")
+        t:eq(y, nil, "on either axis")
+        t:eq(why, "axis_y_pending", "naming the one still unproven")
+        t:eq(g:isAccepted(), false, "and certainly not a point")
 
         status, x, y = g:observe(1594, 1070)
         t:eq(status, "accept", "both axes have now moved")
@@ -287,11 +290,39 @@ return function(ctx)
         local g = Geometry.new()
         g:observe(758, 1309)
         g:reset(false)
-        t:eq(g:observe(758, 660), "route", "y moved first")
+        t:eq(g:observe(758, 660), "pending", "y moved first, x is still stale")
         local status, x, y = g:observe(1676, 660)
         t:eq(status, "accept", "x completed the pair")
         t:eq(x, 1676, "at the real position")
         t:eq(y, 660, "on both axes")
+    end)
+
+    t:case("a seeded boundary spares the first contact of a lease", function()
+        -- Without one, the first pair of every lease is unproven and the
+        -- contact spends a frame proving where it is. The slot already knows.
+        local g = Geometry.new(400, 900)
+        local bx, by = g:baseline()
+        t:eq(bx, 400, "the seed is the boundary")
+        t:eq(by, 900, "on both axes")
+        t:eq(g:observe(700, 300), "accept", "so the first real pair is a point")
+
+        local unseeded = Geometry.new(nil, 900)
+        t:eq(unseeded:baseline(), nil, "half a seed is no seed")
+    end)
+
+    t:case("a latched contact keeps the boundary moving with the slot", function()
+        -- InkStylusSequence stops asking once a contact is passed, blocked or
+        -- suspended. If the boundary froze there, the next contact-down would
+        -- look fresh against a position the pen left long ago, and paint a
+        -- line to it -- which is the defect this module exists to remove.
+        local g = Geometry.new(10, 10)
+        g:observe(200, 300)
+        g:note(900, 900)
+        g:reset(false)
+        local bx, by = g:baseline()
+        t:eq(bx, 900, "the boundary is where the slot actually ended")
+        t:eq(by, 900, "on both axes")
+        t:eq(g:observe(900, 900), "pending", "so the sticky pair is still sticky")
     end)
 
     t:case("a repeated position may route once the contact is under way", function()
@@ -580,6 +611,22 @@ return function(ctx)
             "the hand landed on the ink and it is still there")
     end)
 
+    t:case("a hover on a palm-tooled slot invents no contact", function()
+        ctx.reset{ wacom_protocol = true }
+        local input = Device.input
+        Capture:resolveTools(input)
+        local session, adapter, spec, counters = notebookFixture()
+
+        -- A slot that has never carried a tracking id, already reporting the
+        -- eraser's tool number. Counting it would create a contact with
+        -- nothing on the glass, and then publish a boundary for a contact that
+        -- never began -- which now drives a rail rebuild.
+        spec.stylus_handler{ slot = 0, x = 300, y = 900, tool = 2 }
+        t:eq(adapter:hasActiveContact(session), false, "nothing is on the glass")
+        spec.frame_handler({})
+        t:eq(#counters.ends, 0, "so no boundary was published for it")
+    end)
+
     t:case("a palm burst does no host work and does not grow", function()
         ctx.reset{ wacom_protocol = true }
         local input = Device.input
@@ -773,6 +820,119 @@ return function(ctx)
                 end
             end
         end
+    end)
+
+    t:case("a lease starts from where the pen slot already is", function()
+        -- Input's slot table outlives every capture, so the pen has a position
+        -- before drawing is switched on. Reading it once is what spares the
+        -- session's first contact from proving where it is the slow way.
+        local p, input = penPlugin()
+        p:setDrawing(false)
+        input.ev_slots[Replays.PEN_SLOT] =
+            { slot = Replays.PEN_SLOT, id = -1, x = 900, y = 950, tool = 1 }
+        local seed_x, seed_y = Capture:penSlotPosition(input)
+        t:eq(seed_x, 900, "capture can read the slot's position")
+        t:eq(seed_y, 950, "on both axes")
+
+        p:setDrawing(true)
+        local bx, by = p.stylus_geometry:baseline()
+        t:eq(bx, 900, "and the lease begins with it as the boundary")
+        t:eq(by, 950, "on both axes")
+
+        local replay = Replay.new{ input = input, capture = Capture }
+        replay:set(Replays.PEN_SLOT, { id = 1, x = 300, y = 400, tool = 1 })
+        replay:syn()
+        t:check(p.stroke ~= nil, "so the first sample of the session draws")
+        t:eq(p.stroke and p.stroke[1], 300, "at the real x")
+
+        -- And a slot table that says nothing leaves the boundary unseeded,
+        -- which is the old, slower, still-correct behaviour.
+        t:eq(Capture:penSlotPosition({ pen_slot = 4, ev_slots = { [4] = {} } }), nil,
+            "an empty slot seeds nothing")
+        t:eq(Capture:penSlotPosition({ pen_slot = 4 }), nil, "nor does a missing table")
+        t:eq(Capture:penSlotPosition({ ev_slots = {} }), nil, "nor a missing pen slot")
+    end)
+
+    t:case("a contact that never drew still moves the trusted boundary", function()
+        -- The sequence stops consulting the geometry once a contact is
+        -- suspended, but the pen keeps travelling and the slot keeps tracking
+        -- it. If the boundary froze at the last judged sample, the next
+        -- contact-down would look fresh on both axes against a position the
+        -- pen left long ago -- and paint a line all the way to it.
+        local p, input = penPlugin()
+        local bar = p.bar.dimen
+        local replay = Replay.new{ input = input, capture = Capture }
+
+        replay:set(4, { id = 1, x = 100, y = 100, tool = 1 })
+        replay:syn()
+        replay:set(4, { x = 200, y = 220 })
+        replay:syn()
+        replay:set(4, { x = bar.x + 5, y = bar.y + 5 })
+        replay:syn()
+        replay:set(4, { x = bar.x + 30, y = bar.y + 60 })
+        replay:syn()
+        replay:set(4, { id = -1 })
+        replay:syn()
+
+        -- The next contact-down carries no ABS update at all, so it presents
+        -- exactly where the pen left.
+        replay:set(4, { id = 2, tool = 1 })
+        replay:syn()
+        t:eq(p.stroke, nil, "the sticky pair started nothing")
+        replay:set(4, { x = 300, y = 700 })
+        replay:syn()
+
+        local stroke = p.stroke
+        t:check(stroke ~= nil, "the first real sample starts the stroke")
+        t:eq(stroke and stroke[1], 300, "at the real x")
+        t:eq(stroke and stroke[2], 700, "and the real y")
+        t:eq(stroke and stroke.n, 1, "with no segment from the previous contact")
+    end)
+
+    t:case("a half-fresh pair cannot hand a page stroke to the reader", function()
+        -- A fresh axis paired with the previous contact's other one is a
+        -- position that never existed. Deciding from it sends the stroke to
+        -- whoever owns the region the stale axis points at -- here the
+        -- toolbar, which would turn the pen's stroke into a swipe.
+        local p, input = penPlugin()
+        local bar = p.bar.dimen
+        local replay = Replay.new{ input = input, capture = Capture }
+
+        replay:set(4, { id = 1, x = bar.x + 5, y = bar.y + 5, tool = 1 })
+        replay:syn()
+        replay:set(4, { x = bar.x + 5, y = bar.y + 5 })
+        replay:syn()
+        replay:set(4, { id = -1 })
+        replay:syn()
+
+        replay:set(4, { id = 2, tool = 1 })
+        replay:syn()
+        replay:set(4, { y = 300 })
+        replay:syn()
+        t:eq(p.stylus_sequence.state, "geometry_pending",
+            "the half-fresh pair handed nothing over")
+        t:eq(p.stroke, nil, "and drew nothing")
+
+        replay:set(4, { x = 400 })
+        replay:syn()
+        t:check(p.stroke ~= nil, "the coherent pair draws on the page")
+        t:eq(p.stroke and p.stroke[1], 400, "at the real x")
+        t:eq(p.stroke and p.stroke[2], 300, "and the real y")
+    end)
+
+    t:case("a palm whose tool reverts is not handed back to the detector", function()
+        -- The route drops the contact when the hand is promoted. Returning the
+        -- whole frame afterwards gave it straight back one frame later, hold
+        -- timer included, and a dialog latching passthrough would then let the
+        -- palm's tap through to the dialog.
+        local p, input = penPlugin()
+        local gd = input.gesture_detector
+        local replay = Replay.new{ input = input, capture = Capture }
+
+        play(replay, Replays.palm_reverts_before_lift())
+        t:eq(gd:getContact(0), nil, "no detector contact survives the hand")
+        t:eq(p.n_contacts, 0, "and it is not counted as touch")
+        t:eq(p:hasActivePhysicalContact(), false, "the glass is clear")
     end)
 
     t:case("the physical eraser still reaches the page", function()

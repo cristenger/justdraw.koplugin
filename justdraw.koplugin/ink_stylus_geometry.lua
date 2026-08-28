@@ -43,11 +43,20 @@ local function finiteNumber(value)
     return number
 end
 
-function Geometry.new()
+--[[--
+`base_x`/`base_y` seed the trusted boundary from where the pen slot already is.
+
+A lease that starts with no baseline has to treat its first coordinate pair as
+unproven, because the slot may hold a position from before the capture existed.
+Reading that position once, at build time, is what removes the guess.
+]]
+function Geometry.new(base_x, base_y)
+    base_x, base_y = finiteNumber(base_x), finiteNumber(base_y)
+    if base_x == nil or base_y == nil then base_x, base_y = nil, nil end
     return setmetatable({
         -- The last trusted pen boundary. Survives a contact, not a lease.
-        base_x = nil,
-        base_y = nil,
+        base_x = base_x,
+        base_y = base_y,
         -- The last finite pair of the contact in progress.
         last_x = nil,
         last_y = nil,
@@ -65,18 +74,21 @@ recorded in, and the reason this runs before rotation.
 Three answers, because "may I draw from this?" and "may I decide who this
 contact belongs to?" are not the same question:
 
-  * "accept", x, y -- both axes have moved. Coherent; may become ink.
-  * "route", x, y  -- at least one axis has moved, so the pair is not wholly
-    the previous contact's, but the other axis may still be. Good enough to
-    hand the contact to somebody else, never good enough to draw.
-  * "pending"      -- every axis still matches the last trusted boundary. This
-    is the stale contact-down frame; it means nothing at all.
+  * "accept", x, y -- both axes have moved away from the boundary. Coherent,
+    and the only answer that may become ink.
+  * "route", x, y  -- a pair the device really reported together, but which
+    nothing proves is fresh. Enough to say whose contact this is, never enough
+    to draw. Two taps running on the same rail button are this: without it the
+    second would be dominated to its lift and then discarded, because
+    forwarding a lone lift for a contact GestureDetector never opened produces
+    no tap -- and the toolbar is the only way out of a drawing session.
+  * "pending"      -- exactly one axis has moved. Nothing may be decided here.
 
-Dropping "route" would be tidier and wrong. A pen tap whose position happens to
-share one axis with the previous contact -- two taps in a row on the same rail
-button, or the first contact of a session -- would then be dominated all the
-way to its lift and discarded, and the toolbar is the only way out of a
-drawing session.
+The asymmetry is the whole rule. A stale pair is *old*, which makes it a poor
+guess and a safe one: it names a place the pen really was. A half-fresh pair is
+*wrong* -- a fresh axis wearing the previous contact's other one, a position
+that never existed -- and routing from it hands whole strokes to whoever owns
+the region its stale axis points at.
 ]]
 function Geometry:observe(x, y)
     self.last_x, self.last_y = x, y
@@ -98,15 +110,31 @@ function Geometry:observe(x, y)
         self.accepted = true
         return "accept", x, y, "accepted"
     end
-    if self.x_fresh then return "route", x, y, "axis_y_pending" end
-    if self.y_fresh then return "route", x, y, "axis_x_pending" end
-    -- Both axes still match the boundary. Only the frame that *opens* a
-    -- contact can be the sticky pair, because it is the one BTN_TOUCH can
-    -- reach without any ABS update; if the same position survives into a later
-    -- frame of the same contact, the pen really is there. Enough to hand the
-    -- contact over -- two taps running on one button -- never enough to draw.
+    if self.x_fresh then return "pending", nil, nil, "axis_y_pending" end
+    if self.y_fresh then return "pending", nil, nil, "axis_x_pending" end
+    -- Neither axis moved, so this is the boundary position itself. Only the
+    -- frame that *opens* a contact can present it without the pen being there,
+    -- because it is the one BTN_TOUCH reaches without any ABS update; once the
+    -- same position survives into a later frame, the pen really is there.
     if self.observations > 1 then return "route", x, y, "axis_both_pending" end
     return "pending", nil, nil, "axis_both_pending"
+end
+
+--[[--
+Record where the slot says it is, without asking anything of it.
+
+InkStylusSequence stops consulting the policy once a contact has latched into
+pass, block or suspended -- there is nothing left to decide. The slot keeps
+moving, though, and the position it ends at is exactly the one the *next*
+contact-down presents if it presents stale data. Freezing the boundary at the
+last sample the policy happened to judge is how the cross-stroke connector this
+module exists to remove came back, through a contact that never drew.
+]]
+function Geometry:note(x, y)
+    x, y = finiteNumber(x), finiteNumber(y)
+    if x == nil or y == nil then return false end
+    self.last_x, self.last_y = x, y
+    return true
 end
 
 --[[--

@@ -565,7 +565,11 @@ function Adapter:_stylus(slot)
             if reason == "palm_lift" then
                 self:_maybeEmitPhysicalContactEnd("palm_lift", self.active_session)
                 self:_maybeEmitEditChanged()
-            else
+            elseif reason ~= "wacom_non_pen" then
+                -- `wacom_non_pen` is a slot that has never carried a tracking
+                -- id. Counting it would invent a contact with nothing on the
+                -- glass, and then publish a boundary for it when it never
+                -- began.
                 self:_markPhysicalContact()
             end
             return true
@@ -719,7 +723,7 @@ lease outlive the thing it was built for.
 ]]
 function Adapter:_buildStylusMachine(input)
     self.capture_input = input
-    self.geometry = StylusGeometry.new()
+    self.geometry = StylusGeometry.new(Capture:penSlotPosition(input))
     self.palm_gate = PalmGate.new{
         classify = function(slot) return Capture:physicalSlotRole(slot, input) end,
         retire_touch = function(slot_number) self:_retireTouchSlot(slot_number) end,

@@ -916,7 +916,7 @@ Scribe palm is.
 ]]
 function JustDraw:buildStylusMachine(input)
     self.capture_input = input
-    self.stylus_geometry = StylusGeometry.new()
+    self.stylus_geometry = StylusGeometry.new(Capture:penSlotPosition(input))
     self.palm_gate = PalmGate.new{
         classify = function(slot) return Capture:physicalSlotRole(slot, input) end,
         retire_touch = function(slot_number) self:retireTouchSlot(slot_number) end,
@@ -1473,12 +1473,17 @@ function JustDraw:onStylusTouchFrame(slots)
 
     local gate = self.palm_gate
     local input = self.capture_input
+    -- A promoted palm has to be withheld from the frame, not merely excluded
+    -- from the contact count. Returning the whole frame gave the detector back
+    -- the contact this route had just dropped, one frame later, hold timer and
+    -- all -- and while a dialog latches passthrough, that palm's tap reaches
+    -- the dialog. Everything else travels exactly as it always did; ADR-13
+    -- still decides per gesture at the widget layer.
+    local kept = {}
     for i = 1, #slots do
         local ev = slots[i]
-        -- A promoted palm is nobody's contact: it was retired from this ledger
-        -- when it was promoted and it must not re-enter here under a finger
-        -- tool. A trusted pen slot handed back to the UI is not touch either.
         local palm = gate ~= nil and gate:filterResidual(ev)
+        if not palm then kept[#kept + 1] = ev end
         if not palm
             and Capture:physicalSlotRole(ev, input) ~= "trusted_stylus" then
             local slot = ev.slot or 0
@@ -1516,7 +1521,7 @@ function JustDraw:onStylusTouchFrame(slots)
     end
 
     self:afterStylusFrame()
-    return true
+    return kept
 end
 
 -- --------------------------------------------------------- canvas routing

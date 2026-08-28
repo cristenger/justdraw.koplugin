@@ -583,7 +583,17 @@ function Editor:onPhysicalContactEnd(session)
     if self.closed or session ~= self:_currentSession() then return end
     -- Unconditional: the e-ink quality pass has its own bookkeeping and may
     -- have nothing to do, but the rail's capability always has to catch up.
-    self:_refreshActionAvailability()
+    --
+    -- Guarded because this now runs on every contact end, and a contact end is
+    -- reached from inside KOReader's bare stylus callback. Nothing between
+    -- there and the input loop is protected except InkCapture's own pcall, so
+    -- a raise while rebuilding a Button would disarm the whole capture and
+    -- turn a rail-rendering bug into "drawing stopped after an input error".
+    local refreshed, refresh_err = pcall(self._refreshActionAvailability, self)
+    if not refreshed then
+        logger.err("JustDraw notebooks: rail capability refresh failed:",
+            refresh_err)
+    end
     if not self.quality_waiting_for_contact_end then return end
     self:_syncQualitySetting(session)
     if self.quality_waiting_for_contact_end then

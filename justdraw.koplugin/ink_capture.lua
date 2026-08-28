@@ -158,6 +158,31 @@ function Capture:physicalSlotRole(slot, input)
 end
 
 --[[--
+Where the pen slot already is, according to Input's own persistent slot table.
+
+A lease that starts knowing nothing has to treat its first coordinate pair as
+unproven, because `ev_slots` outlives every capture and the pen may have been
+somewhere else entirely before drawing was switched on. One read at install
+time replaces that guess with the answer.
+
+Defensive throughout: `ev_slots` is Input's own bookkeeping rather than a
+documented contract, so anything unexpected returns nothing and the geometry
+policy falls back to proving the first contact the slow way.
+]]
+function Capture:penSlotPosition(input)
+    input = input or self.input or Device.input
+    local pen_slot = input and input.pen_slot
+    if pen_slot == nil then return nil end
+    local slots = input.ev_slots
+    if type(slots) ~= "table" then return nil end
+    local slot = slots[pen_slot]
+    if type(slot) ~= "table" then return nil end
+    local x, y = tonumber(slot.x), tonumber(slot.y)
+    if x == nil or y == nil then return nil end
+    return x, y
+end
+
+--[[--
 Whether the stylus backend may be installed over this Input at all.
 
 A Wacom runtime that does not say which slot is the pen cannot be told apart
