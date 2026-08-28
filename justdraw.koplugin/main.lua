@@ -554,6 +554,34 @@ end
 --- stroke is read, written or moved.
 function JustDraw:onDocumentRerendered()
     if self.session then self.session:invalidate() end
+    self:abandonBlindContact("document_rerendered")
+end
+
+--[[--
+The capture just went blind, and whatever is on the glass will never report its
+lift.
+
+`Input:inhibitInput` swaps `handleTouchEv` for a sink and drops KOReader's own
+contacts, and `routeStylusEvents` is called from inside that handler
+(input.lua @ 60ce80ed) -- so between the swap and its restore no frame reaches
+either route, the lift included. A re-render is the one such window that can
+open while someone is drawing: readerrolling inhibits input, re-renders, and
+broadcasts `DocumentRerendered` from inside the blind stretch.
+
+On Wacom a missing lift is worse than a missing sample. The pen's tracking id
+is pinned to `pen_slot` for every contact and only ever changes to -1 on the
+lift, so with the lift gone nothing distinguishes the next contact-down from
+the next sample of the stroke we were drawing, and the two would be joined by a
+line neither of them drew. Ending the contact here is the only thing that keeps
+them apart. The geometry history goes with it: a boundary from before the blind
+window names a place the pen may have left long ago.
+]]
+function JustDraw:abandonBlindContact(reason)
+    local sequence = self.stylus_sequence
+    if sequence then sequence:abort(reason, true) end
+    if self.palm_gate then self.palm_gate:reset() end
+    self:abortStroke()
+    self:resetContacts()
 end
 
 --- The asynchronous page index has caught up with the current layout. Session
@@ -896,9 +924,10 @@ function JustDraw:resetContacts()
     self.n_contacts = 0
     self.passthrough = false
     self.draw_slot = nil
-    -- Every caller reaches this only after capture has been released or made
-    -- inert. The frame wrapper cannot observe later physical lifts, so contact
-    -- ownership ends with the lease and reused slots must start unclassified.
+    -- Callers reach this with capture released, made inert, or -- in
+    -- abandonBlindContact -- still installed but unable to see a lift. In all
+    -- three the frame wrapper cannot observe the physical lifts that are still
+    -- owed, so ownership ends here and reused slots start unclassified.
     if self.router then self.router:reset() end
 end
 

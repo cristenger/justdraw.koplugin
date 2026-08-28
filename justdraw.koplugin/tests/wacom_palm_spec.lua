@@ -442,6 +442,42 @@ return function(ctx)
         t:eq(last.first, true, "as a new stroke, not as a segment")
     end)
 
+    --[[--
+    The lift is the only thing separating two pen contacts on Wacom.
+
+    KOReader writes `pen_slot` into the pen's id on BTN_TOUCH down and -1 on the
+    lift, and nothing else ever changes it, so `replacement_id` can never fire
+    for a Scribe pen. This asserts the two halves of that: with the lift, two
+    strokes; without it, the second contact is silently appended to the first --
+    which is what makes a blind window (Input:inhibitInput) able to draw a line
+    across a page, and why the hosts end the contact themselves when one opens.
+    ]]
+    t:case("a pinned pen id separates contacts only by the lift", function()
+        local sequence, log = penHarness()
+        local replay = Replay.new{ mode = "unit", sequence = sequence }
+        play(replay, Replays.pen_id_pinned_across_contacts())
+        t:eq(log.starts, 2, "two physical contacts")
+        t:eq(log.ends, 2, "two boundaries")
+        t:eq(#log.points, 3, "three points across the two")
+        t:eq(log.points[1].first, true, "the first contact starts a stroke")
+        t:eq(log.points[2].first, true,
+            "and so does the second: the boundary the first left behind is far "
+                .. "enough away to prove the new position on both axes at once")
+        t:eq(log.points[2].x, 900, "where the pen actually came back down")
+        t:eq(log.points[3].first, false, "its next sample continues that stroke")
+
+        -- The same frames with the lift removed, which is exactly what a blind
+        -- window leaves behind.
+        local blind, blind_log = penHarness()
+        local blind_replay = Replay.new{ mode = "unit", sequence = blind }
+        local frames = Replays.pen_id_pinned_across_contacts()
+        table.remove(frames, 3)
+        play(blind_replay, frames)
+        t:eq(blind_log.starts, 1, "without it there is only ever one contact")
+        t:eq(blind_log.points[#blind_log.points].first, false,
+            "and the second contact's position is appended to the first stroke")
+    end)
+
     t:case("the recorded X-then-Y sequence draws no L", function()
         local sequence, log = penHarness()
         local replay = Replay.new{ mode = "unit", sequence = sequence }

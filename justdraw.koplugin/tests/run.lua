@@ -552,6 +552,72 @@ t:case("pen down, move and lift produce exactly one stroke", function()
     t:eq(list and list[1].n, 2, "two points recorded")
 end)
 
+--[[--
+The blind window a re-render opens, and why a lost lift is worse on Wacom.
+
+`Input:inhibitInput(true)` swaps `handleTouchEv` for a sink, and
+`routeStylusEvents` is called from inside it, so no frame reaches this route at
+all while it holds -- the lift included. readerrolling opens exactly such a
+window around a re-render and broadcasts `DocumentRerendered` from inside it.
+
+The pen's tracking id is pinned: KOReader writes `pen_slot` on BTN_TOUCH down
+and -1 on lift, and nothing else, so two consecutive contacts are the same slot
+carrying the same id. With the lift gone there is nothing left to tell them
+apart, and the next contact-down would be appended to the stroke that was
+already open -- one line straight across the page.
+]]
+t:case("a re-render ends the contact the capture can no longer see lift", function()
+    local p = drawingPlugin()
+    local bus = support.newSlotBus()
+
+    p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 1 }))
+    p:onStylusEvent(bus:set(4, { x = 200, y = 140 }))
+    t:eq(p:hasActivePhysicalContact(), true, "a contact is open")
+
+    p:onDocumentRerendered()
+    t:eq(p:hasActivePhysicalContact(), false,
+        "the contact ends with the frames that would have closed it")
+    t:eq(p.stroke, nil, "and the stroke in flight is dropped, not left dangling")
+    t:eq(p.store:get(1), nil, "nothing partial reached the store")
+
+    -- The same slot and the same pinned id, which is all a Scribe ever sends.
+    -- The boundary went with the contact, deliberately: a coordinate from
+    -- before the window names a place the pen may have left long ago. So this
+    -- contact proves where it is the way a lease's first one does, and its ink
+    -- starts at the first pair it can trust -- one dot's worth of caution in
+    -- exchange for never drawing a line the pen did not.
+    p:onStylusEvent(bus:set(4, { id = 4, x = 900, y = 900, tool = 1 }))
+    p:onStylusEvent(bus:set(4, { x = 950, y = 960 }))
+    p:onStylusEvent(bus:set(4, { x = 980, y = 990 }))
+    p:onStylusEvent(bus:set(4, { id = -1 }))
+
+    local list = p.store:get(1)
+    t:eq(list and #list, 1, "the contact after the window is its own stroke")
+    t:eq(list and list[1].n, 2, "carrying only points from after the window")
+    t:eq(list and list[1][1], 950, "starting at the first pair it could trust")
+    t:eq(list and list[1][2], 960, "on both axes")
+    t:check(list and list[1][1] ~= 200 and list[1][2] ~= 140,
+        "and nowhere near where the abandoned contact was")
+end)
+
+t:case("a re-render with nothing on the glass changes nothing", function()
+    local p = drawingPlugin()
+    local bus = support.newSlotBus()
+    p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 1 }))
+    p:onStylusEvent(bus:set(4, { x = 200, y = 140 }))
+    p:onStylusEvent(bus:set(4, { id = -1 }))
+    t:eq(#p.store:get(1), 1, "one stroke stored")
+
+    p:onDocumentRerendered()
+    t:eq(#p.store:get(1), 1, "the stored stroke is untouched")
+    t:eq(p:hasActivePhysicalContact(), false, "and nothing is owed a lift")
+
+    p:onStylusEvent(bus:set(4, { id = 4, x = 300, y = 300, tool = 1 }))
+    p:onStylusEvent(bus:set(4, { x = 400, y = 380 }))
+    p:onStylusEvent(bus:set(4, { id = -1 }))
+    t:eq(#p.store:get(1), 2, "and the route still works afterwards")
+end)
+
 t:case("an over-budget direct stroke is repaired and owns through lift", function()
     local p = drawingPlugin{ max_open_points = 2 }
     local bus = support.newSlotBus()

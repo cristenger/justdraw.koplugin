@@ -14,6 +14,16 @@ a later addition cannot quietly widen what this module carries.
 Each fixture is a list of SYN frames; each frame is a list of
 `{ slot = n, fields = { ... } }` entries naming only the fields that changed,
 because that is exactly how KOReader's persistent `ev_slots` behaves.
+
+One caveat about the pen's `id`. KOReader's Wacom branch pins it: BTN_TOUCH
+down writes `pen_slot` into the slot and the lift writes -1, and nothing else
+touches it (`input.lua @ 60ce80ed`, handleKeyBoardEv). The fixtures below give
+consecutive pen contacts different positive ids, which is either the scaled
+tablet's own ABS_MT_TRACKING_ID arriving through handleTouchEv or an artifact
+of how the recording was transcribed -- the log that would settle it is not
+kept here. Either way **no test may depend on the pen's id changing between
+contacts**: `pen_id_pinned_across_contacts` is the shape that is certainly
+real, and the lift is the only separator it has.
 ]]
 
 local Replays = {}
@@ -163,6 +173,26 @@ function Replays.palm_reverts_before_lift()
         { { slot = 0, fields = { x = 305, y = 908, tool = 2 } } },
         { { slot = 0, fields = { x = 310, y = 915, tool = 0 } } },
         { { slot = 0, fields = { id = -1 } } },
+    }
+end
+
+--[[--
+Two pen contacts as KOReader actually presents them on Wacom: same slot, same
+pinned id, told apart by the lift and by nothing else.
+
+This is the shape that makes a dropped lift dangerous. `Input:inhibitInput`
+voids `handleTouchEv`, which is where `routeStylusEvents` is called from, so a
+window that opens mid-contact takes the lift with it -- and without the lift
+these two are indistinguishable from one long stroke.
+]]
+function Replays.pen_id_pinned_across_contacts()
+    return {
+        { { slot = 4, fields = { id = 4, x = 400, y = 400, tool = 1 } } },
+        { { slot = 4, fields = { x = 450, y = 470 } } },
+        { { slot = 4, fields = { id = -1 } } },
+        { { slot = 4, fields = { id = 4, x = 900, y = 900, tool = 1 } } },
+        { { slot = 4, fields = { x = 950, y = 970 } } },
+        { { slot = 4, fields = { id = -1 } } },
     }
 end
 
