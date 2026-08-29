@@ -709,6 +709,34 @@ else
                 and read_second.template_kind == "blank",
             second and tostring(second.sort_key) or "append failed")
 
+        -- Re-ruling a page. Strict where creation is permissive: a kind this
+        -- build cannot draw must not be accepted here, or the write would
+        -- succeed and the page would come back blank with nothing said.
+        local ruled = notebook
+            and repo:setPageTemplate(notebook.id, first.id, "dots")
+        local reread = ruled and repo:getPage(first.id)
+        local rejected, reject_reason
+        if notebook then
+            rejected, reject_reason =
+                repo:setPageTemplate(notebook.id, first.id, "future-template")
+        end
+        local crossed = notebook and second
+            and repo:setPageTemplate(notebook.id + 1, first.id, "grid")
+        claim("notebook database: a page is re-ruled in place, and only with a drawable kind",
+            true, ruled == true and reread ~= nil
+                and reread.template_kind == "dots"
+                and rejected == nil and reject_reason == "bad_template"
+                and crossed == nil,
+            "kind = " .. tostring(reread and reread.template_kind)
+                .. ", rejected = " .. tostring(reject_reason)
+                .. ", cross-notebook = " .. tostring(crossed))
+
+        local ruled_pages = notebook and tonumber(conn:rowexec(
+            "SELECT count(*) FROM notebook_pages WHERE template_kind = 'dots';"))
+        claim("notebook database: re-ruling one page leaves its siblings alone",
+            true, ruled_pages == 1, tostring(ruled_pages) .. " dotted pages")
+        if notebook then repo:setPageTemplate(notebook.id, first.id, "blank") end
+
         local n = Codec.MAX_POINTS + 19
         local points = {}
         for i = 1, n do

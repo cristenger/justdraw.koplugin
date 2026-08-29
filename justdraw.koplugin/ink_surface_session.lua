@@ -197,6 +197,24 @@ function SurfaceSession:setTransform(transform)
     return true
 end
 
+--[[--
+Adopt a new paper ruling.
+
+The same shape as `setTransform`, and warned for the same reason: the owner
+has to be able to retire an in-flight contact while the old ready raster is
+still there to repair it, rather than after the buffer it drew into is gone.
+]]
+function SurfaceSession:setPaper(kind)
+    if self.closed then return nil, "closed" end
+    if not self.cache_obj then return true end
+    if not self.cache_obj:needsPaperRebuild(kind) then return true end
+    if self.on_will_rebuild then self.on_will_rebuild(self) end
+    local ok, err = self.cache_obj:setPaper(kind)
+    notifyState(self)
+    if ok == nil and err then return nil, err end
+    return true
+end
+
 function SurfaceSession:addStroke(points, n, width, tool, opts)
     if not self:isWritable() then return nil, "read_only" end
     if self:saveFailed() then return nil, "save_failed" end

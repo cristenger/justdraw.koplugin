@@ -616,6 +616,48 @@ function Repository:appendPage(notebook_id, spec)
     return page
 end
 
+--[[--
+Change one page's ruling.
+
+Deliberately stricter than `storedTemplate`. Creation stays permissive so that
+a notebook written by a newer build keeps its own template name intact when an
+older one touches it; but a value this build is about to *rule paper with* has
+to be one this build can draw, or the write would succeed, the page would come
+back blank, and nothing would have said so.
+
+The notebook's activity date moves with the page's, the way `touchSurface`
+moves it for ink: changing the paper is an edit, and the library orders by
+recent activity.
+]]
+function Repository:setPageTemplate(notebook_id, page_id, kind)
+    local ready, reason = self:_ready(true)
+    if not ready then return nil, reason end
+    notebook_id, page_id = positiveInteger(notebook_id), positiveInteger(page_id)
+    if not notebook_id or not page_id then return nil, "bad_id" end
+    if type(kind) ~= "string" or not KNOWN_TEMPLATES[kind] then
+        return nil, "bad_template"
+    end
+    return self:transaction(function()
+        local now = self.now()
+        local ok, run_err = self:_run([[
+            UPDATE notebook_pages SET template_kind = ?3, updated_at = ?4
+             WHERE id = ?1 AND notebook_id = ?2 AND deleted_at IS NULL;]],
+            { page_id, notebook_id, kind, now })
+        if not ok then return nil, run_err end
+        local changed, change_err = self:_changes()
+        if changed == nil then return nil, change_err end
+        if changed == 0 then return nil, "not_found" end
+        ok, run_err = self:_run([[
+            UPDATE notebooks SET updated_at = ?2
+             WHERE id = ?1 AND deleted_at IS NULL;]], { notebook_id, now })
+        if not ok then return nil, run_err end
+        changed, change_err = self:_changes()
+        if changed == nil then return nil, change_err end
+        if changed == 0 then return nil, "not_found" end
+        return true
+    end)
+end
+
 function Repository:selectCurrentPage(notebook_id, page_id)
     local ready, reason = self:_ready(true)
     if not ready then return nil, reason end

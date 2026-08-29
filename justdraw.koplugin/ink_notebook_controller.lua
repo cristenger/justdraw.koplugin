@@ -312,6 +312,13 @@ function Controller:deleteCurrentPage()
     return self.active_session:softDeleteCurrentPage()
 end
 
+function Controller:setPageTemplate(kind)
+    if not self.active_session then return nil, "no_notebook" end
+    local ok, err = self.active_session:setPageTemplate(kind)
+    if ok and self.on_library_changed then self.on_library_changed(self) end
+    return ok, err
+end
+
 function Controller:reconfigureInput(apply)
     if not self.active_session then
         if apply then apply() end

@@ -1220,6 +1220,23 @@ function support.newNotebookStore(opts)
         return true
     end
 
+    --- Mirrors the repository's strict acceptance: creation is permissive so a
+    --- future template name survives, but a kind that is about to rule paper
+    --- has to be one this build can draw.
+    function store:setPageTemplate(notebook_id, page_id, kind)
+        if self.fail_set_template then return nil, self.fail_set_template end
+        local n, p = activeNotebook(notebook_id), activePage(page_id)
+        if not n or not p or p.notebook_id ~= notebook_id then
+            return nil, "not_found"
+        end
+        if kind ~= "blank" and kind ~= "ruled"
+            and kind ~= "grid" and kind ~= "dots" then
+            return nil, "bad_template"
+        end
+        p.template_kind = kind
+        return true
+    end
+
     function store:softDeleteNotebook(id)
         local n = activeNotebook(id)
         if not n then return nil, "not_found" end

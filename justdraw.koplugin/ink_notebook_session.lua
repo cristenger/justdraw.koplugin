@@ -148,6 +148,10 @@ function Session:uiSnapshot()
         has_previous = can_navigate and self.has_previous or false,
         has_next = can_navigate and self.has_next or false,
         page_count = self.notebook_obj and self.notebook_obj.page_count or 0,
+        -- The open page's ruling, so the chooser reads one public snapshot
+        -- rather than reaching into the page row for a second opinion.
+        template_kind = self.current_page and self.current_page.template_kind
+            or "blank",
         can_undo = state == "ready" and surface ~= nil and surface:canUndo() or false,
         pending_writes = surface and surface:pendingWrites() or 0,
         error_code = error_code,
@@ -530,6 +534,41 @@ function Session:undo()
     if self.on_dirty_box then self.on_dirty_box(box, "undo", self) end
     self:_notifyState()
     return box
+end
+
+--[[--
+Change the ruling of the page that is open.
+
+The ruling lives in the raster (ADR-27), so this is a rebuild, and it is
+refused for the reasons a rotation is refused: not under a live contact, not
+while a commit is broken, not on a database this build may only read.
+
+The row is written before the raster. A raster that disagrees with the row
+would come back wrong on the next open with nothing to signal it, whereas a
+row whose rebuild failed surfaces as the load failure the editor already
+publishes a Retry for. Capture is released and reacquired by the rebuild's own
+`on_will_rebuild`/`on_ready` pair, exactly as on a rotation.
+]]
+function Session:setPageTemplate(kind)
+    if self.closed then return nil, "closed" end
+    if self.repository.read_only then return nil, "read_only" end
+    if not self.current_page or not self.surface_session then
+        return nil, "no_page"
+    end
+    if self:_hasActiveContact() then return nil, "contact_active" end
+    if self.surface_session:saveFailed() then return nil, "save_failed" end
+    if kind == self.current_page.template_kind then return true end
+    local ok, err = self.repository:setPageTemplate(
+        self.notebook_obj.id, self.current_page.id, kind)
+    if not ok then return nil, err end
+    self.current_page.template_kind = kind
+    -- Not `on_notebook_changed`: nothing was tombstoned, so the library only
+    -- needs to know its recency order moved. The Controller says so, the way
+    -- it does for a rename.
+    local applied, apply_err = self.surface_session:setPaper(kind)
+    self:_notifyState()
+    if not applied then return nil, apply_err end
+    return true
 end
 
 function Session:softDeleteCurrentPage()

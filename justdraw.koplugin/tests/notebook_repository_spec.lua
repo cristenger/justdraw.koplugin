@@ -130,6 +130,61 @@ return function(ctx)
         end
     end)
 
+    t:case("a page's ruling is scoped to its notebook and moves both dates", function()
+        local repo, driver = openRepo()
+        t:eq(repo:setPageTemplate(1, 11, "dots"), true, "accepted")
+        local conn = driver.last()
+        local sql = conn:statement("UPDATE notebook_pages SET template_kind")
+        t:check(sql ~= nil, "one page update")
+        t:check(sql:find("notebook_id = %?2") ~= nil,
+            "a page id alone cannot reach another notebook's page")
+        t:check(sql:find("deleted_at IS NULL") ~= nil, "and not a tombstone")
+        local binds = conn:bindsFor("UPDATE notebook_pages SET template_kind")
+        t:eq(binds[3], "dots", "the kind is bound, never interpolated")
+        t:check(conn:indexOf("UPDATE notebook_pages SET template_kind")
+            < conn:indexOf("UPDATE notebooks SET updated_at"),
+            "the notebook's recency follows the page's")
+        t:check(conn:saw("BEGIN"), "in one transaction")
+        t:eq(conn:saw("notebook_strokes"), false, "and touches no ink")
+    end)
+
+    t:case("only a ruling this build can draw is accepted", function()
+        local repo, driver = openRepo()
+        local before = #driver.last().log
+        for _, kind in ipairs({ "future-template", "", "blank; DROP" }) do
+            local ok, err = repo:setPageTemplate(1, 11, kind)
+            t:eq(ok, nil, kind .. " refused")
+            t:eq(err, "bad_template", kind .. " reason")
+        end
+        t:eq(repo:setPageTemplate(1, 11, nil), nil, "no kind refused")
+        t:eq(repo:setPageTemplate(0, 11, "dots"), nil, "bad notebook refused")
+        t:eq(repo:setPageTemplate(1, -3, "dots"), nil, "bad page refused")
+        t:eq(#driver.last().log, before, "nothing reached SQLite")
+        for kind in pairs(Repository.KNOWN_TEMPLATES) do
+            t:eq(repo:setPageTemplate(1, 11, kind), true, kind .. " accepted")
+        end
+    end)
+
+    t:case("a ruling change on a missing page is not reported as done", function()
+        -- Its own driver: openRepo scripts one changed row for every case,
+        -- and the fake answers the first pattern that matches.
+        local driver = support.newSqlDriver{
+            on_open = function(conn)
+                conn:answer("PRAGMA user_version",
+                    { { Repository.SCHEMA_VERSION } })
+                conn:answer("SELECT changes", { { 0 } })
+            end,
+        }
+        local repo = Repository.open{
+            path = PATH, driver = driver, wal = false,
+            now = function() return 4242 end,
+        }
+        local ok, err = repo:setPageTemplate(1, 11, "ruled")
+        t:eq(ok, nil, "refused")
+        t:eq(err, "not_found", "stable reason")
+        t:check(driver.last():saw("ROLLBACK"), "and rolled back")
+    end)
+
     t:case("one purge call contains bounded leaf-to-root work", function()
         local repo, driver = openRepo()
         local counts = repo:purgeDeletedBatch{

@@ -449,6 +449,88 @@ return function(ctx)
         t:eq(session:uiSnapshot().can_close, false, "closed capability is inert")
     end)
 
+    --[[--
+    Changing the paper is a rebuild, not an edit.
+
+    The ruling is composed into the raster (ADR-27), so adopting a new one
+    replays the page the way a rotation does -- and has to release and
+    reacquire capture around it for the same reason, or a contact would go on
+    writing into a buffer that no longer exists.
+    ]]
+    t:case("a new ruling is persisted and rebuilds through the capture gates", function()
+        local session, store, sched, input = fixture()
+        session:open(1)
+        sched:drain()
+        local released, acquired = input.released, input.acquired
+        t:eq(session:setPageTemplate("dots"), true, "accepted")
+        t:eq(store.pages[1].template_kind, "dots", "persisted")
+        t:eq(input.released, released + 1, "capture released for the rebuild")
+        sched:drain()
+        t:eq(session:stateName(), "ready", "the raster came back")
+        t:eq(input.acquired, acquired + 1, "and capture with it")
+        t:eq(session:uiSnapshot().template_kind, "dots", "published to the UI")
+        -- Idempotent: the same ruling is not a reason to throw a raster away.
+        released = input.released
+        t:eq(session:setPageTemplate("dots"), true, "same ruling accepted")
+        t:eq(input.released, released, "and rebuilds nothing")
+    end)
+
+    t:case("a page added after a ruling change inherits it", function()
+        local session, store, sched = fixture()
+        session:open(1)
+        sched:drain()
+        session:setPageTemplate("ruled")
+        sched:drain()
+        t:eq(session:appendPage(), true, "appended")
+        sched:drain()
+        t:eq(session:currentPage().template_kind, "ruled", "inherited")
+        t:eq(store.pages[#store.pages].template_kind, "ruled", "and persisted")
+    end)
+
+    t:case("a ruling change is refused for the reasons a rotation is", function()
+        local session, store, sched, input = fixture()
+        session:open(1)
+        sched:drain()
+
+        input.contact = true
+        local ok, err = session:setPageTemplate("grid")
+        t:eq(ok, nil, "refused under a live contact")
+        t:eq(err, "contact_active", "with the reason the editor can act on")
+        t:eq(store.pages[1].template_kind, "blank", "and nothing was written")
+        input.contact = false
+
+        session:surface():addStroke({ 1, 1, 2, 2 }, 2, 4, 1)
+        store.fail_transaction = "commit"
+        sched:drain()
+        ok, err = session:setPageTemplate("grid")
+        t:eq(ok, nil, "refused while a commit is broken")
+        t:eq(err, "save_failed", "stable reason")
+        t:eq(store.pages[1].template_kind, "blank", "still nothing written")
+    end)
+
+    t:case("a future-schema notebook keeps its ruling and refuses a new one", function()
+        local session, store, sched = fixture()
+        store.read_only = true
+        session:open(1)
+        sched:drain()
+        local ok, err = session:setPageTemplate("dots")
+        t:eq(ok, nil, "refused")
+        t:eq(err, "read_only", "stable reason")
+        t:eq(store.pages[1].template_kind, "blank", "nothing written")
+    end)
+
+    t:case("a rejected ruling leaves the page and its raster alone", function()
+        local session, store, sched = fixture()
+        session:open(1)
+        sched:drain()
+        store.fail_set_template = "not_found"
+        local ok, err = session:setPageTemplate("dots")
+        t:eq(ok, nil, "refused")
+        t:eq(err, "not_found", "the repository's reason survives")
+        t:eq(session:currentPage().template_kind, "blank", "page unchanged")
+        t:eq(session:stateName(), "ready", "and the raster was never thrown away")
+    end)
+
     t:case("input mode reconfiguration releases before reacquiring", function()
         local session, _, _, input = fixture()
         session:open(1)
