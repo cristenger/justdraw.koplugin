@@ -2002,6 +2002,7 @@ for _, spec in ipairs({
     "canvas_overlay_spec",
     "canvas_router_spec",
     "capture_filter_spec",
+    "slot_steer_spec",
     "input_controller_spec",
     "canvas_queue_spec",
     "surface_session_spec",

@@ -205,6 +205,52 @@ function support.newInput(opts)
     return input
 end
 
+--[[--
+The slot bookkeeping of Input, copied from frontend/device/input.lua @
+60ce80ed (1382-1450). tests/conformance.lua runs the same scenarios against
+the real methods; if these ever drift, that probe is what says so.
+
+`mixed_handler` puts an instance-level handleTouchEv on the table, the shape
+the reMarkable has (remarkable/device.lua:324) and the slot steer refuses.
+]]
+function support.newSlotInput(opts)
+    opts = opts or {}
+    local input = {
+        main_finger_slot = 0,
+        pen_slot = 4,
+        wacom_protocol = opts.wacom_protocol ~= false,
+        cur_slot = 0,
+        ev_slots = { [0] = { slot = 0 } },
+        MTSlots = {},
+        active_slots = {},
+    }
+    function input:initMtSlot(slot)
+        if not self.ev_slots[slot] then self.ev_slots[slot] = { slot = slot } end
+    end
+    function input:getMtSlot(slot) return self.ev_slots[slot] end
+    function input:setCurrentMtSlot(key, val) self.ev_slots[self.cur_slot][key] = val end
+    function input:setCurrentMtSlotChecked(key, val)
+        if not self.active_slots[self.cur_slot] then self:addSlot(self.cur_slot) end
+        self.ev_slots[self.cur_slot][key] = val
+    end
+    function input:getCurrentMtSlotData(key)
+        local slot = self.ev_slots[self.cur_slot]
+        return slot and slot[key] or nil
+    end
+    function input:newFrame() self.MTSlots = {}; self.active_slots = {} end
+    function input:addSlot(value)
+        self:initMtSlot(value)
+        table.insert(self.MTSlots, self:getMtSlot(value))
+        self.active_slots[value] = true
+        self.cur_slot = value
+    end
+    function input:setupSlotData(value)
+        if not self.active_slots[value] then self:addSlot(value) else self.cur_slot = value end
+    end
+    if opts.mixed_handler then input.handleTouchEv = function() end end
+    return input
+end
+
 -- -------------------------------------------------------- fake blitbuffer
 
 --[[--
