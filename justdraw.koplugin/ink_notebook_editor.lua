@@ -470,11 +470,13 @@ So a cleanup that ends a *run* of strokes -- the one the pen is most likely to
 land on -- uses `ui`. On MTK that is AUTO: no FULL promotion, no completion
 wait, only a submission wait for the previous marker, which after a burst of
 small DU updates is short or nil. It leaves a little more ghosting than GLR16
-would. The full-quality `partial` is kept for when it costs nobody anything:
-once the pen has stayed away for QUALITY_REST_DELAY, when the budget is spent,
-and on every path that was already `partial` (repair, undo, preference change,
-uncover). Devices whose `partial` does not block keep `partial` for the run
-cleanup too; nothing changes for them.
+would. The full-quality `partial` is kept for the rest pass alone -- once the
+pen has stayed away for QUALITY_REST_DELAY -- and for every path that was
+already `partial` (repair, undo, preference change). A spent budget and an
+uncover use the same non-blocking cleanup as a run: a device log
+(2026-08-28) showed each budget-driven `partial` costing 0.3-0.5 s of dead
+glass, an evdev overflow, and the next pen-down. Devices whose `partial` does
+not block keep `partial` everywhere; nothing changes for them. ADR-26.
 ]]
 function Editor:_qualityRunWaveform()
     if self.partial_blocks_input and self.partial_blocks_input() then
@@ -504,24 +506,26 @@ function Editor:_runQualityRefresh(generation)
     local box = self:_qualityBox()
     local kind = self.quality_fired_kind
     self.quality_fired_kind = nil
-    if kind == "delayed" then
-        local waveform = self:_qualityRunWaveform()
-        self:_traceQuality("fire", string.format(" box=%dx%d mode=%s", box.w, box.h, waveform))
-        if waveform == "partial" then
-            self:_resetQualityRefresh()
-            UIManager:setDirty(nil, "partial", box)
-            return
-        end
-        -- The run cleanup cleared the worst of it without blocking. Keep the
-        -- union and let the rest pass finish the job when the pen has left.
-        UIManager:setDirty(nil, waveform, box)
-        self.quality_strokes = 0
-        self:_scheduleQualityAction("rest", true)
+    -- Everything the pen loop itself triggers -- the run cleanup, a spent
+    -- stroke or area budget, an uncover after a toast -- lands while the pen
+    -- is most likely still in range. Only the rest pass has earned the
+    -- blocking waveform (see the docstring above).
+    local waveform = "partial"
+    if kind == "delayed" or kind == "immediate" then
+        waveform = self:_qualityRunWaveform()
+    end
+    self:_traceQuality("fire", string.format(" kind=%s box=%dx%d mode=%s",
+        tostring(kind), box.w, box.h, waveform))
+    if waveform == "partial" then
+        self:_resetQualityRefresh()
+        UIManager:setDirty(nil, "partial", box)
         return
     end
-    self:_traceQuality("fire", string.format(" box=%dx%d mode=partial", box.w, box.h))
-    self:_resetQualityRefresh()
-    UIManager:setDirty(nil, "partial", box)
+    -- The non-blocking cleanup cleared the worst of it. Keep the union and
+    -- let the rest pass finish the job when the pen has left.
+    UIManager:setDirty(nil, waveform, box)
+    self.quality_strokes = 0
+    self:_scheduleQualityAction("rest", true)
 end
 
 --[[--

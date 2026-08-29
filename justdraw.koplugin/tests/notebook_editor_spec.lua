@@ -685,7 +685,7 @@ return function(ctx)
         t:eq(run[3].w, 210, "old and new")
     end)
 
-    t:case("a budget-driven cleanup stays partial on a blocking device", function()
+    t:case("a budget-driven cleanup is ui on a blocking device and arms the rest pass", function()
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
@@ -703,8 +703,58 @@ return function(ctx)
         t:eq(editor.quality_scheduled_kind, "immediate", "the budget armed an immediate")
         scheduler:advance(0)
         local fired = ctx.env.UIManager.dirty[#ctx.env.UIManager.dirty]
-        t:eq(fired[2], "partial", "a spent budget takes the blocking pass; it has to land")
+        t:eq(fired[2], "ui", "a spent budget must not block the pen either")
+        t:eq(editor:_qualityHasUnion(), true, "the union is kept for the rest pass")
+        t:eq(editor.quality_strokes, 0, "and the stroke count restarts")
+        t:eq(editor.quality_scheduled_kind, "rest", "a rest pass is armed")
+        scheduler:advance(2.0)
+        local rest = ctx.env.UIManager.dirty[#ctx.env.UIManager.dirty]
+        t:eq(rest[2], "partial", "which is the one that lands the quality waveform")
         t:eq(editor:_qualityHasUnion(), false, "and consumes the union")
+    end)
+
+    t:case("an uncover cleanup is ui on a blocking device", function()
+        ctx.reset()
+        local Geom = require("ui/geometry")
+        local transform = {}
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local runtime = { live_fast = true, active_contact = false }
+        local editor, _, _, _, session, _, scheduler = newEditor{
+            transform = transform, cache = cache, runtime = runtime,
+            partial_blocks_input = function() return true end,
+        }
+        editor:onDirty(Geom:new{ x = 100, y = 200, w = 10, h = 10 },
+            "ink", session, transform, { x = 1, y = 1, w = 10, h = 10 })
+        editor:onEditChanged(session)
+        editor:_qualityCovered()                      -- a toast or menu came up
+        t:eq(scheduler:pending(), 0, "covered: nothing armed")
+        editor:_qualityUncovered(true)
+        t:eq(editor.quality_scheduled_kind, "immediate", "uncover arms an immediate")
+        scheduler:advance(0)
+        local fired = ctx.env.UIManager.dirty[#ctx.env.UIManager.dirty]
+        t:eq(fired[2], "ui", "that does not block a pen hovering over the closed menu")
+        t:eq(editor.quality_scheduled_kind, "rest", "the quality pass waits for the rest")
+    end)
+
+    t:case("off a blocking device a budget cleanup is still partial", function()
+        ctx.reset()
+        local Geom = require("ui/geometry")
+        local transform = {}
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local runtime = { live_fast = true, active_contact = false }
+        local editor, _, _, _, session, _, scheduler = newEditor{
+            transform = transform, cache = cache, runtime = runtime,
+            partial_blocks_input = function() return false end,
+        }
+        for i = 1, 8 do
+            editor:onDirty(Geom:new{ x = 100 + i, y = 200, w = 10, h = 10 },
+                "ink", session, transform, { x = 1, y = 1, w = 10, h = 10 })
+            editor:onEditChanged(session)
+        end
+        scheduler:advance(0)
+        t:eq(ctx.env.UIManager.dirty[#ctx.env.UIManager.dirty][2], "partial",
+            "nothing changes where partial does not block")
+        t:eq(scheduler:pending(), 0, "and no rest pass is armed")
     end)
 
     t:case("off a blocking device the run cleanup is still partial", function()
@@ -795,6 +845,8 @@ return function(ctx)
             "the second lift carries the lift-to-lift gap: " .. tostring(lines[4]))
         t:check(lines[6]:find("box=50x50", 1, true) ~= nil,
             "the fire names the region it cleaned: " .. tostring(lines[6]))
+        t:eq(lines[6]:match("kind=(%a+)"), "delayed",
+            "and the kind that fired: " .. tostring(lines[6]))
         for i = 1, #lines do
             t:check(not lines[i]:find("Notes", 1, true), "no notebook identity leaks")
         end
