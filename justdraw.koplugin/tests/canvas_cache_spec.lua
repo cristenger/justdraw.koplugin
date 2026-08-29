@@ -18,6 +18,7 @@ return function(ctx)
     local t = ctx.t
     local support = ctx.support
     local Cache = require("ink_canvas_cache")
+    local Paper = require("ink_paper")
     local Transform = require("ink_canvas_transform")
 
     local W, H = 1860, 2480
@@ -57,6 +58,7 @@ return function(ctx)
             batch = opts.batch or 32,
             point_budget = opts.point_budget,
             cell = opts.cell or 100,
+            paper_kind = opts.paper_kind,
             schedule = function(fn) sched:schedule(fn) end,
         }
         return cache, store, sched
@@ -533,6 +535,134 @@ return function(ctx)
         t:eq(cache:isReady(), true, "only the rotated generation completed")
         t:eq(store.calls.stroke_read, 21,
             "one old cursor plus each stroke of the replacement generation")
+    end)
+
+    -- =================================================================
+    --[[--
+    Ruled paper, and the erase that has to survive it.
+
+    The ruling is composed into this raster rather than painted beneath it
+    (ADR-27), which makes the erase repair the load-bearing case: it clears a
+    box to a flat colour and, if nothing put the ruling back, would leave a
+    white hole in the lines that no later repaint would ever fill.
+    ]]
+    t:describe("ink_canvas_cache / ruled paper")
+
+    --- Recorded writes of one colour, as a comparable set.
+    local function marksIn(bb, color)
+        local out = {}
+        for _, r in ipairs(bb.root.writes) do
+            if r.c == color then
+                out[#out + 1] = string.format("%d,%d,%d,%d", r.x, r.y, r.w, r.h)
+            end
+        end
+        table.sort(out)
+        return out
+    end
+
+    t:case("a canvas with no template is built exactly as it always was", function()
+        local cache = readyCache()
+        local bb = cache:buffer()
+        t:eq(cache.paper_kind, nil, "an EPUB canvas row carries no template")
+        t:eq(#bb.fills, 1, "one flat fill")
+        t:eq(#bb.rects, 1, "and not one write beyond it")
+        t:eq(bb.rects[1].c, "white", "the page is white")
+    end)
+
+    t:case("a ruled page is ruled once, at build time", function()
+        local blank = readyCache()
+        local ruled = readyCache{ paper_kind = "ruled" }
+        local marks = marksIn(ruled:buffer(), "gray")
+        t:eq(#blank:buffer().rects, 1, "a blank page writes only its fill")
+        t:check(#marks > 0, "a ruled page writes marks (" .. #marks .. ")")
+        t:eq(#ruled:buffer().fills, 1, "over one flat fill, not per mark")
+        t:eq(ruled:buffer():writesOutside(0, 0, W, H), 0,
+            "and nothing outside the page")
+    end)
+
+    t:case("erasing puts the ruling back into the hole it clears", function()
+        local cache = readyCache{ paper_kind = "ruled", strokes = { bar(100, 100) } }
+        local reference = readyCache{ paper_kind = "ruled" }
+        local bb = cache:buffer()
+        bb:clear()
+        local box = cache:removeStroke(cache:strokes()[1].id)
+        t:check(box ~= nil, "the stroke was removed")
+        local cleared, ruling = 0, 0
+        for _, r in ipairs(bb.rects) do
+            if r.c == "white" then cleared = cleared + 1
+            elseif r.c == "gray" then ruling = ruling + 1 end
+        end
+        t:check(cleared >= 1, "the hole was cleared")
+        t:check(ruling >= 1, "and ruled again (" .. ruling .. " marks)")
+        t:eq(bb:writesOutside(box.x, box.y, box.w, box.h), 0,
+            "strictly inside the repaired box")
+        -- The repair is not merely *some* ruling: it puts back the rules a
+        -- page built from scratch has there, which is what keeps an erased
+        -- word from leaving a seam. Rows are what can be compared across the
+        -- two: a repair rules the width of its box, a build the whole page.
+        local function rowsCrossing(buffer)
+            local out = {}
+            for _, r in ipairs(buffer.root.writes) do
+                if r.c == "gray" and r.y < box.y + box.h
+                    and r.y + r.h > box.y then
+                    out[#out + 1] = r.y .. "," .. r.h
+                end
+            end
+            table.sort(out)
+            return out
+        end
+        local repaired = rowsCrossing(bb)
+        local fresh = rowsCrossing(reference:buffer())
+        t:check(#fresh > 0, "the box really does cross a rule")
+        t:eq(#repaired, #fresh, "same rules as a fresh page")
+        for i = 1, math.min(#repaired, #fresh) do
+            t:eq(repaired[i], fresh[i], "rule " .. i .. " row and thickness")
+        end
+    end)
+
+    t:case("adopting a ruling replays the page, and re-adopting it does not", function()
+        local cache, store, sched = readyCache{ strokes = { bar(100, 100) } }
+        local before, reads = cache:buffer(), store.calls.stroke_read
+        t:eq(cache:needsPaperRebuild("dots"), true, "a new ruling rebuilds")
+        t:eq(cache:setPaper("dots"), true, "adopted")
+        t:eq(before.freed, true, "the old raster is released")
+        t:eq(cache:isReady(), false, "and the page is rebuilding")
+        sched:drain()
+        t:check(store.calls.stroke_read > reads, "the strokes are replayed")
+        t:check(#marksIn(cache:buffer(), "gray") > 0, "onto dotted paper")
+
+        local kept, kept_reads = cache:buffer(), store.calls.stroke_read
+        t:eq(cache:needsPaperRebuild("dots"), false, "the same ruling does not")
+        t:eq(cache:setPaper("dots"), true, "and is still accepted")
+        t:eq(cache:buffer(), kept, "the same buffer")
+        t:eq(store.calls.stroke_read, kept_reads, "nothing decoded again")
+    end)
+
+    --- The gap in pixels between the first two horizontal rules.
+    local function rowPitch(bb)
+        local rows = {}
+        for _, r in ipairs(bb.root.writes) do
+            if r.c == "gray" and r.w > r.h then rows[#rows + 1] = r.y end
+        end
+        table.sort(rows)
+        return rows[2] and (rows[2] - rows[1]) or nil, #rows
+    end
+
+    t:case("a rotation re-rules at the new scale, on the same paper", function()
+        local cache, _, sched = readyCache{ paper_kind = "grid" }
+        local before, rows_before = rowPitch(cache:buffer())
+        local rotated = transform(0, H, W)         -- landscape, a new scale
+        cache:setTransform(rotated)
+        sched:drain()
+        local after, rows_after = rowPitch(cache:buffer())
+        t:check(after ~= nil, "the rotated page is still ruled")
+        -- The pitch is drawn at the new scale...
+        t:eq(after, math.floor(Paper.PITCH.grid * rotated.scale + 0.5),
+            "the pixel pitch followed the scale")
+        t:check(after ~= before, "which is not the pitch it had (" .. before .. ")")
+        -- ...but the count is a property of the paper, in logical units, so
+        -- rotating a page does not add or remove a single rule.
+        t:eq(rows_after, rows_before, "and it is the same sheet of paper")
     end)
 
     -- =================================================================

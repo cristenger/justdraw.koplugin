@@ -317,6 +317,35 @@ do
             and overflow_bottom == nil,
         "no invalid geometry reaches the FFI paint boundary")
     rendered:free()
+
+    --[[--
+    Why `ink_paper` never writes `color == nil`.
+
+    A real colour is cdata whose `__eq` calls `color:getColorRGB32()` on its
+    argument, and LuaJIT dispatches that metamethod even when the other side
+    is nil -- so the ordinary-looking guard raises instead of answering. The
+    unit suite cannot see this: `tests/support.lua` uses plain strings for
+    colours, where `== nil` is simply false. This states the real behaviour,
+    and then that the renderer survives it.
+    ]]
+    local comparable = pcall(function() return BB.COLOR_GRAY == nil end)
+    claim("a real BlitBuffer colour cannot be compared to nil",
+        true, comparable == false,
+        "so a nil-colour guard must use rawequal")
+
+    local Paper = require("ink_paper")
+    local ruled = BB.new(64, 64, BB.TYPE_BB8)
+    ruled:fill(WHITE)
+    local ok, marked = pcall(Paper.paint, ruled, "ruled", 1,
+        0, 0, 64, 64, BB.COLOR_GRAY)
+    local guarded, unmarked = pcall(Paper.paint, ruled, "ruled", 1,
+        0, 0, 64, 64, nil)
+    claim("ink_paper rules a real BlitBuffer and refuses a nil colour without raising",
+        true, ok and marked == true and guarded and unmarked == false
+            and ruled:getPixel(0, 48) == BB.COLOR_GRAY
+            and ruled:getPixel(0, 40) == WHITE,
+        string.format("painted=%s guarded=%s", tostring(marked), tostring(guarded)))
+    ruled:free()
 end
 
 -- =====================================================================

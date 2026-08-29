@@ -28,6 +28,7 @@ local Blitbuffer = require("ffi/blitbuffer")
 local logger = require("logger")
 
 local Grid = require("ink_spatial_grid")
+local Paper = require("ink_paper")
 local Render = require("ink_render")
 local Codec = require("ink_canvas_codec")
 
@@ -74,14 +75,18 @@ local ERASER_LRU_CHUNKS = 8
   opts.cell        grid cell size in canvas units (default derived)
   opts.ink         stroke colour
   opts.background  page colour
+  opts.paper_kind  ruling to compose under the ink (default: the surface's
+                   own template_kind, so a canvas row without one is blank)
+  opts.paper_mark  ruling colour
   opts.on_ready    called once the canvas is fully rasterised
 ]]
 function Cache.new(opts)
+    -- `canvas` remains as an internal compatibility name while the same
+    -- cache starts serving standalone notebook pages.
+    local surface = opts.surface or opts.canvas
     return setmetatable({
         repository = opts.repository,
-        -- `canvas` remains as an internal compatibility name while the same
-        -- cache starts serving standalone notebook pages.
-        canvas = opts.surface or opts.canvas,
+        canvas = surface,
         transform = opts.transform,
         schedule = opts.schedule,
         point_budget = opts.point_budget or DEFAULT_POINT_BUDGET,
@@ -89,6 +94,11 @@ function Cache.new(opts)
         cell = opts.cell,
         ink = opts.ink or Blitbuffer.COLOR_BLACK,
         background = opts.background or Blitbuffer.COLOR_WHITE,
+        -- The ruling is composed into this raster rather than painted under
+        -- it, because everything the surface shows is a blit out of here and
+        -- a background below would not survive the first one (ADR-27).
+        paper_kind = opts.paper_kind or (surface and surface.template_kind),
+        paper_mark = opts.paper_mark or Blitbuffer.COLOR_GRAY,
         on_ready = opts.on_ready,
         on_error = opts.on_error,
 
@@ -176,6 +186,39 @@ function Cache:setTransform(transform)
     if same and self.bb then return end
     if self.state == "load_failed" then return end
     return self:_build()
+end
+
+--[[--
+Adopt a new paper ruling.
+
+Structurally a rotation: the raster is rebuilt from the stored vectors and no
+stored point moves. What differs is that this also changes what lies *under*
+them, which is why it cannot be a regional repaint -- a page ruled after the
+fact would have its ruling only where nothing had been erased.
+]]
+function Cache:setPaper(kind)
+    if self.closed then return nil, "closed" end
+    if not self:needsPaperRebuild(kind) then return true end
+    self.paper_kind = kind
+    -- Not open yet, or holding a partial raster behind a Retry: the field is
+    -- enough, and the build that eventually runs picks it up.
+    if not self.bb or self.state == "load_failed" then return true end
+    return self:_build()
+end
+
+--- Whether adopting this ruling would replay the raster. The owner asks
+--- before mutating anything, for the same reason it asks about a transform.
+function Cache:needsPaperRebuild(kind)
+    if self.closed then return false end
+    return kind ~= self.paper_kind
+end
+
+--- Rule the paper over a region the caller has just cleared to `background`.
+--- Bounded by that region, in cache coordinates, and allocating nothing.
+function Cache:_rulePaper(x, y, w, h)
+    if not self.bb or not self.transform then return false end
+    return Paper.paint(self.bb, self.paper_kind, self.transform.scale,
+        x, y, w, h, self.paper_mark)
 end
 
 --- Whether adopting this transform would allocate and replay the raster.
@@ -294,6 +337,10 @@ function Cache:repair(m)
     local box = self:_regionFor(m)
     if box.w <= 0 or box.h <= 0 then return box end
     self.bb:paintRect(box.x, box.y, box.w, box.h, self.background)
+    -- Put the ruling back before the neighbours go on top of it. Clearing to
+    -- a flat colour and stopping there is how erasing a word on ruled paper
+    -- would leave a white hole in the lines (ADR-27).
+    self:_rulePaper(box.x, box.y, box.w, box.h)
 
     local scale = self.transform.scale
     local neighbours = self:_metaNear(
@@ -509,6 +556,7 @@ function Cache:_build()
     local w, h = self.transform:cacheSize()
     self.bb = Blitbuffer.new(w, h, Blitbuffer.TYPE_BB8)
     self.bb:fill(self.background)
+    self:_rulePaper(0, 0, w, h)
 
     local grid, grid_err = Grid.new{
         width = self.canvas.logical_w,

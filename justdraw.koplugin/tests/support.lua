@@ -375,6 +375,16 @@ function support.newBlitbuffer(w, h, bbtype)
     return newFakeBB(w, h, bbtype)
 end
 
+--[[--
+The blitbuffer module, with strings where the real one has colours.
+
+Worth knowing before trusting a colour assertion built on this: a real colour
+is cdata carrying an `__eq` that indexes its argument, so `color == nil` raises
+under LuaJIT where here it merely answers false. A guard written against this
+fake can therefore be wrong in production and green here -- which is what
+happened to `ink_paper`, and why tests/conformance.lua now states that
+difference against a real BlitBuffer.
+]]
 function support.newBlitbufferModule()
     return {
         COLOR_BLACK = "black",
@@ -1466,6 +1476,9 @@ function support.install()
     env.Blitbuffer = support.newBlitbufferModule()
     env.Blitbuffer.COLOR_LIGHT_GRAY = "light_gray"
     env.Blitbuffer.COLOR_DARK_GRAY = "dark_gray"
+    -- The raster cache's default ruling colour. Without it every paper
+    -- assertion would pass against a nil colour, which paints nothing.
+    env.Blitbuffer.COLOR_GRAY = "gray"
     package.preload["ffi/blitbuffer"] = function() return env.Blitbuffer end
     env.WidgetContainer = WidgetContainer
     package.preload["ui/widget/container/widgetcontainer"] = function() return WidgetContainer end

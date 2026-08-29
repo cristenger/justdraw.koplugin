@@ -125,6 +125,10 @@ local function visibleTemplate(value)
     value = str(value) or "blank"
     return KNOWN_TEMPLATES[value] and value or "blank"
 end
+--- Published so the renderer can be checked against it: a kind that persists
+--- but cannot be drawn is a page that silently comes back blank, and the two
+--- lists live in different modules for different reasons (ADR-27).
+Repository.KNOWN_TEMPLATES = KNOWN_TEMPLATES
 
 local function copyFile(src, dest)
     local fi = io.open(src, "rb")
