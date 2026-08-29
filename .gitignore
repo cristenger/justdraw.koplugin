@@ -2,5 +2,13 @@
 /*.md
 !/README.md
 
+# Local agent guidance (already covered by /*.md; listed to make it explicit)
+/CLAUDE.md
+
 # Obsolete local demo
 /demo.mp4
+
+# Device log analysis and its remediation plan (already covered by /*.md;
+# listed to make it explicit that neither is ever committed)
+/scribe-log-analysis-2026-08-28.md
+/scribe-input-integrity-remediation-plan-2026-08-28.md
