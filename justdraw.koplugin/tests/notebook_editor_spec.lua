@@ -56,6 +56,7 @@ return function(ctx)
                 scheduler:scheduleIn(delay, action)
             end,
             quality_unschedule = function(action) scheduler:unschedule(action) end,
+            quality_clock = overrides.quality_clock,
             control_touch_allowed = function() return guard ~= false end,
             partial_blocks_input = overrides.partial_blocks_input,
             show_host_message = overrides.show_host_message,
@@ -683,6 +684,56 @@ return function(ctx)
         t:eq(run[2], "ui", "which goes out as ui")
         t:eq(run[3].x, 100, "over the union that now spans both words")
         t:eq(run[3].w, 210, "old and new")
+    end)
+
+    t:case("the rest pass waits for the pen to stop reporting, not just to stop inking", function()
+        ctx.reset()
+        local Geom = require("ui/geometry")
+        local transform = {}
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local runtime = { live_fast = true, active_contact = false }
+        local scheduler = ctx.support.newScheduler()
+        local editor, _, _, _, session = newEditor{
+            transform = transform, cache = cache, runtime = runtime,
+            scheduler = scheduler,
+            quality_clock = function() return scheduler:now() end,
+            partial_blocks_input = function() return true end,
+        }
+        editor:onDirty(Geom:new{ x = 100, y = 200, w = 10, h = 10 },
+            "ink", session, transform, { x = 1, y = 1, w = 10, h = 10 })
+        editor:onEditChanged(session)
+        scheduler:advance(0.35)                       -- run cleanup (ui)
+        t:eq(editor.quality_scheduled_kind, "rest", "rest pass armed")
+        scheduler:advance(1.0)
+        editor:onStylusFrame()                        -- the pen hovers at t=1.35
+        scheduler:advance(0.85)
+        editor:onStylusFrame()                        -- and again at t=2.20
+        local before = #ctx.env.UIManager.dirty
+        scheduler:advance(0.15)                       -- t=2.35: the rest is due
+        t:eq(#ctx.env.UIManager.dirty, before, "a hovering pen defers the blocking pass")
+        t:eq(editor.quality_scheduled_kind, "rest", "which stays armed")
+        t:eq(scheduler:pending(), 1, "exactly once")
+        scheduler:advance(1.5)                        -- t=3.85: still short of 2.20+2.0
+        t:eq(#ctx.env.UIManager.dirty, before, "and keeps waiting out the full delay")
+        scheduler:advance(0.5)                        -- t=4.35 >= 4.20
+        local rest = ctx.env.UIManager.dirty[#ctx.env.UIManager.dirty]
+        t:eq(rest[2], "partial", "then the quality pass lands")
+        t:eq(editor:_qualityHasUnion(), false, "and consumes the union")
+        t:eq(scheduler:pending(), 0, "nothing left armed")
+    end)
+
+    t:case("a stylus frame while nothing is armed costs one assignment", function()
+        ctx.reset()
+        local runtime = { live_fast = true, active_contact = false }
+        local scheduler = ctx.support.newScheduler()
+        local editor = newEditor{
+            runtime = runtime, scheduler = scheduler,
+            quality_clock = function() return scheduler:now() end,
+        }
+        scheduler:advance(3.0)
+        editor:onStylusFrame()
+        t:eq(editor.quality_last_stylus_frame_at, 3.0, "the frame time is recorded")
+        t:eq(scheduler:pending(), 0, "and nothing is scheduled")
     end)
 
     t:case("a budget-driven cleanup is ui on a blocking device and arms the rest pass", function()

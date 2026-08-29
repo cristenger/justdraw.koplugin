@@ -63,6 +63,7 @@ function Adapter.new(opts)
         on_error = opts.on_error,
         on_domain_error = opts.on_domain_error,
         on_physical_contact_end = opts.on_physical_contact_end,
+        on_stylus_frame = opts.on_stylus_frame,
         now = opts.now or time.now,
         get_stylus_trace = opts.get_stylus_trace,
         control_guard = opts.control_guard or time.ms(300),
@@ -100,7 +101,7 @@ function Adapter:configure(opts)
     local keys = {
         "get_mode", "get_pen_width", "get_eraser", "eraser_radius",
         "touch_passthrough", "stylus_passthrough", "on_dirty",
-        "on_edit_changed", "on_physical_contact_end", "on_error",
+        "on_edit_changed", "on_physical_contact_end", "on_stylus_frame", "on_error",
         "on_domain_error", "get_stylus_trace",
         "now", "control_guard",
     }
@@ -584,7 +585,11 @@ function Adapter:_stylus(slot)
     end
     local sequence = self.sequence
     if not sequence then return true end
-    return sequence:feed(slot)
+    local result = sequence:feed(slot)
+    -- Every frame the trusted pen produced, hover included: the editor's
+    -- rest pass measures the pen's absence from this, not from the ink.
+    if self.on_stylus_frame then self.on_stylus_frame() end
+    return result
 end
 
 function Adapter:_afterStylusFrame()

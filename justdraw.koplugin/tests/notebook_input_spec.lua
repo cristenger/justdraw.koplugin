@@ -44,6 +44,7 @@ return function(ctx)
                 edits = edits + 1
                 edit_saw_contact[#edit_saw_contact + 1] = adapter:hasActiveContact(session)
             end,
+            on_stylus_frame = opts.on_stylus_frame,
             on_physical_contact_end = function(_, reason)
                 physical_ends[#physical_ends + 1] = reason
                 if opts.on_physical_contact_end then
@@ -593,6 +594,20 @@ return function(ctx)
         spec.stylus_handler{ slot = 4, id = -1, x = 260, y = 250, tool = 0 }
         by_button, by_tool = Capture:eraserCounts()
         t:eq(by_tool, 1, "and an ink contact adds nothing")
+        t:check(session ~= nil, "the surface stayed usable throughout")
+    end)
+
+    t:case("every routed stylus frame, hover included, reaches on_stylus_frame", function()
+        local frames = 0
+        local session, _, _, spec = fixture("stylus", {
+            on_stylus_frame = function() frames = frames + 1 end,
+        })
+        spec.stylus_handler{ slot = 4, id = -1, x = 10, y = 10, tool = 1 }
+        t:eq(frames, 1, "a hover frame counts")
+        spec.stylus_handler{ slot = 4, id = 1, x = 10, y = 10, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 1, x = 40, y = 40, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 40, y = 40, tool = 0 }
+        t:eq(frames, 4, "so do down, move and lift")
         t:check(session ~= nil, "the surface stayed usable throughout")
     end)
 

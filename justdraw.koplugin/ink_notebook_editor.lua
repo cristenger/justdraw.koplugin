@@ -207,6 +207,9 @@ function Editor:_initQualityRefresh()
         return now
     end
     self.quality_last_lift_at = nil
+    -- Seconds of the last stylus frame the adapter saw, hover included. The
+    -- rest pass reads it when it fires; nothing schedules on it.
+    self.quality_last_stylus_frame_at = nil
     self.quality_live_fast = self.get_live_fast() ~= false
     self.quality_action = function()
         local generation = self.quality_scheduled_generation
@@ -432,7 +435,7 @@ local QUALITY_KIND_DELAY = {
     rest = QUALITY_REST_DELAY,
 }
 
-function Editor:_scheduleQualityAction(kind, restart)
+function Editor:_scheduleQualityAction(kind, restart, delay)
     if self.closed or not self:_qualityHasUnion()
         or self.quality_waiting_for_contact_end
         or self.quality_waiting_for_uncover then
@@ -450,7 +453,7 @@ function Editor:_scheduleQualityAction(kind, restart)
     end
     self.quality_scheduled_kind = kind
     self.quality_scheduled_generation = self.quality_generation
-    self.quality_schedule_in(QUALITY_KIND_DELAY[kind], self.quality_action)
+    self.quality_schedule_in(delay or QUALITY_KIND_DELAY[kind], self.quality_action)
     return true
 end
 
@@ -498,6 +501,18 @@ function Editor:_runQualityRefresh(generation)
     if self.has_active_contact() then
         self.quality_waiting_for_contact_end = true
         return
+    end
+    if self.quality_fired_kind == "rest" and self.quality_last_stylus_frame_at then
+        local quiet = self.quality_clock() - self.quality_last_stylus_frame_at
+        if quiet < QUALITY_REST_DELAY then
+            -- The pen is still in range. Wait out the remainder rather than
+            -- rearming on every hover frame.
+            local kind = self.quality_fired_kind
+            self.quality_fired_kind = nil
+            self:_traceQuality("defer", string.format(" quiet=%.3f", quiet))
+            self:_scheduleQualityAction(kind, true, QUALITY_REST_DELAY - quiet)
+            return
+        end
     end
     if Stack.visualAbove(self) then
         self.quality_waiting_for_uncover = true
@@ -557,6 +572,19 @@ function Editor:_holdQualityForContact()
     self.quality_waiting_for_contact_end = true
     self:_traceQuality("hold")
     return true
+end
+
+--[[--
+A stylus frame arrived, whatever it was: hover, down, move or lift.
+
+The Wacom digitizer reports at 360 Hz while the pen is in range, touching or
+not, and a blocking cleanup while it is in range overflows the evdev buffer
+and loses the next pen-down (device log, 2026-08-28). "The pen has left" is
+therefore the absence of frames, not the absence of ink. This costs one clock
+read; the rest pass consults it when it fires (see _runQualityRefresh).
+]]
+function Editor:onStylusFrame()
+    self.quality_last_stylus_frame_at = self.quality_clock()
 end
 
 function Editor:_qualityCovered()

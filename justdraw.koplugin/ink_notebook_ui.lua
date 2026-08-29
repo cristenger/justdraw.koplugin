@@ -91,6 +91,9 @@ function NotebookUI:_editorCallbacks(editor, generation)
         on_physical_contact_end = function(session, reason)
             if current() then editor:onPhysicalContactEnd(session, reason) end
         end,
+        on_stylus_frame = function()
+            if current() then editor:onStylusFrame() end
+        end,
         on_page_ready = function(...)
             if current() then editor:onPageReady(...) end
         end,
