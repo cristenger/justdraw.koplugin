@@ -1395,6 +1395,7 @@ function JustDraw:diagnosticReport()
     }
     r.eraser_by_button, r.eraser_by_tool = Capture:eraserCounts()
     r.collapsed_dots, r.collapsed_discards = Capture:collapsedCounts()
+    r.steered_pen, r.steered_panel, r.evdev_drops = Capture:steerCounts()
 
     -- The first unmet precondition, in the order the user can act on them.
     if r.mode == "finger" then
@@ -1435,6 +1436,14 @@ function JustDraw:diagnosticLines()
         -- A hand-drawn stroke wobbles enough that it never lands here.
         "Pen contacts ending as a single dot: " .. tostring(r.collapsed_dots)
             .. "   with no position: " .. tostring(r.collapsed_discards),
+        -- Frames the slot steer had to move (ADR-25). Growing "pen frames"
+        -- means the hand was holding the cursor; growing "hand frames" means
+        -- the panel omitted ABS_MT_SLOT with the pen in range. Either would
+        -- have been a lost stroke or an erase before the steer. "dropped" is
+        -- the kernel's own overflow count: with ADR-26 it should stay at 0.
+        "Pen frames steered back to the pen slot: " .. tostring(r.steered_pen),
+        "Hand frames kept off the pen slot: " .. tostring(r.steered_panel),
+        "Input events the kernel dropped: " .. tostring(r.evdev_drops),
     }
     if r.blocker then lines[#lines + 1] = "" ; lines[#lines + 1] = r.blocker end
     return lines, r

@@ -93,6 +93,15 @@ end
 
 t:describe("ink_capture / stylus API detection")
 
+t:case("diagnostics report the frames the steer moved and the evdev drops", function()
+    reset{ wacom_protocol = true }
+    local p = newPlugin()
+    local lines = table.concat(p:diagnosticLines(), "\n")
+    t:eq(lines:match("Pen frames steered back to the pen slot: (%d+)"), "0", "pen line, idle")
+    t:eq(lines:match("Hand frames kept off the pen slot: (%d+)"), "0", "panel line, idle")
+    t:eq(lines:match("Input events the kernel dropped: (%d+)"), "0", "drops line, idle")
+end)
+
 t:case("missing stylus API", function()
     local input = reset{ stylus_api = false }
     local feed_before = input.gesture_detector.feedEvent

@@ -194,4 +194,83 @@ return function(ctx)
         collectgarbage("restart")
         t:eq(grown < 0.5, true, "a thousand events grew the heap by " .. grown .. " KB")
     end)
+
+    -- =================================================================
+    t:describe("slot steer / installation")
+
+    local Capture = require("ink_capture")
+    local Device = ctx.Device
+
+    --- A Scribe-shaped Input: the stylus API and gesture detector the
+    --- capture needs, plus the slot machine the policy drives.
+    local function scribeInput()
+        local input = support.newInput{ wacom_protocol = true }
+        local machine = support.newSlotInput()
+        for k, v in pairs(machine) do if input[k] == nil then input[k] = v end end
+        return input
+    end
+
+    t:case("installing the stylus capture registers the hook once and arms it", function()
+        ctx.reset()
+        local input = scribeInput(); Device.input = input
+        local ok = Capture:installStylus(function() return true end, function() end)
+        t:eq(ok, true, "installed")
+        t:eq(input.adjust_hooks_registered, 1, "one hook")
+        t:eq(input.__justdraw_slot_steer.active, true, "armed")
+        Capture:remove()
+        t:eq(input.__justdraw_slot_steer.active, false, "disarmed on remove")
+        t:eq(input.adjust_hooks_registered, 1, "and never unregistered: there is no API for it")
+        Capture:installStylus(function() return true end, function() end)
+        t:eq(input.adjust_hooks_registered, 1, "a second install does not chain a second hook")
+        t:eq(input.__justdraw_slot_steer.active, true, "it re-arms the one that is there")
+        Capture:remove()
+    end)
+
+    t:case("an armed hook steers; a disarmed one is a field read", function()
+        ctx.reset()
+        local input = scribeInput(); Device.input = input
+        Capture:installStylus(function() return true end, function() end)
+        input:setupSlotData(0)                        -- the hand owns the cursor
+        input:eventAdjustHook({ type = C.EV_ABS, code = C.ABS_X, value = 12 })
+        t:eq(input.cur_slot, 4, "the pen's x moved the cursor to the pen slot")
+        Capture:remove()
+        input:setupSlotData(0)
+        input:eventAdjustHook({ type = C.EV_ABS, code = C.ABS_X, value = 12 })
+        t:eq(input.cur_slot, 0, "off, KOReader's behaviour is untouched")
+    end)
+
+    t:case("the finger backend does not arm the steer", function()
+        ctx.reset()
+        local input = scribeInput(); Device.input = input
+        Capture:installFinger(function() end, function() end)
+        t:eq(input.__justdraw_slot_steer, nil, "nothing installed for finger capture")
+        Capture:remove()
+    end)
+
+    t:case("a raise inside the hook disarms the whole capture", function()
+        ctx.reset()
+        local input = scribeInput(); Device.input = input
+        local failed
+        Capture:installStylus(function() return true end, function() end,
+            function(err) failed = err end)
+        input.setupSlotData = function() error("boom") end
+        input:eventAdjustHook({ type = C.EV_ABS, code = C.ABS_X, value = 1 })
+        t:eq(input.__justdraw_slot_steer.active, false, "disarmed at once")
+        ctx.env.UIManager:flush()                     -- Capture:fail removes on the next tick
+        t:eq(Capture.active, false, "the capture is gone")
+        t:eq(tostring(failed):match("boom") ~= nil, true, "and the owner was told why")
+    end)
+
+    t:case("steer counts reach the diagnostics and reset with the lease", function()
+        ctx.reset()
+        local input = scribeInput(); Device.input = input
+        Capture:installStylus(function() return true end, function() end)
+        input:setupSlotData(0)
+        input:eventAdjustHook({ type = C.EV_ABS, code = C.ABS_X, value = 1 })
+        input:eventAdjustHook({ type = C.EV_SYN, code = C.SYN_DROPPED, value = 0 })
+        local pen, panel, drops = Capture:steerCounts()
+        t:eq(pen, 1, "one pen event steered"); t:eq(panel, 0, "no panel event"); t:eq(drops, 1, "one drop")
+        Capture:remove()
+        t:eq((Capture:steerCounts()), 0, "gone with the lease")
+    end)
 end

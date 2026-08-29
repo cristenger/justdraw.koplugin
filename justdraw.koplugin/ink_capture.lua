@@ -12,6 +12,12 @@ the reader. The wrapper is how the plugin keeps track of those contacts; what
 actually stops them reaching the reader is the widget-layer filter in
 `ink_bar.lua`. See ADR-11 and ADR-13.
 
+`stylus` also arms a slot steer (`ink_slot_steer`) through
+`Input:registerEventAdjustHook`, the one place that runs before both of
+KOReader's event handlers. That hook cannot be unregistered, so it is
+installed once per Input instance and left inert -- one field read per
+event -- whenever no stylus capture is active. See ADR-25.
+
 Both handlers run under pcall and disarm the whole capture on the first error.
 Nothing between here and KOReader's main event loop is protected: the callback
 is invoked bare from `Input:routeStylusEvents`, `handleTouchEv` is invoked bare
@@ -23,6 +29,7 @@ installed. See ADR-12.
 local Device = require("device")
 local UIManager = require("ui/uimanager")
 local logger = require("logger")
+local Steer = require("ink_slot_steer")
 
 -- Fallbacks for runtimes older than the Input.TOOL_TYPE_* exports, which
 -- landed in v2026.07 (frontend/device/input.lua:1831-1834). The live values
@@ -40,6 +47,7 @@ local Capture = {
     input = nil,
     gesture_detector = nil,
     original_feed = nil,
+    slot_steer = nil,         -- the armed ink_slot_steer state, stylus only
     feed_was_own = false,     -- was feedEvent an instance field before us?
     feed_wrapper = nil,
     stylus_callback = nil,
@@ -389,6 +397,53 @@ local function guard(self, fn, fail_value)
     end
 end
 
+--[[--
+Install the slot steer on this Input once, and hand back its state.
+
+Idempotent per instance: the state lives on the Input itself because the
+plugin object is rebuilt with every ReaderUI while Device.input is not, and a
+second registration would chain a second hook forever. The hook body is the
+only plugin code that runs outside routeStylusEvents, so it carries its own
+pcall; a raise disarms the steer first and then the capture, like any handler.
+]]
+function Capture:installSlotSteer(input)
+    local state = input.__justdraw_slot_steer
+    if state then return state end
+    -- The class, not Device.input: the policy is only valid under the
+    -- class's own generic touch handler, and the instance may be inhibited.
+    local generic
+    do
+        local ok, InputClass = pcall(require, "device/input")
+        if ok and type(InputClass) == "table" then generic = InputClass.handleTouchEv end
+    end
+    local reason
+    state, reason = Steer.new(input, generic)
+    if not state then return nil, reason end
+    if type(input.registerEventAdjustHook) ~= "function" then return nil, "no_adjust_hook" end
+    local capture = self
+    local function hook(this, ev)
+        if not state.active then return end
+        local ok, err = pcall(Steer.apply, state, this, ev)
+        if not ok then
+            state.active = false
+            pcall(capture.fail, capture, err)
+        end
+    end
+    local registered, err = pcall(input.registerEventAdjustHook, input, hook)
+    if not registered then
+        logger.warn("JustDraw: registerEventAdjustHook failed:", err)
+        return nil, "no_adjust_hook"
+    end
+    input.__justdraw_slot_steer = state
+    return state
+end
+
+function Capture:steerCounts()
+    local state = self.slot_steer
+    if not state then return 0, 0, 0 end
+    return Steer.counts(state)
+end
+
 -- ------------------------------------------------------------- install
 
 --[[--
@@ -548,6 +603,15 @@ function Capture:installStylus(stylus_handler, residual_frame_handler, on_error)
 
     self:_installFeedWrapper(residual_frame_handler)
 
+    local steer, steer_reason = self:installSlotSteer(input)
+    if steer then
+        Steer.reset(steer)
+        steer.active = true
+        self.slot_steer = steer
+    else
+        logger.info("JustDraw: slot steer not armed:", steer_reason)
+    end
+
     logger.info("JustDraw: capture installed, backend stylus, pen_slot", input.pen_slot)
     return true, "stylus"
 end
@@ -560,6 +624,7 @@ function Capture:_forget()
     self.original_feed = nil
     self.feed_was_own = false
     self.feed_wrapper = nil
+    self.slot_steer = nil
     self.stylus_callback = nil
     self.backend = nil
     self.on_error = nil
@@ -588,6 +653,11 @@ function Capture:remove()
         else
             logger.warn("JustDraw: stylus callback was replaced by someone else; leaving it in place")
         end
+    end
+
+    if self.slot_steer then
+        -- The hook stays registered (there is no unregister); inert from here.
+        self.slot_steer.active = false
     end
 
     if self.feed_wrapper and gd then

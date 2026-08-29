@@ -202,6 +202,23 @@ function support.newInput(opts)
             self.stylus_callback = nil
         end
     end
+    if opts.adjust_hook ~= false then
+        -- input.lua @ 60ce80ed, 423-440 and 453: a class-level NOP that the
+        -- first registration replaces and later ones chain onto. There is no
+        -- unregister; `adjust_hooks_registered` lets a test see the chaining.
+        local NOP = function() end
+        input.eventAdjustHook = NOP
+        input.adjust_hooks_registered = 0
+        input.registerEventAdjustHook = function(self, hook, params)
+            self.adjust_hooks_registered = self.adjust_hooks_registered + 1
+            if self.eventAdjustHook == NOP then
+                self.eventAdjustHook = function(this, ev) hook(this, ev, params) end
+            else
+                local old = self.eventAdjustHook
+                self.eventAdjustHook = function(this, ev) old(this, ev); hook(this, ev, params) end
+            end
+        end
+    end
     return input
 end
 
