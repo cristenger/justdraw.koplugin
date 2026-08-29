@@ -82,6 +82,105 @@ claim("registerStylusCallback and unregisterStylusCallback exist",
 claim("pen_slot is defined",
     Input.pen_slot ~= nil, true, "pen_slot = " .. tostring(Input.pen_slot))
 
+-- ---------------------------------------------------------------------
+-- The shared slot cursor (ADR-25). Both scenarios are sequences recorded on a
+-- Kindle Scribe (crash.log 2026-08-28, lines 71495-71503 and 201452-201473).
+-- They run against the *class's* methods on a controlled state: Device.input
+-- is the emulator's SDL instance, with its own hooks and handler swaps, and
+-- the claims are about the generic code path the Scribe runs.
+do
+    local ffi = require("ffi")
+    local codes_ok = pcall(require, "ffi/linux_input_h")
+    local C = ffi.C
+    local InputClass = require("device/input")
+    local Steer = require("ink_slot_steer")
+    local ok_shape = codes_ok
+        and type(InputClass.handleTouchEv) == "function"
+        and type(InputClass.handleKeyBoardEv) == "function"
+        and type(InputClass.registerEventAdjustHook) == "function"
+        and type(InputClass.setupSlotData) == "function"
+
+    --- A controlled state that runs the real methods.
+    local function realState()
+        return setmetatable({
+            main_finger_slot = 0, pen_slot = 4, wacom_protocol = true,
+            cur_slot = 0, ev_slots = { [0] = { slot = 0 } },
+            MTSlots = {}, active_slots = {}, snow_protocol = false,
+            stylus_eraser_active = false, stylus_highlighter_active = false,
+            eventAdjustHook = InputClass.eventAdjustHook,
+        }, { __index = InputClass })
+    end
+    local function ev(t, c, v) return { type = t, code = c, value = v, time = { sec = 0, usec = 0 } } end
+    local function run(state, steer, e)
+        if steer then Steer.apply(steer, state, e) end
+        if e.type == C.EV_KEY then InputClass.handleKeyBoardEv(state, e)
+        else InputClass.handleTouchEv(state, e) end
+    end
+    --- log 71495-71503: the hand owns the cursor, the pen touches.
+    local function penDownUnderHand(with_steer)
+        local state = realState()
+        local steer = with_steer and Steer.new(state, InputClass.handleTouchEv) or nil
+        if steer then steer.active = true end
+        run(state, steer, ev(C.EV_KEY, C.BTN_TOOL_PEN, 1))          -- proximity
+        run(state, steer, ev(C.EV_ABS, C.ABS_MT_SLOT, 0))           -- the hand
+        run(state, steer, ev(C.EV_ABS, C.ABS_MT_TRACKING_ID, 7))
+        run(state, steer, ev(C.EV_ABS, C.ABS_MT_POSITION_X, 585))
+        run(state, steer, ev(C.EV_ABS, C.ABS_X, 1100))             -- the pen
+        run(state, steer, ev(C.EV_ABS, C.ABS_Y, 1579))
+        run(state, steer, ev(C.EV_KEY, C.BTN_TOUCH, 1))
+        return state
+    end
+    local lost = ok_shape and penDownUnderHand(false)
+    claim("real Input loses a pen-down while a panel slot owns the cursor (the defect)",
+        ok_shape, lost and lost.ev_slots[4].id == nil and lost.ev_slots[0].x == 1100,
+        ok_shape and string.format("pen id=%s hand x=%s",
+            tostring(lost.ev_slots[4].id), tostring(lost.ev_slots[0].x)) or "no handler")
+    local kept = ok_shape and penDownUnderHand(true)
+    claim("with the slot steer the same sequence lands in the pen slot",
+        ok_shape, kept and kept.ev_slots[4].id == 4 and kept.ev_slots[4].x == 1100
+            and kept.ev_slots[0].x == 585,
+        ok_shape and string.format("pen id=%s x=%s hand x=%s", tostring(kept.ev_slots[4].id),
+            tostring(kept.ev_slots[4].x), tostring(kept.ev_slots[0].x)) or "no handler")
+
+    --- log 201452-201473: the pen hovers, the hand's frame omits ABS_MT_SLOT.
+    local function handUnderHoveringPen(with_steer)
+        local state = realState()
+        local steer = with_steer and Steer.new(state, InputClass.handleTouchEv) or nil
+        if steer then steer.active = true end
+        run(state, steer, ev(C.EV_ABS, C.ABS_MT_SLOT, 1))
+        run(state, steer, ev(C.EV_ABS, C.ABS_MT_TRACKING_ID, -1))
+        run(state, steer, ev(C.EV_KEY, C.BTN_TOOL_PEN, 1))
+        run(state, steer, ev(C.EV_ABS, C.ABS_X, 834))
+        run(state, steer, ev(C.EV_ABS, C.ABS_MT_TRACKING_ID, 1))
+        run(state, steer, ev(C.EV_ABS, C.ABS_MT_TOOL_TYPE, 2))
+        return state
+    end
+    local clobbered = ok_shape and handUnderHoveringPen(false)
+    claim("real Input hands the pen slot the hand's id and palm tool (the defect)",
+        ok_shape, clobbered and clobbered.ev_slots[4].id == 1 and clobbered.ev_slots[4].tool == 2,
+        ok_shape and string.format("pen id=%s tool=%s", tostring(clobbered.ev_slots[4].id),
+            tostring(clobbered.ev_slots[4].tool)) or "no handler")
+    local guarded = ok_shape and handUnderHoveringPen(true)
+    claim("with the slot steer the hand's frame goes to the panel's last slot",
+        ok_shape, guarded and guarded.ev_slots[4].tool == 1 and guarded.ev_slots[1].tool == 2
+            and guarded.ev_slots[1].id == 1,
+        ok_shape and string.format("pen tool=%s slot1 tool=%s id=%s", tostring(guarded.ev_slots[4].tool),
+            tostring(guarded.ev_slots[1].tool), tostring(guarded.ev_slots[1].id)) or "no handler")
+
+    --- The hook contract the install relies on.
+    local chained = {}
+    local probe = realState()
+    if ok_shape then
+        InputClass.registerEventAdjustHook(probe, function() chained[#chained + 1] = "a" end)
+        InputClass.registerEventAdjustHook(probe, function() chained[#chained + 1] = "b" end)
+        probe:eventAdjustHook(ev(C.EV_SYN, 0, 0))
+    end
+    claim("registerEventAdjustHook chains and offers no way to unregister",
+        ok_shape, #chained == 2 and chained[1] == "a" and chained[2] == "b"
+            and InputClass.unregisterEventAdjustHook == nil,
+        table.concat(chained, ","))
+end
+
 -- The suite's SlotBus models ev_slots as durable tables handed out by
 -- reference. If getMtSlot ever returned a fresh table the sticky-id tests would
 -- all be proving nothing.
