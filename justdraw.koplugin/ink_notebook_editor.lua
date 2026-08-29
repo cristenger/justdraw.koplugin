@@ -1446,6 +1446,9 @@ function Editor:showMore()
             {{ text = _("Rename notebook"), enabled = writable, callback = function()
                 self:_closeModal(dialog); self:showRename()
             end }},
+            {{ text = _("Paper style"), enabled = writable, callback = function()
+                self:_closeModal(dialog); self:showPaperStyle()
+            end }},
             {{ text = _("Delete page"), enabled = writable and self.snapshot.page_count > 1,
                 callback = function() self:_closeModal(dialog); self:confirmDeletePage() end }},
             {{ text = _("Delete notebook"), enabled = writable, callback = function()
@@ -1515,6 +1518,47 @@ function Editor:showPenWidth()
                 callback = function() choose(4) end }},
             {{ text = _("Thick"), checked_func = function() return current == 7 end,
                 callback = function() choose(7) end }},
+            {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }},
+        },
+    }
+    return self:showModalSafely(dialog)
+end
+
+--[[--
+Choose the ruling of the page that is open.
+
+The change applies to this page, and to pages added after it while it is the
+current one, because a new page inherits the current page's paper. It is a
+raster rebuild rather than a setting, so unlike Pen width it can be refused --
+and it says so instead of closing over a page that did not change.
+]]
+function Editor:showPaperStyle()
+    local dialog
+    local function choose(value)
+        local changed, err = self.controller:setPageTemplate(value)
+        self:_closeModal(dialog)
+        if not changed then
+            logger.warn("JustDraw notebooks: paper style change failed:", err)
+            if err == "contact_active" then
+                self:_showInfo(_("Lift the pen and try again."))
+            else
+                self:_showInfo(_("Couldn’t change the paper style. Try again."))
+            end
+        end
+        self:onStateChanged()
+    end
+    local current = self.snapshot.template_kind or "blank"
+    dialog = ButtonDialog:new{
+        title = _("Paper style"),
+        buttons = {
+            {{ text = _("Blank"), checked_func = function() return current == "blank" end,
+                callback = function() choose("blank") end }},
+            {{ text = _("Ruled"), checked_func = function() return current == "ruled" end,
+                callback = function() choose("ruled") end }},
+            {{ text = _("Squared"), checked_func = function() return current == "grid" end,
+                callback = function() choose("grid") end }},
+            {{ text = _("Dotted"), checked_func = function() return current == "dots" end,
+                callback = function() choose("dots") end }},
             {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }},
         },
     }

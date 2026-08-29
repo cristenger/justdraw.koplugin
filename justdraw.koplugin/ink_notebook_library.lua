@@ -395,6 +395,7 @@ end
 function Library:showCreateDialog()
     if not self.batch or not self.batch.writable then return nil, "read_only" end
     local selected = "a5_portrait"
+    local style = "blank"
     local dialog
     dialog = MultiInputDialog:new{
         title = _("New notebook"),
@@ -412,6 +413,9 @@ function Library:showCreateDialog()
                 end
                 local preset = NotebookLayout.preset(selected)
                 preset.title = title
+                -- The presets carry blank; the chooser is what makes a
+                -- notebook ruled, and every later page inherits it.
+                preset.template_kind = style
                 local notebook, err = self.controller:createNotebook(preset)
                 if not notebook then
                     logger.warn("JustDraw notebooks: create failed:", err)
@@ -440,6 +444,27 @@ function Library:showCreateDialog()
         button_select_callback = function(entry) selected = entry.value end,
     }
     dialog:addWidget(radio)
+    -- Its own table, so it is its own radio group: RadioButtonTable keeps one
+    -- checked button per widget, across as many rows as it is given. Two by
+    -- two rather than four across, because four labels do not survive the
+    -- narrowest screen this runs on with the keyboard up.
+    local style_radio = RadioButtonTable:new{
+        width = math.floor(Screen:getWidth() * 0.72),
+        parent = dialog,
+        show_parent = dialog,
+        radio_buttons = {
+        {{ text = _("Paper style"), enabled = false, checkable = false }},
+        {
+            { text = _("Blank"), checked = true, value = "blank" },
+            { text = _("Ruled"), value = "ruled" },
+        },
+        {
+            { text = _("Squared"), value = "grid" },
+            { text = _("Dotted"), value = "dots" },
+        }},
+        button_select_callback = function(entry) style = entry.value end,
+    }
+    dialog:addWidget(style_radio)
     self:_showModal(dialog)
     if dialog.onShowKeyboard then dialog:onShowKeyboard() end
     return dialog

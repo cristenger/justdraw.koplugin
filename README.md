@@ -14,7 +14,7 @@ development, so expect rough edges and breaking changes.
 
 - Draw directly on document pages.
 - Attach drawing sheets to reflowable documents.
-- Create standalone notebooks.
+- Create standalone notebooks, on blank, ruled, squared or dotted paper.
 - Reject touch input while the stylus is drawing.
 
 ## Troubleshooting

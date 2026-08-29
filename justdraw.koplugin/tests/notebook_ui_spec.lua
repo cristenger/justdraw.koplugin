@@ -198,6 +198,7 @@ return function(ctx)
         for _, required in ipairs({
             "Notebooks", "New notebook", "Loading page…", "Retry saving",
             "Exit notebook", "Delete notebook", "Read-only", "Paper size",
+            "Paper style", "Blank", "Ruled", "Squared", "Dotted",
         }) do
             t:check(combined:find(required, 1, true) ~= nil, required .. " is present")
         end

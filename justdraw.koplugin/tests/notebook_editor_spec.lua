@@ -40,6 +40,12 @@ return function(ctx)
                 self.delete_ok ~= false and nil or "commit_failed"
         end
         function controller:onScreenResize() self.calls[#self.calls + 1] = "resize"; return true end
+        function controller:setPageTemplate(kind)
+            self.calls[#self.calls + 1] = "paper:" .. tostring(kind)
+            if self.paper_err then return nil, self.paper_err end
+            snapshot.template_kind = kind
+            return true
+        end
         local closed = 0
         local guard = overrides.guard
         local scheduler = overrides.scheduler or ctx.support.newScheduler()
@@ -135,6 +141,90 @@ return function(ctx)
         diagnostic.callback()
         t:eq(calls, 1, "shared diagnostics callback invoked once")
         t:eq(uncovered, true, "More closed before the privacy flow begins")
+    end)
+
+    --[[--
+    The paper chooser is the only per-page property the editor can edit, and
+    unlike Pen width it changes durable state, so it has to behave like the
+    other domain actions: reachable only from More, closing More before it
+    opens, and saying why when the domain refuses it.
+    ]]
+    t:case("More offers Paper style, checked on the page's own ruling", function()
+        ctx.reset()
+        local editor, controller, snapshot = newEditor()
+        snapshot.template_kind = "ruled"
+        editor:onStateChanged()
+
+        local more = editor:showMore()
+        local entry
+        for i = 1, #more.buttons do
+            local button = more.buttons[i][1]
+            if button.text == "Paper style" then entry = button end
+        end
+        t:check(entry ~= nil, "Paper style is reachable from More")
+        t:eq(entry.enabled, true, "and enabled on a writable notebook")
+        entry.callback()
+        local chooser = editor.modal_widget
+        t:check(chooser ~= nil and chooser ~= more, "More closed before it opened")
+
+        local labels, checked = {}, nil
+        for i = 1, #chooser.buttons do
+            local button = chooser.buttons[i][1]
+            labels[#labels + 1] = button.text
+            if button.checked_func and button.checked_func() then
+                checked = button.text
+            end
+        end
+        t:eq(table.concat(labels, "|"),
+            "Blank|Ruled|Squared|Dotted|Close", "every kind, in English")
+        t:eq(checked, "Ruled", "the page's own ruling is the checked one")
+
+        for i = 1, #chooser.buttons do
+            if chooser.buttons[i][1].text == "Dotted" then
+                chooser.buttons[i][1].callback()
+            end
+        end
+        t:eq(controller.calls[#controller.calls], "paper:dots",
+            "the choice reaches the domain")
+        t:eq(editor.modal_widget, nil, "and the chooser closed")
+    end)
+
+    t:case("a refused paper change says why and leaves the page alone", function()
+        ctx.reset()
+        local editor, controller, snapshot = newEditor()
+        editor:onStateChanged()
+        controller.paper_err = "contact_active"
+        local chooser = editor:showPaperStyle()
+        for i = 1, #chooser.buttons do
+            if chooser.buttons[i][1].text == "Squared" then
+                chooser.buttons[i][1].callback()
+            end
+        end
+        t:eq(snapshot.template_kind, nil, "nothing changed")
+        local info = editor.modal_widget
+        t:check(info ~= nil, "a message replaced the chooser")
+        t:eq(info.text, "Lift the pen and try again.",
+            "the reason the reader can act on")
+    end)
+
+    t:case("a read-only notebook cannot be re-ruled", function()
+        ctx.reset()
+        local editor = newEditor{
+            snapshot = {
+                state = "ready", writable = false, can_ink = false,
+                can_navigate = true, can_close = true,
+                has_previous = false, has_next = true, page_count = 2,
+                can_undo = false, pending_writes = 0, template_kind = "dots",
+            },
+        }
+        editor:onStateChanged()
+        local more = editor:showMore()
+        for i = 1, #more.buttons do
+            local button = more.buttons[i][1]
+            if button.text == "Paper style" then
+                t:eq(button.enabled, false, "Paper style is disabled")
+            end
+        end
     end)
 
     t:case("save failure publishes a band without changing paper fit", function()

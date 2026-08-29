@@ -1729,7 +1729,11 @@ function support.install()
         o._values = {}
         for i = 1, #(o.fields or {}) do o._values[i] = o.fields[i].text or "" end
         function o:getFields() return self._values end
-        function o:addWidget(widget) self.added_widget = widget end
+        o.added_widgets = {}
+        function o:addWidget(widget)
+            self.added_widgets[#self.added_widgets + 1] = widget
+            self.added_widget = widget
+        end
         function o:handleEvent() return true end
         return o
     end

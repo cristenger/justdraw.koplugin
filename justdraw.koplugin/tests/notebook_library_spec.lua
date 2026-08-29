@@ -306,10 +306,65 @@ return function(ctx)
         local library = Library:new{ controller = controller }
         library:markShown(); library:startLoading(); ctx.env.UIManager:flush()
         local dialog = library:showCreateDialog()
-        t:eq(dialog.added_widget.parent, dialog, "radio buttons inherit dialog parent")
-        t:eq(dialog.added_widget.show_parent, dialog,
-            "radio buttons dirty the top-level dialog")
+        t:check(#dialog.added_widgets >= 1, "the dialog carries added widgets")
+        for i, widget in ipairs(dialog.added_widgets) do
+            t:eq(widget.parent, dialog,
+                "widget " .. i .. " inherits dialog parent")
+            t:eq(widget.show_parent, dialog,
+                "widget " .. i .. " dirties the top-level dialog")
+        end
         library:shutdown()
+    end)
+
+    --- Paper size and paper style are two questions, so they are two radio
+    --- groups: RadioButtonTable keeps one checked button per widget, and one
+    --- table holding both would make choosing Dotted un-choose A5.
+    t:case("paper size and paper style are independent choices", function()
+        ctx.reset()
+        local controller = {}
+        local spec
+        function controller:listNotebookBatch()
+            return { items = {}, has_more = false, writable = true }
+        end
+        function controller:createNotebook(s)
+            spec = s
+            return { id = 3, title = s.title, page_count = 1 }
+        end
+
+        local function create(choose)
+            local library = Library:new{ controller = controller }
+            library:markShown(); library:startLoading(); ctx.env.UIManager:flush()
+            local dialog = library:showCreateDialog()
+            local groups = {}
+            for _, widget in ipairs(dialog.added_widgets) do
+                groups[widget.radio_buttons[1][1].text] = widget
+            end
+            if choose then choose(groups) end
+            dialog._values[1] = "Notes"
+            dialog.buttons[1][2].callback()
+            ctx.env.UIManager:flush()
+            library:shutdown()
+            return groups
+        end
+
+        local groups = create(nil)
+        t:check(groups["Paper size"] ~= nil, "a paper size group")
+        t:check(groups["Paper style"] ~= nil, "a paper style group")
+        t:check(groups["Paper size"] ~= groups["Paper style"],
+            "and they are separate widgets")
+        t:eq(spec.template_kind, "blank", "a notebook is blank unless asked")
+        t:eq(spec.logical_w, 1184, "on A5 portrait by default")
+
+        create(function(g) g["Paper style"].button_select_callback{ value = "dots" } end)
+        t:eq(spec.template_kind, "dots", "the chosen style is what gets created")
+        t:eq(spec.logical_w, 1184, "and the size choice is untouched by it")
+
+        create(function(g)
+            g["Paper size"].button_select_callback{ value = "a5_landscape" }
+            g["Paper style"].button_select_callback{ value = "ruled" }
+        end)
+        t:eq(spec.template_kind, "ruled", "both choices survive together")
+        t:eq(spec.logical_w, 1680, "landscape")
     end)
 
     t:case("shutdown closes every library-owned top-level dialog", function()
