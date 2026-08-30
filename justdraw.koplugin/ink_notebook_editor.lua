@@ -1416,7 +1416,11 @@ function Editor:confirmDeletePage()
             end
             self:_closeModal(box)
         end,
-        cancel_callback = function() self:_closeModal(box) end,
+        -- No cancel_callback: ConfirmBox closes itself on Cancel and on
+        -- onClose, and the chained onCloseWidget does the bookkeeping.
+        -- Closing it here as well made a second close of a widget already
+        -- off the window stack, which refreshes with nothing repainting
+        -- behind it (ADR-28).
     }
     return self:showModalSafely(box)
 end
@@ -1448,7 +1452,11 @@ function Editor:confirmDeleteNotebook()
             self:_closeModal(box)
             if self.on_close then self.on_close(self) end
         end,
-        cancel_callback = function() self:_closeModal(box) end,
+        -- No cancel_callback: ConfirmBox closes itself on Cancel and on
+        -- onClose, and the chained onCloseWidget does the bookkeeping.
+        -- Closing it here as well made a second close of a widget already
+        -- off the window stack, which refreshes with nothing repainting
+        -- behind it (ADR-28).
     }
     return self:showModalSafely(box)
 end

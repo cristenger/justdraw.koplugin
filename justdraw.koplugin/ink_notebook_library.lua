@@ -514,7 +514,11 @@ function Library:confirmDelete(item)
             BD.auto(item.title), pageCountText(item.page_count)),
         ok_text = _("Delete"),
         keep_dialog_open = true,
-        cancel_callback = function() self:_closeModal(box) end,
+        -- No cancel_callback: ConfirmBox closes itself on Cancel and on
+        -- onClose, and the chained onCloseWidget does the bookkeeping.
+        -- Closing it here as well made a second close of a widget already
+        -- off the window stack, which refreshes with nothing repainting
+        -- behind it (ADR-28).
         ok_callback = function()
             local ok, err = self.controller:deleteNotebook(item.id)
             if not ok then

@@ -270,6 +270,35 @@ return function(ctx)
         t:eq(editor:_closeModal(nil), false, "a nil widget is refused")
     end)
 
+    --[[--
+    ConfirmBox closes itself, so we must not close it too.
+
+    Its Cancel button runs cancel_callback() and then UIManager:close(self)
+    unconditionally -- keep_dialog_open guards only the OK path -- and onClose
+    (Back, or a tap outside) does the same. A cancel_callback of ours that
+    closed made that a second close of an absent widget, which schedules a
+    refresh with nothing repainting behind it (ADR-28).
+    ]]
+    t:case("dismissing a delete confirmation closes it exactly once", function()
+        ctx.reset()
+        local editor = newEditor()
+        editor:onStateChanged()
+        local box = editor:confirmDeletePage()
+        t:check(box ~= nil, "the confirmation opened")
+        local closes = 0
+        local real_close = ctx.env.UIManager.close
+        ctx.env.UIManager.close = function(self, w, ...)
+            if w == box then closes = closes + 1 end
+            return real_close(self, w, ...)
+        end
+        -- What Back and a tap outside both reach.
+        if box.cancel_callback then box.cancel_callback() end
+        ctx.env.UIManager:close(box)
+        ctx.env.UIManager.close = real_close
+        t:eq(closes, 1, "closed once, not once per handler")
+        t:eq(next(editor.modal_widgets), nil, "and the editor stopped tracking it")
+    end)
+
     t:case("save failure publishes a band without changing paper fit", function()
         ctx.reset()
         local snapshot = {
