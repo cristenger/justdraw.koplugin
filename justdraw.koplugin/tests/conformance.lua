@@ -346,6 +346,83 @@ do
             and ruled:getPixel(0, 40) == WHITE,
         string.format("painted=%s guarded=%s", tostring(marked), tostring(guarded)))
     ruled:free()
+
+    --[[--
+    The four KOReader behaviours the modal-close fix rests on (ADR-28).
+
+    All of them belong to KOReader, not to us, and none is visible to
+    tests/support.lua, whose dialog stubs are bare tables and whose UIManager
+    is a stand-in.
+    ]]
+    local UIManagerReal = require("ui/uimanager")
+    local ButtonDialogReal = require("ui/widget/buttondialog")
+    local ConfirmBoxReal = require("ui/widget/confirmbox")
+    local WidgetContainerReal = require("ui/widget/container/widgetcontainer")
+    local EventReal = require("ui/event")
+
+    local notified = 0
+    -- A real container, not a bare table: close() dispatches FlushSettings and
+    -- CloseWidget through handleEvent, which only widgets have.
+    local absent = WidgetContainerReal:new{}
+    absent.onCloseWidget = function() notified = notified + 1 end
+    local saved_stack, saved_dirty = UIManagerReal._window_stack, UIManagerReal._dirty
+    UIManagerReal._window_stack, UIManagerReal._dirty = {}, {}
+    UIManagerReal:close(absent)
+    UIManagerReal._window_stack, UIManagerReal._dirty = saved_stack, saved_dirty
+    claim("UIManager:close notifies a widget that is no longer on the stack",
+        true, notified == 1,
+        "so a second close refreshes with nothing repainting behind it")
+
+    local cancels, self_closed = 0, false
+    local probe_box = ConfirmBoxReal:new{
+        text = "conformance probe",
+        cancel_callback = function() cancels = cancels + 1 end,
+    }
+    local real_close = UIManagerReal.close
+    UIManagerReal.close = function(_, w) if w == probe_box then self_closed = true end end
+    probe_box:onClose()
+    UIManagerReal.close = real_close
+    claim("ConfirmBox closes itself on dismissal, so a cancel_callback must not",
+        true, cancels == 1 and self_closed,
+        "onClose runs cancel_callback and then closes, unconditionally")
+
+    claim("a dialog's own close refresh exists for ButtonDialog and ConfirmBox alike",
+        true, type(ButtonDialogReal.onCloseWidget) == "function"
+            and type(ConfirmBoxReal.onCloseWidget) == "function",
+        "the modes differ (flashui vs ui); ADR-28 stops depending on either")
+
+    local reached = false
+    local container = WidgetContainerReal:new{}
+    container.onCloseWidget = function() reached = true end
+    container:handleEvent(EventReal:new("CloseWidget"))
+    claim("CloseWidget reaches an instance-level onCloseWidget through the container",
+        true, reached,
+        "propagateEvent stops only on a true return, so our chained handler runs")
+
+    --[[--
+    Why the modal cleanup passes no region.
+
+    `mxc_update` fences a request against the update still in flight only for a
+    REAGL mode, for GC16 itself, or for a flashing UI update that covers the
+    whole screen. On MTK `waveform_flashui` is `waveform_ui` is AUTO, so a
+    regional flash is none of the three -- which is what left the DU highlight
+    of a tapped button racing it. This states the two halves that make the
+    full-screen form necessary; both are read from the framebuffer the running
+    device actually built.
+    ]]
+    local fb = Device.screen
+    local has_wf = fb.waveform_flashui ~= nil and fb.waveform_full ~= nil
+    claim("this device's flashui waveform is distinguishable from its full one",
+        has_wf, has_wf and fb.waveform_flashui ~= nil,
+        has_wf and ("flashui=" .. tostring(fb.waveform_flashui)
+            .. " full=" .. tostring(fb.waveform_full)
+            .. " ui=" .. tostring(fb.waveform_ui)) or "no mxcfb waveforms here")
+    claim("a full-screen refresh region is what _isFullScreen recognises",
+        type(fb._isFullScreen) == "function",
+        type(fb._isFullScreen) == "function"
+            and fb:_isFullScreen(fb:getWidth(), fb:getHeight())
+            and not fb:_isFullScreen(fb:getWidth() - 1, fb:getHeight() - 1),
+        "so setDirty with no region is the form that earns the fence")
 end
 
 -- =====================================================================
