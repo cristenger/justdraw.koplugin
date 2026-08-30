@@ -426,6 +426,65 @@ do
 end
 
 -- =====================================================================
+-- Where the menu entry lands, against the real MenuSorter
+--
+-- `addToMainMenu` hands KOReader an id its menu order has never heard of, so
+-- the entry is an orphan and `sorting_hint` is the only thing deciding where it
+-- goes. Two claims from KOReader hold that up: "tools" names a top-level button
+-- in both shipped orders, and MenuSorter's orphan pass resolves a hint that
+-- names a tab rather than a submenu. Neither is stated anywhere but in the
+-- sorter's own lookup, and if the first stopped being true the sorter would
+-- raise on a nil menu rather than misplace the entry -- during menu build, in
+-- the reader, on the device.
+--
+-- The plugin's half of the contract -- that it sends "tools" -- is asserted in
+-- tests/notebook_host_spec.lua. This is KOReader's half.
+-- =====================================================================
+
+do
+    local MenuSorter = require("ui/menusorter")
+    local HINT = "tools"
+    local PROBE = "justdraw_conformance_probe"
+
+    -- Build the item table the way ReaderMenu does: one entry per id the order
+    -- names, so the sorter has a whole tree to place the orphan into.
+    local function landsOn(order_name)
+        local order = require(order_name)
+        local items = { ["KOMenu:menu_buttons"] = {} }
+        for id in pairs(order) do
+            if id ~= "KOMenu:menu_buttons" and id ~= "KOMenu:disabled" then
+                items[id] = { text = id, icon = "appbar.menu" }
+            end
+        end
+        items[PROBE] = { text = "JustDraw", sorting_hint = HINT }
+        local ok, tabs = pcall(MenuSorter.sort, MenuSorter, items, order)
+        if not ok then return nil, tostring(tabs) end
+        for _, tab in ipairs(tabs) do
+            for _, item in ipairs(tab) do
+                if type(item) == "table" and item.id == PROBE then
+                    return tab.id, item.text
+                end
+            end
+        end
+        return nil, "the entry was dropped"
+    end
+
+    for _, order_name in ipairs({
+        "ui/elements/reader_menu_order",
+        "ui/elements/filemanager_menu_order",
+    }) do
+        local tab, detail = landsOn(order_name)
+        claim("menu: '" .. HINT .. "' is the tab itself in " .. order_name:match("([^/]+)$"),
+            true,
+            -- A resolved hint also means no rename: MenuSorter prefixes an
+            -- orphan it had to guess a home for with "NEW: ".
+            tab == HINT and detail == "JustDraw",
+            tab and ("landed on " .. tostring(tab) .. ", labelled " .. tostring(detail))
+                or tostring(detail))
+    end
+end
+
+-- =====================================================================
 -- Rename compatibility, against KOReader's real lfs and LuaSettings
 -- =====================================================================
 
