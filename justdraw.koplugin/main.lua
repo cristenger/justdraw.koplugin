@@ -161,6 +161,7 @@ function JustDraw:init()
     --- driver at all, so it hands one in.
     self.canvas_repository = nil
 
+    self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)
     if self.is_docless then return end
 
@@ -170,7 +171,6 @@ function JustDraw:init()
     self.store = Store.new(pages)
     self.direct_ink_clear_all = false
 
-    self:registerDispatcher()
     self.view:registerViewModule("justdraw", self)
 
     if Compat.readSetting(G_reader_settings, "bar_shown", true) ~= false then
@@ -232,6 +232,18 @@ function JustDraw:openNotebookLibrary()
     return self:notebookUI():openLibrary()
 end
 
+--[[--
+The Dispatcher route to the library, in the reader and in the file browser.
+
+Deliberately the same call the menu makes, failures included: `openLibrary` is
+idempotent, so a second press of the gesture that opened the library raises no
+second window.
+]]
+function JustDraw:onJustDrawNotebooks()
+    self:openNotebookLibrary()
+    return true
+end
+
 function JustDraw:setNotebookRailSide(side)
     if side ~= "left" and side ~= "right" then return nil, "bad_side" end
     if self.notebook_rail_side == side then return true end
@@ -285,7 +297,21 @@ function JustDraw:configureNotebookInteraction(opts)
     return true
 end
 
-function JustDraw:registerDispatcher()
+--[[--
+Publish the actions a gesture, a hotkey or a profile can be bound to.
+
+Named for the `DispatcherRegisterActions` broadcast rather than called only
+from `init`, because the two arrive in either order: `Dispatcher:init` fires the
+broadcast at whatever is loaded, and a plugin that loads afterwards has to
+register itself. Both paths run here, and `registerAction` ignores a name it
+already holds.
+
+Registered from the file browser too. The four ink actions declare `reader`, so
+Dispatcher keeps them out of the file browser's own list; what would not survive
+is registering nothing at all in a session that never opens a book, which is
+exactly the session in which the notebook action matters.
+]]
+function JustDraw:onDispatcherRegisterActions()
     -- Gesture Manager persists Dispatcher action IDs. Keep these legacy IDs
     -- and events so assignments made before the rename continue to work; only
     -- their visible titles use the current brand.
@@ -304,6 +330,14 @@ function JustDraw:registerDispatcher()
     Dispatcher:registerAction("fingerink_bar", {
         category = "none", event = "FingerInkBar", reader = true,
         title = _("JustDraw: toggle toolbar"),
+    })
+    -- No legacy identity to keep: the library postdates the rename. `general`,
+    -- not `reader`, because a notebook needs no document -- Dispatcher shows an
+    -- action only in the section it declares (dispatcher.lua `_addItem`), and
+    -- reaching a notebook without opening a book first is the whole point.
+    Dispatcher:registerAction("justdraw_notebooks", {
+        category = "none", event = "JustDrawNotebooks", general = true,
+        title = _("JustDraw: open notebooks"),
     })
 end
 
@@ -2620,18 +2654,33 @@ function JustDraw:canvasMenu()
     return items
 end
 
+--[[--
+Build the top menu entry.
+
+`sorting_hint` is an id MenuSorter looks up anywhere in the assembled tree
+(`menusorter.lua`, the orphan pass), not just among the submenus, so "tools"
+names the Tools tab itself and puts the entry one tap closer than the
+"more_tools" of KOReader's own plugin example -- which is a page below the
+`plugin_management` and `patch_management` entries, since an orphan is always
+appended last. Anything nearer than the tab requires either mutating the order
+table `ui/elements/reader_menu_order` hands out (what
+`ui/plugin/insert_menu.lua` does) or claiming a tab of the icon bar, and this
+plugin does not take core state or screen furniture from the reader.
+
+Quick access is the Dispatcher's job: see `onDispatcherRegisterActions`.
+]]
 function JustDraw:addToMainMenu(menu_items)
     if self.is_docless then
         menu_items.justdraw_notebooks = {
             text = _("Notebooks"),
-            sorting_hint = "more_tools",
+            sorting_hint = "tools",
             callback = function() self:openNotebookLibrary() end,
         }
         return
     end
     menu_items.justdraw = {
         text = _("JustDraw"),
-        sorting_hint = "more_tools",
+        sorting_hint = "tools",
         sub_item_table = {
             {
                 text = _("Notebooks"),

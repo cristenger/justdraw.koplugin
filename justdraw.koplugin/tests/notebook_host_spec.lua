@@ -49,6 +49,70 @@ return function(ctx)
         t:eq(plugin.notebooks, nil, "building the menu does not open SQLite")
     end)
 
+    t:case("both hosts name the Tools tab, not the page below it", function()
+        -- MenuSorter appends a hinted orphan to the end of whatever id the hint
+        -- names, and it resolves the id anywhere in the tree -- a tab included.
+        -- "more_tools", what KOReader's own plugin example uses, is therefore a
+        -- page deeper than the entry needs to be.
+        ctx.reset()
+        local docless = support.newFileManagerPlugin(ctx.JustDraw, ctx.env)
+        local fm_menu = {}
+        docless:addToMainMenu(fm_menu)
+        t:eq(fm_menu.justdraw_notebooks.sorting_hint, "tools",
+            "file browser entry sits on the Tools tab")
+        docless:teardown()
+
+        ctx.reset()
+        local reader = support.newPlugin(ctx.JustDraw, ctx.env)
+        ctx.env.UIManager:flush()
+        local reader_menu = {}
+        reader:addToMainMenu(reader_menu)
+        t:eq(reader_menu.justdraw.sorting_hint, "tools",
+            "reader entry sits on the Tools tab")
+        reader:teardown()
+    end)
+
+    t:case("the file browser publishes the actions a gesture can bind", function()
+        -- Registration used to sit behind init's docless return, so a session
+        -- that opened straight into the file browser and never touched a book
+        -- offered the Gesture Manager nothing to bind at all.
+        ctx.reset()
+        ctx.env.dispatcher_actions = {}
+        local plugin = support.newFileManagerPlugin(ctx.JustDraw, ctx.env)
+        local actions = ctx.env.dispatcher_actions
+
+        local notebooks = actions.justdraw_notebooks
+        t:check(notebooks ~= nil, "the notebook action is registered")
+        t:eq(notebooks.event, "JustDrawNotebooks", "and names its event")
+        t:eq(notebooks.general, true,
+            "general: assignable in the file browser as well as the reader")
+        t:eq(notebooks.reader, nil, "not confined to the reader section")
+
+        -- The ink actions are published here too and stay reader-only.
+        -- Dispatcher lists an action only under the section it declares, so
+        -- registering them in a docless host costs the file browser nothing.
+        t:eq(actions.fingerink_toggle.reader, true, "toggle stays reader-only")
+        t:eq(actions.fingerink_toggle.general, nil, "and is not promoted")
+        t:eq(actions.fingerink_bar.reader, true, "toolbar stays reader-only")
+        plugin:teardown()
+    end)
+
+    t:case("the notebook action opens the library, once", function()
+        ctx.reset()
+        local plugin = support.newFileManagerPlugin(ctx.JustDraw, ctx.env)
+        local controller = plugin:notebookController()
+        controller.repository = support.newNotebookStore()
+
+        t:eq(plugin:onJustDrawNotebooks(), true, "the event is consumed")
+        local library = plugin.notebook_ui and plugin.notebook_ui.library
+        t:check(library ~= nil, "the library is up")
+        t:eq(controller:activeSession(), nil, "and owns no page session")
+
+        t:eq(plugin:onJustDrawNotebooks(), true, "a second press is harmless")
+        t:eq(plugin.notebook_ui.library, library, "and raises no second window")
+        plugin:teardown()
+    end)
+
     t:case("FileManager menu opens the real library without an input lease", function()
         ctx.reset()
         local plugin = support.newFileManagerPlugin(ctx.JustDraw, ctx.env)
