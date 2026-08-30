@@ -299,6 +299,67 @@ return function(ctx)
         t:eq(next(editor.modal_widgets), nil, "and the editor stopped tracking it")
     end)
 
+    --[[--
+    The panel after a modal is gone is ours to clean.
+
+    ButtonDialog enqueues flashui when it closes, ConfirmBox and InfoMessage
+    enqueue ui, and a widget with no close handler enqueues nothing -- so the
+    editor could repaint correctly underneath and never reach the glass. Full
+    screen rather than the modal's rectangle because on MTK only a full-screen
+    flashing UI update is fenced against the update still in flight, and the
+    one in flight is the DU highlight of the button just tapped (ADR-28).
+    ]]
+    t:case("closing a modal flashes the whole screen, so the driver fences it", function()
+        ctx.reset()
+        local Geom = require("ui/geometry")
+        local editor = newEditor()
+        editor:onStateChanged()
+        local widget = { movable = { dimen = Geom:new{ x = 40, y = 60, w = 300, h = 200 } } }
+        editor:showModalSafely(widget)
+        local before = #ctx.env.UIManager.dirty
+        ctx.env.UIManager:close(widget)
+        local flash
+        for i = before + 1, #ctx.env.UIManager.dirty do
+            if ctx.env.UIManager.dirty[i][2] == "flashui" then
+                flash = ctx.env.UIManager.dirty[i]
+            end
+        end
+        t:check(flash ~= nil, "a flashing refresh was enqueued")
+        t:eq(flash[1], nil, "over no widget: it refreshes, it does not repaint")
+        t:eq(flash[3], nil, "and over no region, which is what buys the fence")
+    end)
+
+    t:case("a modal that never painted leaves nothing to clean", function()
+        ctx.reset()
+        local editor = newEditor()
+        editor:onStateChanged()
+        local widget = {}
+        editor:showModalSafely(widget)
+        local before = #ctx.env.UIManager.dirty
+        ctx.env.UIManager:close(widget)
+        for i = before + 1, #ctx.env.UIManager.dirty do
+            t:check(ctx.env.UIManager.dirty[i][2] ~= "flashui",
+                "nothing was on screen, so nothing is flashed")
+        end
+    end)
+
+    t:case("no flash is forced while a contact is still on the glass", function()
+        ctx.reset()
+        local Geom = require("ui/geometry")
+        local runtime = { live_fast = true, active_contact = false }
+        local editor = newEditor{ runtime = runtime }
+        editor:onStateChanged()
+        local widget = { movable = { dimen = Geom:new{ x = 40, y = 60, w = 300, h = 200 } } }
+        editor:showModalSafely(widget)
+        runtime.active_contact = true
+        local before = #ctx.env.UIManager.dirty
+        ctx.env.UIManager:close(widget)
+        for i = before + 1, #ctx.env.UIManager.dirty do
+            t:check(ctx.env.UIManager.dirty[i][2] ~= "flashui",
+                "the pen keeps the blocking waveform away (ADR-26)")
+        end
+    end)
+
     t:case("save failure publishes a band without changing paper fit", function()
         ctx.reset()
         local snapshot = {

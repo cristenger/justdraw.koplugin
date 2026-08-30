@@ -1318,6 +1318,44 @@ function Editor:onClose()
     return true
 end
 
+--[[--
+Clean the panel after a modal this editor owned has gone.
+
+This used to belong entirely to the widget being closed, and the three we use
+disagree: ButtonDialog enqueues `flashui`, ConfirmBox and InfoMessage enqueue
+`ui`, and a widget with no close handler enqueues nothing while the editor
+repaints underneath it -- a correct framebuffer that never reaches the panel.
+
+Full screen, and not the modal's own rectangle, because of what a Scribe does
+with a regional one. On MTK `flashui` is not GC16: `waveform_flashui` is
+`waveform_ui`, which is `WAVEFORM_MODE_AUTO`
+(`framebuffer_mxcfb.lua:893-899`). And `mxc_update` waits for the previous
+update to *complete* only for a REAGL mode, for GC16 itself, or for a flashing
+UI update that covers the whole screen (`:341-347`). A regional flash is none
+of those, so it would be submitted without a fence and race the `fast`/DU
+highlight of the button the reader just tapped -- which is sent with
+`EPDC_FLAG_FORCE_MONOCHROME` and records `hist_bw_waveform_mode = DU`, the
+field ADR-26 noted "colours the final decision AUTO will take". Passing no
+region makes `_isFullScreen` true and buys the fence. That is also why the
+residue only ever showed up here: this More is nine full-width rows, so the
+dialog is 1674x1464 with 1650x125 buttons, and KOReader's own dialogs are far
+smaller (ADR-28).
+
+`rect` is only the question "was anything actually on screen": a widget that
+never painted has no dimen and needs no cleanup. ADR-26 reserves the blocking
+waveform against cleanups the *pen loop* triggers -- a run cleanup, a spent
+budget, an uncover. Dismissing a dialog is none of those, and showModalSafely
+refuses to open one while a contact is live; the check below is the belt.
+]]
+function Editor:_refreshClosedModal(rect)
+    if self.closed or type(rect) ~= "table" then return false end
+    local w, h = tonumber(rect.w), tonumber(rect.h)
+    if not w or not h or w <= 0 or h <= 0 then return false end
+    if self.has_active_contact and self.has_active_contact() then return false end
+    UIManager:setDirty(nil, "flashui")
+    return true
+end
+
 function Editor:showModalSafely(widget)
     if self.closed then return nil, "closed" end
     if self.has_active_contact and self.has_active_contact() then
@@ -1340,6 +1378,8 @@ function Editor:showModalSafely(widget)
             self:_flushCoveredRepaint(false)
             self:_qualityUncovered(true)
         end
+        self:_refreshClosedModal(dialog.movable and dialog.movable.dimen
+            or dialog.dimen)
     end
     widget.show_parent = widget
     UIManager:show(widget)

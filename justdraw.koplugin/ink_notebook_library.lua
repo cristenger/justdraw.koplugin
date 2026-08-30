@@ -116,6 +116,21 @@ function Library:refreshIfStale()
     self:_loadBatch(nil, 1, false, self.stale_generation)
 end
 
+--- The library has no ink of its own, so no DU history, but ConfirmBox and
+--- InfoMessage still enqueue only `ui` when they close and a widget with no
+--- close handler enqueues nothing. Full screen rather than the modal's own
+--- rectangle for the reason the editor's twin explains: only a full-screen
+--- flashing UI update is fenced against the update still in flight
+--- (`framebuffer_mxcfb.lua:341-347`). `rect` is only the question "was
+--- anything actually on screen" (ADR-28).
+function Library:_refreshClosedModal(rect)
+    if self.closed or type(rect) ~= "table" then return false end
+    local w, h = tonumber(rect.w), tonumber(rect.h)
+    if not w or not h or w <= 0 or h <= 0 then return false end
+    UIManager:setDirty(nil, "flashui")
+    return true
+end
+
 function Library:_showModal(widget)
     if self.closed then return nil, "closed" end
     self.modal_widgets[widget] = true
@@ -124,6 +139,8 @@ function Library:_showModal(widget)
     widget.onCloseWidget = function(dialog, ...)
         if previous then previous(dialog, ...) end
         self.modal_widgets[dialog] = nil
+        self:_refreshClosedModal(dialog.movable and dialog.movable.dimen
+            or dialog.dimen)
     end
     UIManager:show(widget)
     return widget
