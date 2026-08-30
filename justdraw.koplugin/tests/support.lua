@@ -1384,7 +1384,23 @@ function support.install()
         if not top then return false end
         return top:handleEvent(event) and true or false
     end
+    --[[--
+    Mirrors UIManager:close @ 1d66e440b in the one respect the plugin depends
+    on: the widget is notified *before* any stack surgery, and it is notified
+    whether or not it is still on the stack. That second half is what makes a
+    double close observable -- in the real one the CloseWidget event fires
+    either way, while the "schedule the widgets underneath to repaint" block is
+    guarded on having actually found the widget (uimanager.lua:259).
+
+    Dispatch is EventListener's lookup rather than handleEvent, because several
+    dialog stubs here -- and several test modals -- answer handleEvent with a
+    bare `true` and would swallow it. tests/conformance.lua states that the real
+    dispatch does reach an instance-level handler through the container.
+    ]]
     function UIManager:close(w)
+        if not w then return end
+        if w.onFlushSettings then w:onFlushSettings() end
+        if w.onCloseWidget then w:onCloseWidget() end
         for i = #self._window_stack, 1, -1 do
             if self._window_stack[i].widget == w then table.remove(self._window_stack, i) end
         end

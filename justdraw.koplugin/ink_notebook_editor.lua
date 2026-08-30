@@ -1346,14 +1346,30 @@ function Editor:showModalSafely(widget)
     return widget
 end
 
+--[[--
+Close one modal this editor owns. Idempotent, on purpose.
+
+`UIManager:close` fires CloseWidget before it looks at the window stack, but
+only schedules the widgets underneath to repaint when it actually found the
+widget there (uimanager.lua:259 @ 1d66e440b). So closing an already-closed
+dialog enqueues a refresh with nothing repainting behind it, and pushes
+whatever is still in the framebuffer straight back at the panel. `modal_widgets`
+is the record of what is open -- the chained onCloseWidget clears it whichever
+route closed the widget -- so it is the guard (ADR-28).
+
+The tracking half is that closure's job and is not repeated here. The ink half
+is, and has to be: `_flushCoveredRepaint` refuses while anything is still
+visually above the editor, and during CloseWidget the modal is *still* on the
+window stack -- so the closure's own call can only ever answer "covered". It
+stays there as the fallback for a widget KOReader closed by another route,
+where `paintTo` picks the repair up on the repaint `close` schedules anyway.
+]]
 function Editor:_closeModal(widget)
-    self.modal_widgets[widget] = nil
-    if self.modal_widget == widget then self.modal_widget = next(self.modal_widgets) end
+    if not widget or not self.modal_widgets[widget] then return false end
     UIManager:close(widget)
-    self.interactive_regions.modal = next(self.modal_widgets)
-        and self.dimen:copy() or nil
     self:_flushCoveredRepaint(false)
     self:_qualityUncovered()
+    return true
 end
 
 function Editor:showRename()

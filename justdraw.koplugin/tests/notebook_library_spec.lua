@@ -316,6 +316,28 @@ return function(ctx)
         library:shutdown()
     end)
 
+    t:case("closing a library modal twice closes it once", function()
+        ctx.reset()
+        local controller = {}
+        function controller:listNotebookBatch()
+            return { items = {}, has_more = false, writable = true }
+        end
+        local library = Library:new{ controller = controller }
+        library:markShown(); library:startLoading(); ctx.env.UIManager:flush()
+        local dialog = library:showCreateDialog()
+        local closes = 0
+        local real_close = ctx.env.UIManager.close
+        ctx.env.UIManager.close = function(self, w, ...)
+            if w == dialog then closes = closes + 1 end
+            return real_close(self, w, ...)
+        end
+        t:eq(library:_closeModal(dialog), true, "the first close did something")
+        t:eq(library:_closeModal(dialog), false, "the second had nothing to close")
+        ctx.env.UIManager.close = real_close
+        t:eq(closes, 1, "and UIManager saw exactly one close")
+        library:shutdown()
+    end)
+
     --- Paper size and paper style are two questions, so they are two radio
     --- groups: RadioButtonTable keeps one checked button per widget, and one
     --- table holding both would make choosing Dotted un-choose A5.

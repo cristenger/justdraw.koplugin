@@ -129,10 +129,14 @@ function Library:_showModal(widget)
     return widget
 end
 
+--- Idempotent for the reason the editor's is: a second close of a widget that
+--- is already off the window stack refreshes with nothing repainting behind
+--- it, which pushes stale pixels back at the panel (ADR-28). The chained
+--- onCloseWidget clears `modal_widgets` whichever route closed the widget.
 function Library:_closeModal(widget)
-    if not widget then return end
-    self.modal_widgets[widget] = nil
+    if not widget or not self.modal_widgets[widget] then return false end
     UIManager:close(widget)
+    return true
 end
 
 function Library:_showInfo(text)

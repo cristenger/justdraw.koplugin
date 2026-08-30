@@ -227,6 +227,49 @@ return function(ctx)
         end
     end)
 
+    --[[--
+    The fake used to drop CloseWidget on the floor.
+
+    Every piece of modal bookkeeping this editor does hangs off the chained
+    onCloseWidget that showModalSafely installs, and the real UIManager fires
+    that event from inside close(), before it touches the window stack
+    (uimanager.lua:210-213 @ 1d66e440b). A fake that only removed the widget
+    made all of it untestable and a double close invisible.
+    ]]
+    t:case("closing a modal notifies it, the way UIManager does", function()
+        ctx.reset()
+        local editor = newEditor()
+        editor:onStateChanged()
+        local notified = 0
+        local widget = { onCloseWidget = function() notified = notified + 1 end }
+        editor:showModalSafely(widget)
+        t:eq(notified, 0, "not notified while it is open")
+        ctx.env.UIManager:close(widget)
+        t:eq(notified, 1, "notified exactly once on close")
+        -- And again even though it is gone: that is what makes a second close
+        -- observable rather than silent.
+        ctx.env.UIManager:close(widget)
+        t:eq(notified, 2, "a close of an absent widget still notifies")
+    end)
+
+    t:case("closing a modal twice closes it once", function()
+        ctx.reset()
+        local editor = newEditor()
+        editor:onStateChanged()
+        local more = editor:showMore()
+        local closes = 0
+        local real_close = ctx.env.UIManager.close
+        ctx.env.UIManager.close = function(self, w, ...)
+            if w == more then closes = closes + 1 end
+            return real_close(self, w, ...)
+        end
+        t:eq(editor:_closeModal(more), true, "the first close did something")
+        t:eq(editor:_closeModal(more), false, "the second had nothing to close")
+        ctx.env.UIManager.close = real_close
+        t:eq(closes, 1, "and UIManager saw exactly one close")
+        t:eq(editor:_closeModal(nil), false, "a nil widget is refused")
+    end)
+
     t:case("save failure publishes a band without changing paper fit", function()
         ctx.reset()
         local snapshot = {
