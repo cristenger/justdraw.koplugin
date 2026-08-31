@@ -854,6 +854,37 @@ return function(ctx)
         t:eq(p.bar.draw_btn.text, "Retry", "recovery remains reachable")
     end)
 
+    t:case("the sheet's eraser cuts a stroke instead of swallowing it", function()
+        local canvas = {
+            id = 57, anchor_kind = "xpointer", anchor_key = "xp:/body/p[8]",
+            anchor_raw = "/body/p[8]", anchor_normalized = "/body/p[8]",
+            anchor_dom_version = 20240114, logical_w = SW, logical_h = SH,
+        }
+        local p, store = canvasPlugin{
+            canvases = { canvas },
+            strokes = { { canvas_id = canvas.id, stroke = {
+                width = 4, tool = 1, n = 5,
+                points = { 100, 100, 200, 100, 300, 100, 400, 100, 500, 100 },
+            } } },
+        }
+        p:openCanvas(canvas)
+        env.UIManager:flush()
+        p:setEraser(true)
+        p:setDrawing(true)
+        seedPenBaseline(p)
+        local original = store.strokes[canvas.id][1].id
+        local sx, sy = p.session:transform():toScreen(300, 100)
+        local input = Device.input
+        input.stylus_callback(input, { slot = 4, id = 2, tool = Capture.TOOL_ERASER })
+        input.stylus_callback(input,
+            { slot = 4, id = 2, x = sx, y = sy, tool = Capture.TOOL_ERASER })
+        input.stylus_callback(input,
+            { slot = 4, id = -1, x = sx, y = sy, tool = 0 })
+        env.UIManager:flush()
+        t:eq(#store.strokes[canvas.id], 2, "two fragments were committed")
+        t:eq(store.deleted[#store.deleted], original, "and the original deleted")
+    end)
+
     t:case("stored coordinates are the sheet's, not the screen's", function()
         local p, store = canvasPlugin()
         openForPen(p)

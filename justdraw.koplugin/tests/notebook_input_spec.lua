@@ -567,6 +567,28 @@ return function(ctx)
         t:eq(edits(), 2, "pen and one eraser contact each update capabilities once")
     end)
 
+    t:case("the eraser cuts a notebook stroke instead of swallowing it", function()
+        local session, _, _, spec = fixture("stylus")
+        -- Draw a 4-point diagonal-ish stroke (frame 1 is the baseline).
+        spec.stylus_handler{ slot = 4, id = 1, x = 100, y = 500, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 1, x = 200, y = 505, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 1, x = 300, y = 510, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 1, x = 400, y = 515, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 1, x = 500, y = 520, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 500, y = 520, tool = 0 }
+        t:eq(#session:surface():cache():strokes(), 1, "one stroke drawn")
+        local drawn = session:surface():cache():strokes()[1].point_count
+        t:check(drawn >= 4, "with enough points to cut (" .. drawn .. ")")
+        -- Cut it mid-way: two eraser samples straddling the stroke, whose
+        -- capsule crosses it near x = 350.
+        spec.stylus_handler{ slot = 4, id = 2, x = 340, y = 300, tool = 2 }
+        spec.stylus_handler{ slot = 4, id = 2, x = 360, y = 700, tool = 2 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 360, y = 700, tool = 0 }
+        local metas = session:surface():cache():strokes()
+        t:eq(#metas, 2, "the sweep left two fragments")
+        t:check(metas[1].from_erase and metas[2].from_erase, "flagged as debris")
+    end)
+
     --[[--
     One erase contact is one count, on this surface too.
 
