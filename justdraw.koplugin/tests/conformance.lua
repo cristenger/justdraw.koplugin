@@ -108,6 +108,11 @@ do
             MTSlots = {}, active_slots = {}, snow_protocol = false,
             stylus_eraser_active = false, stylus_highlighter_active = false,
             eventAdjustHook = InputClass.eventAdjustHook,
+            -- Since v2026.07.2 handleKeyBoardEv asks the device whether it is
+            -- SDL (frontend/device/input.lua, the barrel-button branch ADR-24
+            -- documents). The recorded sequences are a Kindle Scribe's, and a
+            -- Scribe answers no.
+            device = { isSDL = function() return false end },
         }, { __index = InputClass })
     end
     local function ev(t, c, v) return { type = t, code = c, value = v, time = { sec = 0, usec = 0 } } end
