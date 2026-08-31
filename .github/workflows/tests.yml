@@ -29,3 +29,21 @@ jobs:
           set -o pipefail
           luajit test.lua | tee result.txt
           grep -q '0 failed' result.txt
+
+  # Its own job so the suite above stays fast and does not wait on an apt-get
+  # of poppler. These two checks were deferred precisely because they need
+  # tools the plugin's runtime does not have (ADR-31); here they get them.
+  pdf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LuaJIT, qpdf and poppler
+        run: sudo apt-get update && sudo apt-get install -y luajit qpdf poppler-utils
+
+      # STRICT because on a runner the tools are installed: "tool absent" here
+      # means the workflow is broken, not that the machine is older.
+      - name: External PDF conformance
+        env:
+          JUSTDRAW_PDF_EXTERNAL_STRICT: "1"
+        run: luajit justdraw.koplugin/tests/pdf_external_check.lua
