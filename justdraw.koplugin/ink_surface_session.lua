@@ -319,7 +319,10 @@ function SurfaceSession:eraseAt(cx, cy, radius, ctx)
     local union = nil
     for i = 1, #hits do
         local box, err = self:_applySplit(hits[i])
-        if not box then return union, err end
+        if not box then
+            if ctx then ctx.sweep_x, ctx.sweep_y = x0, y0 end
+            return union, err
+        end
         union = unionBox(union, box)
     end
     return union

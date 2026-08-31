@@ -388,14 +388,6 @@ function Cache:repair(m)
     return box
 end
 
---[[--
-The topmost stroke with a stored point within `radius` of (cx, cy), or nil.
-
-Candidates come from the grid, so a dense canvas costs what is under the
-eraser. They are walked newest first, and only a candidate's points are
-decoded -- the ones the grid ruled out are never read.
-]]
-
 function Cache:beginErase()
     return {
         cache = {}, order = {}, limit = ERASER_LRU_CHUNKS,
@@ -415,6 +407,14 @@ function Cache:endErase(ctx)
     ctx.cache = {}
     ctx.order = {}
 end
+
+--[[--
+The topmost stroke with a stored point within `radius` of (cx, cy), or nil.
+
+Candidates come from the grid, so a dense canvas costs what is under the
+eraser. They are walked newest first, and only a candidate's points are
+decoded -- the ones the grid ruled out are never read.
+]]
 
 function Cache:hitTest(cx, cy, radius, ctx)
     if not self.grid then return nil end

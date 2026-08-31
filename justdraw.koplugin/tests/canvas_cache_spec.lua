@@ -358,6 +358,19 @@ return function(ctx)
             "the removed box spans the dead segments, dequantised")
     end)
 
+    t:case("the sweep collects every stroke under the capsule, ascending", function()
+        local cache = readyCache{
+            strokes = { bar(100, 100, 5, 4), bar(100, 110, 5, 4) }, cell = 100,
+        }
+        local ctx = cache:beginErase()
+        local hits = cache:eraseSweep(120, 95, 120, 115, 4, ctx)
+        cache:endErase(ctx)
+        t:eq(#hits, 2, "both strokes under the capsule were collected")
+        t:check(hits[1].meta.seq < hits[2].meta.seq, "in ascending seq order")
+        t:eq(#hits[1].fragments, 2, "the first was cut into two runs")
+        t:eq(#hits[2].fragments, 2, "and so was the second")
+    end)
+
     t:case("a sweep that misses collects nothing and decodes nothing", function()
         local cache, store = readyCache{ strokes = { bar(100, 100, 5, 4) } }
         local reads = store.calls.stroke_read
