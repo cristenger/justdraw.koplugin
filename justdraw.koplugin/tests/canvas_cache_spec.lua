@@ -338,6 +338,77 @@ return function(ctx)
         t:eq(store.calls.stroke_read, reads, "there is nothing to repair with")
     end)
 
+    t:case("the sweep collects the cut and its surviving runs", function()
+        local cache = readyCache{ strokes = { bar(100, 100, 5, 4) }, cell = 100 }
+        local ctx = cache:beginErase()
+        -- bar points: x = 100,110,120,130,140 at y = 100. A vertical capsule
+        -- through x = 120 with reach 4 + 4/2 kills the two middle segments.
+        local hits = cache:eraseSweep(120, 90, 120, 110, 4, ctx)
+        cache:endErase(ctx)
+        t:eq(#hits, 1, "one stroke under the capsule")
+        local hit = hits[1]
+        t:eq(hit.n, 5, "with all its points decoded")
+        t:eq(#hit.fragments, 2, "cut into two runs")
+        t:eq(hit.fragments[1].first, 1, "head from the start")
+        t:eq(hit.fragments[1].last, 2, "to before the cut")
+        t:eq(hit.fragments[2].first, 4, "tail from after the cut")
+        t:eq(hit.fragments[2].last, 5, "to the end")
+        t:check(math.abs(hit.removed.min_x - 110) < 0.1
+            and math.abs(hit.removed.max_x - 130) < 0.1,
+            "the removed box spans the dead segments, dequantised")
+    end)
+
+    t:case("a sweep that misses collects nothing and decodes nothing", function()
+        local cache, store = readyCache{ strokes = { bar(100, 100, 5, 4) } }
+        local reads = store.calls.stroke_read
+        local ctx = cache:beginErase()
+        t:eq(cache:eraseSweep(800, 800, 810, 810, 4, ctx), nil, "no hit")
+        cache:endErase(ctx)
+        t:eq(store.calls.stroke_read, reads, "and not one chunk was read")
+    end)
+
+    t:case("a sweep across a chunk seam joins every chunk once", function()
+        local points = {}
+        for i = 0, 1999 do
+            points[#points + 1] = 10 + i * 0.9
+            points[#points + 1] = 100
+        end
+        local cache, store = readyCache{
+            strokes = { { width = 4, tool = 1, points = points, n = 2000 } },
+        }
+        local reads = store.calls.stroke_chunk
+        local ctx = cache:beginErase()
+        -- Point 1024 -- the seam -- sits at x = 10 + 1023 * 0.9 = 930.7.
+        local hits = cache:eraseSweep(930.7, 90, 930.7, 110, 2, ctx)
+        cache:endErase(ctx)
+        t:eq(#hits, 1, "the seam stroke was found")
+        t:eq(hits[1].n, 2000, "joined with the seam point deduplicated")
+        t:eq(#hits[1].fragments, 2, "and cut into two runs")
+        t:eq(hits[1].fragments[1].first, 1, "head intact")
+        t:eq(hits[1].fragments[2].last, 2000, "tail intact")
+        t:check(hits[1].fragments[1].last < hits[1].fragments[2].first,
+            "with a real gap between them")
+        t:check(store.calls.stroke_chunk - reads <= 4,
+            "chunks were read through the LRU, not re-decoded per segment")
+    end)
+
+    t:case("forgetStroke unindexes without reading or painting anything", function()
+        local cache, store = readyCache{
+            strokes = { bar(100, 100), bar(1500, 2000) }, cell = 100,
+        }
+        local target = cache:strokes()[1]
+        local reads = store.calls.stroke_read
+        local bb = cache:buffer()
+        bb:clear()
+        local m = cache:forgetStroke(target.id)
+        t:eq(m, target, "the forgotten metadata is handed back")
+        t:eq(#cache:strokes(), 1, "gone from the list")
+        t:eq(cache:hitTest(110, 100, 18), nil, "and from the grid")
+        t:eq(#bb.rects, 0, "with not one pixel painted")
+        t:eq(store.calls.stroke_read, reads, "and not one chunk read")
+        t:eq(cache:forgetStroke(target.id), nil, "forgetting twice is a no-op")
+    end)
+
     t:case("an erased stroke is gone from the canvas's own list", function()
         local cache = readyCache{ strokes = { bar(100, 100), bar(500, 500) } }
         local id = cache:strokes()[1].id

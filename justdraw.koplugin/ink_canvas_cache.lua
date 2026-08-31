@@ -31,6 +31,7 @@ local Grid = require("ink_spatial_grid")
 local Paper = require("ink_paper")
 local Render = require("ink_render")
 local Codec = require("ink_canvas_codec")
+local Split = require("ink_stroke_split")
 
 local floor, ceil = math.floor, math.ceil
 
@@ -164,6 +165,12 @@ end
 --- The stroke metadata, in drawing order. Never carries points.
 function Cache:strokes()
     return self.meta
+end
+
+--- The live metadata table for one stroke id, or nil. The session uses it
+--- to flag erase fragments; the table is the cache's own, not a copy.
+function Cache:metaById(id)
+    return self.by_id[id]
 end
 
 --- The raster buffer, for the overlay's regional blits. nil once closed.
@@ -303,6 +310,22 @@ function Cache:markPersisted(local_id, row_id)
     return true
 end
 
+--- Drop a stroke from the metadata, grid and chunk index without touching
+--- the raster. The split path paints the survivors before it repairs the
+--- hole, so the pixels' turn comes later; `removeStroke` keeps the old
+--- contract of doing both at once.
+function Cache:forgetStroke(id)
+    local m = self.by_id[id]
+    if not m or self.closed or not self.bb then return nil end
+    self.by_id[id] = nil
+    for i = #self.meta, 1, -1 do
+        if self.meta[i].id == id then table.remove(self.meta, i) end
+    end
+    self.grid:remove(id)
+    self.chunks_by_id[id] = nil
+    return m
+end
+
 --[[--
 Remove a stroke and repair the hole it leaves, returning the dirty region in
 cache coordinates, or nil when there was no such stroke.
@@ -312,16 +335,8 @@ strokes overlap it, and redraw only those, in drawing order, into a viewport of
 the region. Everything outside is untouchable rather than merely untouched.
 ]]
 function Cache:removeStroke(id)
-    local m = self.by_id[id]
-    if not m or self.closed or not self.bb then return nil end
-
-    self.by_id[id] = nil
-    for i = #self.meta, 1, -1 do
-        if self.meta[i].id == id then table.remove(self.meta, i) end
-    end
-    self.grid:remove(id)
-    self.chunks_by_id[id] = nil
-
+    local m = self:forgetStroke(id)
+    if not m then return nil end
     return self:repair(m)
 end
 
@@ -380,19 +395,6 @@ Candidates come from the grid, so a dense canvas costs what is under the
 eraser. They are walked newest first, and only a candidate's points are
 decoded -- the ones the grid ruled out are never read.
 ]]
-local function pointSegmentDistance2(px, py, x0, y0, x1, y1)
-    local vx, vy = x1 - x0, y1 - y0
-    local len2 = vx * vx + vy * vy
-    if len2 == 0 then
-        local dx, dy = px - x0, py - y0
-        return dx * dx + dy * dy
-    end
-    local at = ((px - x0) * vx + (py - y0) * vy) / len2
-    if at < 0 then at = 0 elseif at > 1 then at = 1 end
-    local dx = px - (x0 + at * vx)
-    local dy = py - (y0 + at * vy)
-    return dx * dx + dy * dy
-end
 
 function Cache:beginErase()
     return {
@@ -462,6 +464,78 @@ function Cache:hitTest(cx, cy, radius, ctx)
     return nil
 end
 
+--[[--
+Every stroke the eraser capsule cut on its way from (x0,y0) to (x1,y1),
+with its surviving runs and the region that stops being ink.
+
+The capsule is what closes the gap between two eraser samples: each stroke
+is tested against the swept segment, not against two circles, so a fast
+pass cannot slide between them. Every candidate under the capsule is
+processed -- with segment-level cutting, "everything under the rubber" is
+the physical eraser's meaning, and it is what lets dense hatching go in one
+pass. Candidates come from the grid; a candidate's nearby chunks gate the
+full decode, so the whole stroke is read exactly once and only when it is
+about to be cut. A chunk failure fails the cache, exactly as hitTest does:
+half-read geometry must not decide what gets deleted.
+]]
+function Cache:eraseSweep(x0, y0, x1, y1, radius, ctx)
+    if not self.grid then return nil end
+    local min_x, max_x = x0, x1
+    if min_x > max_x then min_x, max_x = max_x, min_x end
+    local min_y, max_y = y0, y1
+    if min_y > max_y then min_y, max_y = max_y, min_y end
+    local candidates = self:_metaNear(min_x - radius, min_y - radius,
+        max_x + radius, max_y + radius)
+    if ctx and ctx.stats then
+        ctx.stats.candidates = ctx.stats.candidates + #candidates
+    end
+    local hits = nil
+    for i = 1, #candidates do
+        local m = candidates[i]
+        local reach = radius + (tonumber(m.width) or 0) / 2
+        local r2 = reach * reach
+        local touched = false
+        local chunks = self.chunks_by_id[m.id] or {}
+        for c = 1, #chunks do
+            local cm = chunks[c]
+            if self:_boxTouches(cm, min_x - reach, min_y - reach,
+                max_x + reach, max_y + reach, 0) then
+                if ctx and ctx.stats then
+                    ctx.stats.chunks_consulted = ctx.stats.chunks_consulted + 1
+                end
+                if m.points then
+                    local first, last = self:_liveChunkRange(m, cm.chunk_no)
+                    touched = Split.capsuleHitsRange(m.points, first, last,
+                        x0, y0, x1, y1, r2)
+                else
+                    local part, n = self:_readChunk(m, cm.chunk_no, ctx)
+                    if not part then self:_fail(n); return nil, n end
+                    touched = Split.capsuleHitsRange(part, 1, n,
+                        x0, y0, x1, y1, r2)
+                end
+                if touched then break end
+            end
+        end
+        if touched then
+            local points, n = self:_readAllPoints(m, ctx)
+            if not points then self:_fail(n); return nil, n end
+            local fragments, removed = Split.splitByCapsule(points, n,
+                x0, y0, x1, y1, reach, tonumber(m.width) or 0)
+            if fragments then
+                if not hits then hits = {} end
+                hits[#hits + 1] = {
+                    meta = m, points = points, n = n,
+                    fragments = fragments, removed = removed,
+                }
+            end
+        end
+    end
+    if hits and #hits > 1 then
+        table.sort(hits, function(a, b) return a.meta.seq < b.meta.seq end)
+    end
+    return hits
+end
+
 function Cache:_pointsHit(points, n, cx, cy, r2)
     return self:_pointsRangeHit(points, 1, n, cx, cy, r2)
 end
@@ -473,7 +547,7 @@ function Cache:_pointsRangeHit(points, first, last, cx, cy, r2)
         return dx * dx + dy * dy <= r2
     end
     for j = first + 1, last do
-        if pointSegmentDistance2(cx, cy,
+        if Split.pointSegmentDistance2(cx, cy,
             points[j * 2 - 3], points[j * 2 - 2],
             points[j * 2 - 1], points[j * 2]) <= r2 then
             return true
@@ -807,6 +881,41 @@ function Cache:_readChunk(m, chunk_no, ctx, stats)
             ctx.cache[evicted] = nil
         end
     end
+    return points, n
+end
+
+--- The whole stroke as one flat array plus its count. Live metas hand back
+--- their own table -- callers read, never mutate. Persisted metas are
+--- assembled from chunks through the erase LRU, with the repeated seam
+--- point dropped and checked the way Codec.join checks it.
+function Cache:_readAllPoints(m, ctx)
+    if m.points then return m.points, m.n end
+    local total = m.point_count
+    local chunk_count = Codec.chunkCount(total)
+    if chunk_count == 1 then
+        local points, n = self:_readChunk(m, 0, ctx)
+        if not points then return nil, n end
+        if n ~= total then return nil, "chunk_count" end
+        return points, n
+    end
+    local points, n = {}, 0
+    for chunk_no = 0, chunk_count - 1 do
+        local part, count = self:_readChunk(m, chunk_no, ctx)
+        if not part then return nil, count end
+        local from = 1
+        if chunk_no > 0 then
+            if part[1] ~= points[n * 2 - 1] or part[2] ~= points[n * 2] then
+                return nil, "chunk_joint"
+            end
+            from = 2
+        end
+        for i = from, count do
+            n = n + 1
+            points[n * 2 - 1] = part[i * 2 - 1]
+            points[n * 2] = part[i * 2]
+        end
+    end
+    if n ~= total then return nil, "chunk_count" end
     return points, n
 end
 
