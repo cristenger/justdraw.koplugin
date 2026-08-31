@@ -221,4 +221,84 @@ return function(ctx)
         t:check(session:addStroke({ 7, 7, 8, 8 }, 2, 4, 1) ~= nil,
             "the next stroke works without Retry")
     end)
+
+    t:describe("ink_surface_session / partial erase")
+
+    local BAR5 = { width = 4, tool = 1, n = 5,
+        points = { 100, 100, 200, 100, 300, 100, 400, 100, 500, 100 } }
+
+    t:case("the eraser cuts a stroke into fragments, atomically", function()
+        local session, store, sched = fixture{ stroke = BAR5 }
+        session:open()
+        sched:drain()
+        t:eq(session:isReady(), true, "ready")
+        local original = session:cache():strokes()[1].id
+        local ctx = session:beginErase()
+        local box = session:eraseAt(300, 100, 18, ctx)
+        session:endErase(ctx)
+        t:check(box ~= nil, "the cut reports a dirty region")
+        local metas = session:cache():strokes()
+        t:eq(#metas, 2, "two fragments remain")
+        t:eq(metas[1].point_count, 2, "the head kept its two points")
+        t:eq(metas[2].point_count, 2, "the tail kept its two points")
+        t:check(metas[1].from_erase and metas[2].from_erase,
+            "both are marked as erase debris")
+        t:eq(session:pendingWrites(), 3,
+            "two inserts and one delete travel in the same flush")
+        t:eq(session.maintenance_pending, true,
+            "a persisted original schedules maintenance")
+        t:eq(session:flush(), true, "durable")
+        t:eq(#store.strokes[SURFACE.id], 2, "the store holds the fragments")
+        t:eq(store.deleted[1], original, "and the original row is gone")
+    end)
+
+    t:case("a fast pass cannot slide between two eraser samples", function()
+        local session, _, sched = fixture{ stroke = BAR5 }
+        session:open()
+        sched:drain()
+        local ctx = session:beginErase()
+        t:eq(session:eraseAt(300, 400, 18, ctx), nil, "far below: nothing yet")
+        local box = session:eraseAt(300, 50, 18, ctx)
+        session:endErase(ctx)
+        t:check(box ~= nil, "the capsule between the samples cut the stroke")
+        t:eq(#session:cache():strokes(), 2, "into two fragments")
+    end)
+
+    t:case("a refused enqueue leaves the stroke whole", function()
+        local session, store, sched = fixture{
+            stroke = BAR5,
+            queue_opts = { hard_ops = 1 },
+        }
+        session:open()
+        sched:drain()
+        local ctx = session:beginErase()
+        local box, err = session:eraseAt(300, 100, 18, ctx)
+        session:endErase(ctx)
+        t:eq(box, nil, "the sample was skipped")
+        t:eq(err, "queue_backpressure", "with the queue's own reason")
+        t:eq(#session:cache():strokes(), 1, "the original is untouched")
+        t:eq(session:cache():strokes()[1].point_count, 5, "with all its points")
+        t:eq(session:flush(), true, "the queue drains cleanly")
+        t:eq(#store.strokes[SURFACE.id], 1, "the store never saw fragments")
+        t:eq(#store.deleted, 0, "nor a delete")
+    end)
+
+    t:case("undo after a cut removes the last drawn stroke, not a fragment", function()
+        local session, _, sched = fixture{ stroke = BAR5 }
+        session:open()
+        sched:drain()
+        local b = session:addStroke({ 800, 800, 900, 900 }, 2, 4, 1)
+        t:check(b ~= nil, "stroke B drawn on top")
+        local ctx = session:beginErase()
+        t:check(session:eraseAt(300, 100, 18, ctx) ~= nil, "A was cut")
+        session:endErase(ctx)
+        t:eq(#session:cache():strokes(), 3, "B plus two fragments of A")
+        t:eq(session:canUndo(), true, "undo is offered")
+        t:check(session:undo() ~= nil, "and taken")
+        local metas = session:cache():strokes()
+        t:eq(#metas, 2, "B is gone, the fragments survived")
+        t:check(metas[1].from_erase and metas[2].from_erase,
+            "only erase debris remains")
+        t:eq(session:canUndo(), false, "which undo does not offer to remove")
+    end)
 end

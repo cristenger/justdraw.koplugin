@@ -14,6 +14,21 @@ local Queue = require("ink_canvas_queue")
 local SurfaceSession = {}
 SurfaceSession.__index = SurfaceSession
 
+--- Union of two cache-coordinate boxes {x, y, w, h}; either may be nil.
+local function unionBox(a, b)
+    if not a then return b end
+    if not b then return a end
+    local x = a.x < b.x and a.x or b.x
+    local y = a.y < b.y and a.y or b.y
+    local ar, ab = a.x + a.w, a.y + a.h
+    local br, bb = b.x + b.w, b.y + b.h
+    return {
+        x = x, y = y,
+        w = (ar > br and ar or br) - x,
+        h = (ab > bb and ab or bb) - y,
+    }
+end
+
 local function encodedBytes(n)
     n = tonumber(n)
     if not n or n < 1 or n ~= math.floor(n) then return nil end
@@ -276,30 +291,102 @@ function SurfaceSession:endErase(ctx)
     if self.cache_obj then self.cache_obj:endErase(ctx) end
 end
 
+--[[--
+One eraser sample: cut every stroke the capsule from the previous sample
+touched, replacing each with its surviving runs (ADR-32).
+
+Per stroke the replacement is all-or-nothing, built from queue primitives
+alone: the fragments are added first -- their pixels are already on the
+raster, so painting them again changes nothing visible -- and only when
+every one is queued does the original's delete join them. In the flush the
+inserts therefore precede the delete inside one transaction, so no power
+loss can keep the delete without the fragments. A refusal anywhere
+withdraws the fragments and leaves the stroke exactly as it was; the
+sample is skipped and the next one retries after the queue's tick.
+]]
 function SurfaceSession:eraseAt(cx, cy, radius, ctx)
     if not self:isWritable() then return nil, "read_only" end
     if self:saveFailed() then return nil, "save_failed" end
     if not self:isReady() then return nil, self:stateName() end
-    local hit, hit_err = self.cache_obj:hitTest(cx, cy, radius, ctx)
-    if not hit then return nil, hit_err end
-    local was_maintenance = self.maintenance_pending
-    if hit.id > 0 or self.queue:realId(hit.id) then
+    local x0, y0 = cx, cy
+    if ctx then
+        x0 = ctx.sweep_x or cx
+        y0 = ctx.sweep_y or cy
+        ctx.sweep_x, ctx.sweep_y = cx, cy
+    end
+    local hits, sweep_err = self.cache_obj:eraseSweep(x0, y0, cx, cy, radius, ctx)
+    if not hits then return nil, sweep_err end
+    local union = nil
+    for i = 1, #hits do
+        local box, err = self:_applySplit(hits[i])
+        if not box then return union, err end
+        union = unionBox(union, box)
+    end
+    return union
+end
+
+function SurfaceSession:_applySplit(hit)
+    local m = hit.meta
+    local added = {}
+    for f = 1, #hit.fragments do
+        local range = hit.fragments[f]
+        local count = range.last - range.first + 1
+        local frag = {}
+        local at = 0
+        for p = range.first, range.last do
+            at = at + 1
+            frag[at * 2 - 1] = hit.points[p * 2 - 1]
+            frag[at * 2] = hit.points[p * 2]
+        end
+        local frag_id, err = self:addStroke(frag, count, m.width, m.tool)
+        if not frag_id then
+            self:_withdrawFragments(added)
+            return nil, err
+        end
+        added[#added + 1] = frag_id
+        local frag_meta = self.cache_obj:metaById(frag_id)
+        if frag_meta then frag_meta.from_erase = true end
+    end
+    local accepted, remove_err = self.queue:removeStroke(self.surface_obj, m.id)
+    if not accepted then
+        self:_withdrawFragments(added)
+        return nil, remove_err
+    end
+    if m.id > 0 or self.queue:realId(m.id) then
         self.maintenance_pending = true
     end
-    local accepted, err = self.queue:removeStroke(self.surface_obj, hit.id)
-    if not accepted then self.maintenance_pending = was_maintenance; return nil, err end
-    local box, remove_err = self.cache_obj:removeStroke(hit.id)
-    if not box then return nil, remove_err end
+    self.cache_obj:forgetStroke(m.id)
     self.edited = true
-    return box
+    return self.cache_obj:repair{
+        min_x = hit.removed.min_x, min_y = hit.removed.min_y,
+        max_x = hit.removed.max_x, max_y = hit.removed.max_y,
+        width = m.width,
+    }
+end
+
+--- Take back fragments whose stroke could not be replaced after all. Their
+--- inserts are still pending -- withdrawn without residue -- and their
+--- pixels are a subset of the original's, which is still indexed, so the
+--- removeStroke repaint restores nothing visibly different. Consumed seq
+--- numbers are left as gaps: seq is ordered, never dense.
+function SurfaceSession:_withdrawFragments(added)
+    for i = #added, 1, -1 do
+        self.queue:removeStroke(self.surface_obj, added[i])
+        self.cache_obj:removeStroke(added[i])
+    end
 end
 
 function SurfaceSession:undo()
     if not self:isWritable() then return nil, "read_only" end
     if self:saveFailed() then return nil, "save_failed" end
     if not self:isReady() then return nil, self:stateName() end
+    -- Skip erase debris: undo means "take back the last thing I drew",
+    -- and a fragment of an older stroke is not that (ADR-32).
     local strokes = self.cache_obj:strokes()
-    local last = strokes[#strokes]
+    local last
+    for i = #strokes, 1, -1 do
+        if not strokes[i].from_erase then last = strokes[i]; break end
+    end
     if not last then return nil end
     local was_maintenance = self.maintenance_pending
     if last.id > 0 or self.queue:realId(last.id) then
@@ -329,7 +416,10 @@ function SurfaceSession:canUndo()
     if not self:isReady() or not self:isWritable() or self:saveFailed()
         or not self.cache_obj then return false end
     local strokes = self.cache_obj:strokes()
-    return strokes[#strokes] ~= nil
+    for i = #strokes, 1, -1 do
+        if not strokes[i].from_erase then return true end
+    end
+    return false
 end
 
 function SurfaceSession:flush()
