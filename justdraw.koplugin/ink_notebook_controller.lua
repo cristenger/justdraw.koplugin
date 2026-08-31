@@ -71,6 +71,18 @@ function Controller:_ensureRepository()
     return repo
 end
 
+--[[--
+The read side of the notebook store, for one export.
+
+The controller stays the owner of the connection's lifetime; what an export
+borrows is the ability to read pages and strokes for as long as its job runs.
+It never writes, which is what lets this be a plain accessor rather than a
+second write path with its own ordering rules.
+]]
+function Controller:exportRepository()
+    return self:_ensureRepository()
+end
+
 function Controller:listNotebooks(cursor, limit)
     local repo, err = self:_ensureRepository()
     if not repo then return nil, err end

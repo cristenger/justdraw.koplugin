@@ -54,8 +54,19 @@ koreader/plugins/justdraw.koplugin/main.lua
 Open **More tools → JustDraw** while reading. Standalone notebooks are also
 available under **File manager → More tools → Notebooks**.
 
-Back up KOReader's settings before using or upgrading the plugin. Sync and
-export are not implemented.
+Back up KOReader's settings before using or upgrading the plugin. Sync is not
+implemented.
+
+**Export.** A notebook, an EPUB sheet and the page you are reading in a
+fixed-layout document can be written out as PDF, PNG or JPEG, to a folder you
+choose. The entry is **Export…** — in the JustDraw menu while reading, in a
+notebook's **More** menu, and in the library's per-notebook actions. The
+proposed file name carries the page number when you are exporting a single
+page, and you can change it. If the folder looks too full you are asked before
+anything is written, and if an earlier export was interrupted you are offered
+its leftovers to delete. The PDF is a raster: the ink is a picture, not
+editable vectors. Exporting a whole EPUB by page, and exporting a page of a
+reflowable book directly, are not implemented.
 
 ## Development
 

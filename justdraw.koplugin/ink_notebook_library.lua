@@ -25,6 +25,8 @@ local _ = require("gettext")
 local N_ = _.ngettext
 
 local Errors = require("ink_notebook_errors")
+local ExportDialog = require("ink_export_dialog")
+local ExportSource = require("ink_export_source")
 local NotebookLayout = require("ink_notebook_layout")
 
 local Screen = Device.screen
@@ -563,11 +565,64 @@ function Library:showActions(item)
             {{ text = _("Delete"), enabled = writable, callback = function()
                 self:_closeModal(dialog); self:confirmDelete(item)
             end }},
+            {{ text = _("Export…"), callback = function()
+                self:_closeModal(dialog); self:showExport(item)
+            end }},
             {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }},
         },
     }
     self:_showModal(dialog)
     return dialog
+end
+
+--[[--
+Export a whole notebook from the library, with no notebook open.
+
+Reachable from the file browser, which is the point: a notebook needs no book,
+and neither does getting one out. Read-only is not a bar -- an export writes
+nothing to the store -- so this stays available where Rename and Delete do not.
+]]
+function Library:showExport(item)
+    local repository, repo_err = self.controller:exportRepository()
+    if not repository then
+        self:_showInfo(ExportDialog.reason(repo_err))
+        return nil, repo_err
+    end
+    local title = item.title or "Notebook"
+    return ExportDialog.show{
+        title = T(_("Export “%1”"), title),
+        stem = title .. " " .. os.date("%Y-%m-%d-%H%M%S"),
+        settings = _G.G_reader_settings,
+        show_modal = function(widget) return self:_showModal(widget) end,
+        close_modal = function(widget) return self:_closeModal(widget) end,
+        notify = function(text) self:_showInfo(text) end,
+        build = function()
+            local pages, list_err = ExportSource.notebookPages(repository, item.id)
+            if not pages then return nil, list_err end
+            local tracker = {}
+            return {
+                items = pages,
+                pixels = ExportSource.totalPixels(pages,
+                    ExportSource.notebookGeometry),
+                title = title,
+                -- Another notebook may be open in an editor with unsaved ink;
+                -- the controller's flush covers whichever session that is.
+                flush = function() return self.controller:onFlushSettings() end,
+                render = ExportSource.surfaceRenderer{
+                    repository = repository,
+                    schedule = function(fn) UIManager:nextTick(fn) end,
+                    geometry = ExportSource.notebookGeometry,
+                    track = function(job) tracker.job = job end,
+                },
+                finish = function()
+                    if tracker.job then tracker.job:close() end
+                end,
+                cancel = function()
+                    if tracker.job then tracker.job:close() end
+                end,
+            }
+        end,
+    }
 end
 
 function Library:onSetDimensions()

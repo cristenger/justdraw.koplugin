@@ -1271,6 +1271,317 @@ else
     end
 end
 
+-- ---------------------------------------------------------------------
+-- Export. Everything here is a promise `ink_export*` makes about KOReader
+-- that tests/support.lua cannot keep: the encoder's return convention, the
+-- exact byte count behind a BlitBuffer, whether zlib is present at all, and
+-- whether a PDF this plugin wrote is one MuPDF will open.
+do
+    local Blitbuffer = require("ffi/blitbuffer")
+
+    claim("Blitbuffer.tostring exists and is the export's source of bytes",
+        type(Blitbuffer.tostring) == "function",
+        type(Blitbuffer.tostring) == "function")
+
+    -- The PDF writer is handed `w * h` bytes and declares that as the image
+    -- size. `tostring` returns `stride * h`, so the compact copy the export
+    -- makes is the only form where those two are the same number.
+    if type(Blitbuffer.tostring) == "function" then
+        local w, h = 7, 5
+        local compact = Blitbuffer.new(w, h, Blitbuffer.TYPE_BB8, nil, w, w)
+        compact:fill(Blitbuffer.COLOR_WHITE)
+        local bytes = Blitbuffer.tostring(compact)
+        claim("a compact BB8 is exactly one byte per pixel",
+            true, #bytes == w * h,
+            string.format("%d bytes for %dx%d", #bytes, w, h))
+        claim("and those bytes are the pixels, not padding",
+            true, bytes:byte(1) == 255 and bytes:byte(#bytes) == 255,
+            "white page reads as 0xFF")
+        compact:free()
+
+        local padded = Blitbuffer.new(w, h, Blitbuffer.TYPE_BB8)
+        claim("an unpadded BB8 is what the export must not assume",
+            true, type(Blitbuffer.tostring(padded)) == "string",
+            string.format("stride=%s w=%d", tostring(padded.stride), w))
+        padded:free()
+    end
+
+    local ExportJob = require("ink_export")
+    local lfs = require("libs/libkoreader-lfs")
+    local probe_dir = os.getenv("TMPDIR") or "/tmp"
+    local png_path = probe_dir .. "/justdraw-conformance.png"
+    local shot = Blitbuffer.new(4, 3, Blitbuffer.TYPE_BB8)
+    shot:fill(Blitbuffer.COLOR_WHITE)
+
+    local wrote, write_err = ExportJob.writeImage(shot, png_path, "png", 90)
+    claim("BlitBuffer:writeToFile writes a PNG and answers truthy",
+        type(shot.writeToFile) == "function", wrote == true,
+        tostring(write_err))
+    os.remove(png_path)
+
+    -- The one that matters, and it is a trap rather than a contract:
+    -- `writeToFile` wraps the encoder in a pcall, but lodepng and turbojpeg
+    -- do not report a file error at all, so writing into a folder that does
+    -- not exist returns true and creates nothing. `ink_export` therefore
+    -- checks that the file is there before it renames it into place.
+    local missing_dir = probe_dir .. "/justdraw-absent-" .. tostring(os.time())
+    local missing_path = missing_dir .. "/x.png"
+    local claimed = ExportJob.writeImage(shot, missing_path, "png", 90)
+    local really_there = lfs.attributes(missing_path, "mode")
+    claim("writeToFile claims success even when nothing was written",
+        true, claimed == true and really_there == nil,
+        "so the export verifies the file rather than trusting the return")
+    shot:free()
+
+    -- The convention that decides whether a truncated PDF is renamed into
+    -- place. `file:close()` answers `true`, or `nil, message, errno` -- never
+    -- `false` -- so a `== false` check is dead code, and the buffered tail of
+    -- a file (a PDF's xref and trailer are well under BUFSIZ) fails only
+    -- here. The suite's own fake used to say `false`, which is how a dead
+    -- check passed for a while.
+    local close_path = probe_dir .. "/justdraw-close-probe"
+    local close_handle = io.open(close_path, "wb")
+    local closed_ok, closed_err
+    if close_handle then
+        close_handle:write("x")
+        closed_ok, closed_err = close_handle:close()
+    end
+    claim("file:close() answers true, never false, so a failure must be `not ok`",
+        close_handle ~= nil,
+        closed_ok == true and closed_err == nil,
+        "close -> " .. tostring(closed_ok))
+    os.remove(close_path)
+
+    local zlib_ok, zlib = pcall(require, "ffi/zlib")
+    local compressed
+    if zlib_ok and type(zlib.zlib_compress) == "function" then
+        local sample = string.rep("\0", 4096)
+        compressed = zlib.zlib_compress(sample)
+        claim("zlib compresses, and the PDF's /FlateDecode reverses it",
+            true,
+            type(compressed) == "string" and #compressed < #sample
+              and zlib.zlib_uncompress(compressed, #sample) == sample,
+            string.format("%d bytes from %d", #(compressed or ""), #sample))
+    else
+        claim("zlib compresses, and the PDF's /FlateDecode reverses it",
+            false, false, "ffi/zlib absent; the PDF is written uncompressed")
+    end
+
+    -- A PDF written here, opened by KOReader's own MuPDF. Nothing else in the
+    -- suite can state that the bytes are a document rather than merely
+    -- self-consistent.
+    local Pdf = require("ink_export_pdf")
+    local pdf_path = probe_dir .. "/justdraw-conformance.pdf"
+    local handle = io.open(pdf_path, "wb")
+    local built = false
+    if handle then
+        local writer = Pdf.new{
+            write = function(chunk) return handle:write(chunk) end,
+            tell = function() return handle:seek() end,
+            compress = zlib_ok and zlib.zlib_compress or nil,
+            title = "JustDraw conformance",
+        }
+        built = writer:addImagePage{
+            width_pt = 419.53, height_pt = 595.28, w = 4, h = 2,
+            gray = string.char(0, 0, 0, 255) .. string.char(255, 255, 255, 0),
+        } and writer:finish() and true or false
+        handle:close()
+    end
+
+    local mupdf_ok, mupdf = pcall(require, "ffi/mupdf")
+    if built and mupdf_ok then
+        local opened, document = pcall(mupdf.openDocument, pdf_path)
+        claim("a PDF written by this plugin opens in KOReader's MuPDF",
+            true, opened and document ~= nil, tostring(document))
+        if opened and document then
+            local pages_ok, pages = pcall(document.getPages, document)
+            claim("and MuPDF agrees about the page count",
+                true, pages_ok and pages == 1, tostring(pages))
+            local page_ok, page = pcall(document.openPage, document, 1)
+            if page_ok and page then
+                -- getSize answers two numbers at 72 dpi, which is the unit the
+                -- MediaBox is written in, so this compares like with like.
+                local size_ok, page_w, page_h = pcall(page.getSize, page,
+                    { zoom = 1, rotate = 0 })
+                local measured = size_ok and type(page_w) == "number"
+                claim("and about the page size the MediaBox declared",
+                    true,
+                    measured and math.abs(page_w - 419.53) < 1.5
+                      and math.abs(page_h - 595.28) < 1.5,
+                    measured and string.format("%.2f x %.2f", page_w, page_h)
+                      or "no size")
+                -- The vectorial route is a later spike, never a requirement of
+                -- v1; this only records whether this runtime could host it.
+                claim("MuPDF ink annotations, for the vectorial spike only",
+                    type(page.addInkAnnotation) == "function",
+                    type(page.addInkAnnotation) == "function",
+                    "not required by v1")
+                page:close()
+            else
+                claim("and about the page size the MediaBox declared",
+                    false, false, "page could not be opened")
+            end
+            document:close()
+        end
+    else
+        claim("a PDF written by this plugin opens in KOReader's MuPDF",
+            mupdf_ok, false,
+            built and "ffi/mupdf absent" or "the writer produced nothing")
+    end
+    os.remove(pdf_path)
+
+    -- The export copies `ReaderView:drawSinglePage` argument for argument. If
+    -- KOReader changes what `drawPage` takes, this is where it is noticed --
+    -- rather than in a page exported at someone else's gamma.
+    local Document = require("document/document")
+    local nparams
+    if type(debug) == "table" and type(debug.getinfo) == "function" then
+        local info = debug.getinfo(Document.drawPage, "u")
+        nparams = info and info.nparams
+    end
+    claim("Document:drawPage still takes the nine arguments the export passes",
+        type(nparams) == "number", nparams == 10,
+        string.format("self plus %s", tostring(nparams and nparams - 1)))
+
+    local util = require("util")
+    claim("util.getSafeFilename is available to name an export",
+        type(util.getSafeFilename) == "function",
+        type(util.getSafeFilename) == "function")
+
+    local filemanagerutil = require("apps/filemanager/filemanagerutil")
+    claim("filemanagerutil.showChooseDialog is what picks the folder",
+        type(filemanagerutil.showChooseDialog) == "function",
+        type(filemanagerutil.showChooseDialog) == "function")
+
+    local PathChooser = require("ui/widget/pathchooser")
+    claim("PathChooser still selects a directory and answers onConfirm",
+        type(PathChooser) == "table", PathChooser.select_directory ~= nil
+          and PathChooser.select_file ~= nil,
+        "select_directory and select_file are both settable")
+
+    local DataStorage = require("datastorage")
+    claim("the default export folder resolves under KOReader's data directory",
+        type(DataStorage.getFullDataDir) == "function",
+        type(DataStorage:getFullDataDir()) == "string",
+        tostring(DataStorage:getFullDataDir()) .. "/justdraw-exports")
+
+    -- The disk-space forecast. `tests/support.lua` deliberately has no
+    -- `diskUsage` fake -- a fake of a `df` would say nothing true -- so the
+    -- shape of the real answer is only ever stated here.
+    local data_dir = DataStorage:getDataDir()
+    local usage = type(util.diskUsage) == "function" and util.diskUsage(data_dir) or nil
+    claim("util.diskUsage answers a table with available in bytes",
+        type(util.diskUsage) == "function",
+        type(usage) == "table" and type(usage.available) == "number"
+          and usage.available > 0,
+        type(usage) == "table" and tostring(usage.available) .. " bytes free in "
+          .. data_dir or "no table")
+
+    local absent_ok, absent = pcall(util.diskUsage, "/justdraw-definitely-not-here")
+    claim("util.diskUsage answers nils rather than raising for a bad folder",
+        type(util.diskUsage) == "function",
+        absent_ok and type(absent) == "table" and absent.available == nil,
+        "the export reads that as 'not known' and asks nothing")
+
+    claim("util.getFriendlySize refuses what is not a number",
+        type(util.getFriendlySize) == "function",
+        util.getFriendlySize("not a size") == nil
+          and type(util.getFriendlySize(1048576)) == "string",
+        tostring(util.getFriendlySize(1048576)))
+
+    -- The orphan sweep. Both of these are exactly why `Export.orphans` wraps
+    -- the whole walk in a pcall and treats a missing modification time as
+    -- "unknown age", rather than as "old".
+    local lfs = require("libs/libkoreader-lfs")
+    local raised = not pcall(function()
+        for _ in lfs.dir("/justdraw-definitely-not-here") do end
+    end)
+    claim("lfs.dir raises for a folder that is not there",
+        true, raised, "it does not answer nil, so the sweep runs under pcall")
+
+    local first_two = {}
+    for name in lfs.dir(data_dir) do
+        first_two[#first_two + 1] = name
+        if #first_two >= 2 then break end
+    end
+    table.sort(first_two)
+    claim("lfs.dir yields dot and dot-dot, which the sweep must skip",
+        true, first_two[1] == "." and first_two[2] == "..",
+        table.concat(first_two, " "))
+
+    claim("lfs.attributes answers a numeric modification time",
+        true, type(lfs.attributes(data_dir, "modification")) == "number")
+
+    -- The scope-aware file name. These two are what `tests/support.lua`'s
+    -- MultiInputDialog and RadioButtonTable fakes assert about KOReader, and
+    -- the whole of `Dialog.proposeStem` rests on them.
+    local RadioButtonTable = require("ui/widget/radiobuttontable")
+    local selected
+    local radio_ok, radio = pcall(RadioButtonTable.new, RadioButtonTable, {
+        width = 200,
+        radio_buttons = {{ { text = "A", value = "a", checked = true },
+                           { text = "B", value = "b" } }},
+        button_select_callback = function(entry) selected = entry end,
+    })
+    local fired = false
+    if radio_ok and radio and radio.radio_buttons_layout then
+        local row = radio.radio_buttons_layout[1]
+        local button = row and row[2]
+        if button and type(button.callback) == "function" then
+            pcall(button.callback)
+            fired = selected ~= nil and selected.value == "b"
+        end
+    end
+    claim("RadioButtonTable calls button_select_callback with the entry",
+        radio_ok and radio ~= nil, fired,
+        "the scope radio recomputes the proposed name from this")
+
+    local MultiInputDialog = require("ui/widget/multiinputdialog")
+    local dialog_ok, dialog = pcall(MultiInputDialog.new, MultiInputDialog, {
+        title = "probe",
+        fields = {{ description = "File name", text = "proposed" }},
+        buttons = {{ { text = "Close", id = "close" } }},
+    })
+    local field = dialog_ok and dialog and dialog.input_fields
+        and dialog.input_fields[1] or nil
+    local usable = field ~= nil and type(field.setText) == "function"
+        and type(field.isTextEdited) == "function"
+    local field_ok = false
+    if usable then
+        field:setText("replaced")
+        field_ok = field:getText() == "replaced"
+    end
+    claim("MultiInputDialog exposes input_fields that set text and report editing",
+        dialog_ok and usable, field_ok,
+        "Dialog.proposeStem writes through input_fields[1]")
+
+    -- The half that decides whether a reader's typed name survives a change of
+    -- scope. `setText` clears the edited flag unless told to keep it, so a
+    -- proposal reads as "not edited" and a proposal made with `keep` would
+    -- read as "edited" -- which is why `proposeStem` passes neither and relies
+    -- on the default.
+    local edited_ok = false
+    if usable and type(field.addChars) == "function" then
+        field:setText("proposed")
+        local proposed_reads_unedited = field:isTextEdited() == false
+        -- What the keyboard does.
+        field:addChars("x")
+        local typing_marks_it = field:isTextEdited() == true
+        field:setText("kept", true)
+        edited_ok = proposed_reads_unedited and typing_marks_it
+            and field:isTextEdited() == true
+        field:setText("plain")
+        edited_ok = edited_ok and field:isTextEdited() == false
+    end
+    claim("InputText:setText clears the edited flag unless asked to keep it",
+        usable and field ~= nil and type(field.addChars) == "function", edited_ok,
+        "a proposed name reads as unedited; a reader's name does not")
+    if dialog_ok and dialog and dialog.onCloseWidget then
+        pcall(dialog.onCloseWidget, dialog)
+    end
+
+end
+
 for _, r in ipairs(rows) do
     io.write(string.format("%-12s %-56s %s\n", r[1], r[2], r[3]))
 end

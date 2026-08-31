@@ -352,6 +352,28 @@ function FakeBB:blitFrom(src, dest_x, dest_y, offs_x, offs_y, w, h)
     }
 end
 
+function FakeBB:getType() return self.bbtype end
+
+--[[--
+The image encoder, as the export calls it.
+
+`BlitBuffer:writeToFile` returns the results of a `pcall`, so a failure is
+`false, message` and never a raise. Recording the call is what lets a spec
+assert the two things that matter about it: that the format reaching KOReader
+came from the closed set the job validated, and that the file written is the
+job's own temporary rather than its destination.
+]]
+function FakeBB:writeToFile(filename, format, quality, grayscale)
+    local root = self.root
+    root.written = root.written or {}
+    root.written[#root.written + 1] = {
+        filename = filename, format = format, quality = quality,
+        grayscale = grayscale, w = self.w, h = self.h,
+    }
+    if root.write_failure then return false, root.write_failure end
+    return true
+end
+
 function FakeBB:free() self.freed = true end
 
 function FakeBB:clear()
@@ -389,8 +411,21 @@ function support.newBlitbufferModule()
     return {
         COLOR_BLACK = "black",
         COLOR_WHITE = "white",
+        -- The real values (koreader-base ffi/blitbuffer.lua @ 6e4bc81a), so a
+        -- test that asserts an export asked for BB8 is asserting the number
+        -- KOReader would have been handed.
+        TYPE_BB4 = 0,
         TYPE_BB8 = 1,
+        TYPE_BB8A = 2,
+        TYPE_BBRGB16 = 3,
+        TYPE_BBRGB24 = 4,
+        TYPE_BBRGB32 = 5,
         new = function(w, h, bbtype) return newFakeBB(w, h, bbtype or 1) end,
+        --- The real one is `ffi.string(bb.data, bb.stride * bb.h)`. A white
+        --- page is the honest stand-in: the fake has no pixel storage, so a
+        --- spec can assert the *length* contract -- which is the one the PDF
+        --- writer depends on -- and nothing about content.
+        tostring = function(bb) return string.rep("\255", bb.w * bb.h) end,
     }
 end
 
@@ -1061,7 +1096,10 @@ function support.newNotebookStore(opts)
     local store = support.newCanvasStore(pages)
     store.notebooks = opts.notebooks or {
         { id = 1, title = "Notebook", page_count = #pages,
-          next_sort_key = (#pages + 1) * 1024, current_page_id = pages[1].id,
+          next_sort_key = (#pages + 1) * 1024,
+          -- A notebook with no live pages is a real state (every page
+          -- tombstoned), and the fake has to be able to hold it.
+          current_page_id = pages[1] and pages[1].id or nil,
           created_at = 1, updated_at = 1 },
     }
     store.pages = pages
@@ -1260,6 +1298,157 @@ a test pumps or advances the clock, which makes delayed-to-urgent replacement,
 idle cleanup and stale-generation callbacks observable without wall time.
 `schedule` remains the next-tick shorthand used by the older suites.
 ]]
+--[[--
+A filesystem, in a table, with the four calls an export makes of one.
+
+Modelled from the real ones rather than invented, because the job's failure
+handling is written against their exact shapes and a friendlier stub would
+make all of it pass for the wrong reason:
+
+1. `io.open` answers `nil, message` when it cannot open, and the handle's
+   `write` answers the handle itself on success -- truthy, not `true`.
+2. `file:close()` is where a buffered write finally fails, which is why the
+   job checks it before renaming rather than assuming success.
+3. `os.rename` and `os.remove` answer `nil, message`, not `false`.
+4. `seek()` reports the handle's own idea of the offset, which is what the
+   PDF writer cross-checks its counted offsets against.
+
+`fail_open`, `fail_write`, `fail_close` and `fail_rename` are keyed by path so
+a spec can break exactly one step of one page.
+]]
+function support.newExportFs(opts)
+    opts = opts or {}
+    local fs = {
+        files = opts.files or {},
+        dirs = opts.dirs or {},
+        opened = {}, renames = {}, removes = {},
+        fail_open = opts.fail_open or {},
+        fail_write = opts.fail_write or {},
+        fail_close = opts.fail_close or {},
+        fail_rename = opts.fail_rename or {},
+        fail_remove = opts.fail_remove or {},
+        -- Modification times, for the sweep's minimum age. A file with none
+        -- recorded answers nil, which is what the real `lfs` does for a file
+        -- that vanished between the listing and the stat -- and a temporary
+        -- of unknown age must never be offered for deletion.
+        mtimes = opts.mtimes or {},
+    }
+
+    function fs.attributes(path, what)
+        if what == "mode" then
+            if fs.dirs[path] then return "directory" end
+            if fs.files[path] ~= nil then return "file" end
+            return nil
+        end
+        if what == "size" then
+            local content = fs.files[path]
+            return content and #content or nil
+        end
+        if what == "modification" then
+            if fs.files[path] == nil and not fs.dirs[path] then return nil end
+            return fs.mtimes[path]
+        end
+        return nil
+    end
+
+    --[[--
+    `lfs.dir`, including the parts that are easy to forget.
+
+    It yields "." and ".." before anything else, and it *raises* for a
+    directory that is not there rather than answering nil. Both are why
+    `Export.orphans` looks the way it does, so the fake has to do both or the
+    pcall in production would be untested ceremony.
+    ]]
+    function fs.dir(path)
+        if not fs.dirs[path] then
+            error("cannot open " .. tostring(path) .. ": No such file or directory")
+        end
+        local names = { ".", ".." }
+        local prefix = path == "/" and "/" or (path .. "/")
+        for entry in pairs(fs.files) do
+            local rest = entry:sub(1, #prefix) == prefix and entry:sub(#prefix + 1) or nil
+            if rest and rest ~= "" and not rest:find("/", 1, true) then
+                names[#names + 1] = rest
+            end
+        end
+        for entry in pairs(fs.dirs) do
+            local rest = entry:sub(1, #prefix) == prefix and entry:sub(#prefix + 1) or nil
+            if rest and rest ~= "" and not rest:find("/", 1, true) then
+                names[#names + 1] = rest
+            end
+        end
+        table.sort(names, function(a, b)
+            -- "." and ".." first, as the real one does; the rest in a stable
+            -- order so a spec can rely on what the cap truncates.
+            local rank_a = (a == "." and 0) or (a == ".." and 1) or 2
+            local rank_b = (b == "." and 0) or (b == ".." and 1) or 2
+            if rank_a ~= rank_b then return rank_a < rank_b end
+            return a < b
+        end)
+        local i = 0
+        return function()
+            i = i + 1
+            return names[i]
+        end
+    end
+
+    function fs.open(path, mode)
+        fs.opened[#fs.opened + 1] = { path = path, mode = mode }
+        if fs.fail_open[path] then return nil, fs.fail_open[path] end
+        local parts, offset, closed = {}, 0, false
+        local handle = {}
+        function handle:write(chunk)
+            if closed then return nil, "closed" end
+            if fs.fail_write[path] then return nil, fs.fail_write[path] end
+            parts[#parts + 1] = chunk
+            offset = offset + #chunk
+            return handle
+        end
+        function handle:seek() return offset end
+        function handle:close()
+            if closed then return true end
+            closed = true
+            -- The real one answers `true` or `nil, message, errno` -- never
+            -- `false`. Saying `false` here is what let a `== false` test in
+            -- the job pass while the production check was dead.
+            if fs.fail_close[path] then return nil, fs.fail_close[path], 28 end
+            fs.files[path] = table.concat(parts)
+            return true
+        end
+        return handle
+    end
+
+    function fs.rename(from, to)
+        fs.renames[#fs.renames + 1] = { from = from, to = to }
+        if fs.fail_rename[from] then return nil, fs.fail_rename[from] end
+        if fs.files[from] == nil then return nil, "no such file or directory" end
+        fs.files[to] = fs.files[from]
+        fs.files[from] = nil
+        return true
+    end
+
+    function fs.remove(path)
+        fs.removes[#fs.removes + 1] = path
+        if fs.fail_remove[path] then return nil, fs.fail_remove[path] end
+        if fs.files[path] == nil then return nil, "no such file or directory" end
+        fs.files[path] = nil
+        return true
+    end
+
+    --- Every path that still exists and carries the export's private prefix.
+    --- "Left nothing of its own behind" is otherwise untestable.
+    function fs.temporaries(prefix)
+        local out = {}
+        for path in pairs(fs.files) do
+            if path:find(prefix, 1, true) then out[#out + 1] = path end
+        end
+        table.sort(out)
+        return out
+    end
+
+    return fs
+end
+
 function support.newScheduler(start_time)
     local s = { queue = {}, clock = tonumber(start_time) or 0, serial = 0 }
 
@@ -1742,8 +1931,27 @@ function support.install()
     local MultiInputDialog = {}
     function MultiInputDialog:new(o)
         o = o or {}
-        o._values = {}
-        for i = 1, #(o.fields or {}) do o._values[i] = o.fields[i].text or "" end
+        o._values, o.input_fields = {}, {}
+        for i = 1, #(o.fields or {}) do
+            o._values[i] = o.fields[i].text or ""
+            -- The real field is an InputText, and it carries its own "edited"
+            -- flag. That flag is the only thing separating helping the reader
+            -- from overwriting a name they typed, so the fake has to have it.
+            local field = { _edited = false, _index = i, _dialog = o }
+            function field:getText() return self._dialog._values[self._index] end
+            function field:setText(text, keep)
+                self._dialog._values[self._index] = text
+                if not keep then self._edited = false end
+            end
+            function field:isTextEdited() return self._edited end
+            --- What the keyboard does, so a spec can say "the reader typed
+            --- here" without inventing an event.
+            function field:typeText(text)
+                self._dialog._values[self._index] = text
+                self._edited = true
+            end
+            o.input_fields[i] = field
+        end
         function o:getFields() return self._values end
         o.added_widgets = {}
         function o:addWidget(widget)
@@ -1759,6 +1967,23 @@ function support.install()
     function RadioButtonTable:new(o)
         o = o or {}
         function o:getSize() return { w = self.width or 400, h = 50 } end
+        --- The real widget calls `button_select_callback(entry)` from the
+        --- button's own callback, after checking it. This is that, and only
+        --- that: a spec drives the radio the way a finger would.
+        function o:select(value)
+            for _, row in ipairs(self.radio_buttons or {}) do
+                for _, entry in ipairs(row) do
+                    if entry.value == value then
+                        self.checked_value = value
+                        if self.button_select_callback then
+                            self.button_select_callback(entry)
+                        end
+                        return true
+                    end
+                end
+            end
+            return false
+        end
         return o
     end
     package.preload["ui/widget/radiobuttontable"] = function() return RadioButtonTable end
@@ -1790,6 +2015,68 @@ function support.install()
                 return nil
             end,
         }
+    end
+
+    --- Only the calls the export makes. `getSafeFilename` stands in for the
+    --- real one's job -- replace what a filesystem cannot hold -- without its
+    --- VFAT detection, which is what tests/conformance.lua is for. There is
+    --- deliberately no `diskUsage` here: it shells out to `df`, and a fake of
+    --- it would say nothing true. The space probe is injected instead.
+    package.preload["util"] = function()
+        local util = {}
+        function util.getSafeFilename(str, path, limit, limit_ext)
+            local name = (tostring(str or ""):gsub('[\\/:%*%?"<>|]', "_"))
+            if limit and #name > limit then name = name:sub(1, limit) end
+            return name
+        end
+        function util.fileExists(path) return env.file_modes[path] ~= nil end
+        function util.makePath(path)
+            env.file_modes[path] = "directory"
+            return true
+        end
+        --- Powers of 1000, like the real one, and nil for what is not a
+        --- number -- which is the only part of it any caller here relies on.
+        function util.getFriendlySize(size)
+            size = tonumber(size)
+            if not size then return end
+            if size > 1000 * 1000 * 1000 then
+                return string.format("%.1f GB", size / 1e9)
+            elseif size > 1000 * 1000 then
+                return string.format("%.1f MB", size / 1e6)
+            elseif size > 1000 then
+                return string.format("%.1f kB", size / 1e3)
+            end
+            return string.format("%d B", size)
+        end
+        return util
+    end
+
+    --- Where KOReader keeps its own data. The export's default destination is
+    --- derived from this, so the path a spec sees is the shape of a real one.
+    package.preload["datastorage"] = function()
+        local DataStorage = {}
+        function DataStorage:getDataDir() return "/mnt/us/koreader" end
+        function DataStorage:getFullDataDir() return "/mnt/us/koreader" end
+        function DataStorage:getSettingsDir() return "/mnt/us/koreader/settings" end
+        return DataStorage
+    end
+
+    --[[--
+    The folder chooser, reduced to its contract: it hands a path to a callback,
+    and it may hand back nothing at all if the reader backs out. `answer` is
+    what a spec sets to decide which of those happens.
+    ]]
+    env.choose_folder = { calls = {}, answer = nil }
+    package.preload["apps/filemanager/filemanagerutil"] = function()
+        local filemanagerutil = {}
+        function filemanagerutil.getDefaultDir() return "/mnt/us" end
+        function filemanagerutil.showChooseDialog(title, callback, current, default)
+            env.choose_folder.calls[#env.choose_folder.calls + 1] = {
+                title = title, current = current, default = default,
+            }
+            if env.choose_folder.answer then callback(env.choose_folder.answer) end
+        end
+        return filemanagerutil
     end
 
     package.preload["version"] = function()

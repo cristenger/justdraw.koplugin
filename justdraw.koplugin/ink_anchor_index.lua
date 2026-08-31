@@ -121,6 +121,15 @@ function Index:get(canvas_id)
     return self.by_id[canvas_id]
 end
 
+--- How many canvases this book has, from what the index already holds. The
+--- export's menu gate asks on every menu paint, and a repository query there
+--- would be a SELECT per frame.
+function Index:count()
+    local n = 0
+    for _ in pairs(self.by_id) do n = n + 1 end
+    return n
+end
+
 function Index:pageOf(canvas_id)
     return self.page_of[canvas_id]
 end

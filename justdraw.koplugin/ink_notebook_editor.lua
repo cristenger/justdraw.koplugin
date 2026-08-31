@@ -22,6 +22,8 @@ local _ = require("gettext")
 local N_ = _.ngettext
 
 local Errors = require("ink_notebook_errors")
+local ExportDialog = require("ink_export_dialog")
+local ExportSource = require("ink_export_source")
 local NotebookLayout = require("ink_notebook_layout")
 local Stack = require("ink_stack")
 
@@ -1518,6 +1520,10 @@ function Editor:showMore()
             {{ text = _("Delete notebook"), enabled = writable, callback = function()
                 self:_closeModal(dialog); self:confirmDeleteNotebook()
             end }},
+            {{ text = _("Export…"), enabled = self.snapshot.state ~= "loading",
+                callback = function()
+                    self:_closeModal(dialog); self:showExport()
+                end }},
             {{ text = _("Input mode"), callback = function()
                 self:_closeModal(dialog); self:showInputMode()
             end }},
@@ -1537,6 +1543,77 @@ function Editor:showMore()
         },
     }
     return self:showModalSafely(dialog)
+end
+
+--[[--
+Export this page, or the whole notebook, to a file.
+
+The page rows and the strokes both come from the repository rather than from
+the raster on screen: this window's buffer is at the scale the *screen* asked
+for and is owned by a live session that may rebuild it, while an export needs
+its own at 300 dpi. `showModalSafely` is what refuses this while the pen is
+still down, which is the same gate every other modal here goes through.
+]]
+function Editor:showExport()
+    local repository, repo_err = self.controller:exportRepository()
+    if not repository then
+        self:_showInfo(ExportDialog.reason(repo_err))
+        return nil, repo_err
+    end
+
+    local scopes = {}
+    local session = self.controller:activeSession()
+    local current = session and session:currentPage()
+    if current then
+        scopes[#scopes + 1] = { value = "page", label = _("This page") }
+    end
+    scopes[#scopes + 1] = { value = "notebook", label = _("Whole notebook") }
+
+    local notebook_id = self.notebook.id
+    local title = self.notebook.title
+    return ExportDialog.show{
+        title = T(_("Export “%1”"), title),
+        stem = title .. " " .. os.date("%Y-%m-%d-%H%M%S"),
+        scopes = scopes,
+        settings = _G.G_reader_settings,
+        show_modal = function(widget) return self:showModalSafely(widget) end,
+        close_modal = function(widget) return self:_closeModal(widget) end,
+        notify = function(text) self:_showInfo(text) end,
+        build = function(scope)
+            local items
+            if scope == "page" then
+                if not current then return nil, "no_items" end
+                items = { current }
+            else
+                local pages, list_err =
+                    ExportSource.notebookPages(repository, notebook_id)
+                if not pages then return nil, list_err end
+                items = pages
+            end
+            local tracker = {}
+            return {
+                items = items,
+                pixels = ExportSource.totalPixels(items,
+                    ExportSource.notebookGeometry),
+                title = title,
+                -- The last stroke may still be in the write queue; reading it
+                -- back before that lands would export a page short of ink.
+                flush = function() return self.controller:onFlushSettings() end,
+                render = ExportSource.surfaceRenderer{
+                    repository = repository,
+                    schedule = function(fn) UIManager:nextTick(fn) end,
+                    geometry = ExportSource.notebookGeometry,
+                    track = function(job) tracker.job = job end,
+                },
+                finish = function()
+                    if tracker.job then tracker.job:close() end
+                end,
+                cancel = function()
+                    if tracker.job then tracker.job:close() end
+                end,
+            }
+        end,
+    }
 end
 
 function Editor:showInputMode()

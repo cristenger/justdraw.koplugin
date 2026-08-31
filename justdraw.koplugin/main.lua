@@ -30,6 +30,10 @@ local _ = require("gettext")
 local CanvasSession = require("ink_canvas_session")
 local Capture = require("ink_capture")
 local Compat = require("ink_compat")
+local Export = require("ink_export")
+local ExportDialog = require("ink_export_dialog")
+local ExportReader = require("ink_export_reader")
+local ExportSource = require("ink_export_source")
 local InputController = require("ink_input_controller")
 local InkBar = require("ink_bar")
 local NotebookController = require("ink_notebook_controller")
@@ -402,6 +406,10 @@ function JustDraw:onCloseWidget()
 end
 
 function JustDraw:onSuspend()
+    -- A suspend flushes settings and can close connections underneath a job
+    -- that is still reading through them; and the reader cannot answer a
+    -- progress modal that is no longer on screen.
+    Export.cancelRunning()
     if self.notebooks then self.notebooks:onSuspend() end
     if not self.is_docless then self:setDrawing(false) end
 end
@@ -421,6 +429,9 @@ leaving it dangling loses it silently and leaks contact state into whatever
 document is opened next in the same session.
 ]]
 function JustDraw:teardown()
+    -- Closing the document takes its repository with it, and a raster still
+    -- replaying through that connection would be reading a closed one.
+    Export.cancelRunning()
     self.screen_resize_serial = self.screen_resize_serial + 1
     self.screen_resize_pending = false
     if self.notebook_ui then
@@ -2669,6 +2680,239 @@ plugin does not take core state or screen furniture from the reader.
 
 Quick access is the Dispatcher's job: see `onDispatcherRegisterActions`.
 ]]
+-- ------------------------------------------------------------------ export
+
+--[[--
+Modals this plugin owns while an export is being arranged.
+
+The notebook windows have an owner that tracks what is open; in the reader
+there is none, so the plugin keeps the record itself. `UIManager:close` fires
+CloseWidget before it looks at the window stack but only schedules the widgets
+underneath to repaint when it actually found the widget there, so a second
+close refreshes with nothing repainting behind it and pushes stale pixels back
+at the panel. The record is what makes that second close a no-op (ADR-28).
+]]
+function JustDraw:showExportModal(widget)
+    self.export_modals = self.export_modals or {}
+    self.export_modals[widget] = true
+    local previous = widget.onCloseWidget
+    widget.onCloseWidget = function(dialog, ...)
+        if previous then previous(dialog, ...) end
+        self.export_modals[dialog] = nil
+        -- The second half of ADR-28: the dialogs' own close refreshes are
+        -- regional (`flashui` over `movable.dimen`, or `ui`), and on MTK only
+        -- a full-screen flashing update is fenced against the DU highlight
+        -- still in flight. Full-screen, with no region, is the form
+        -- `_isFullScreen` recognises.
+        UIManager:setDirty(nil, "flashui")
+    end
+    widget.show_parent = widget
+    UIManager:show(widget)
+    return widget
+end
+
+function JustDraw:closeExportModal(widget)
+    if not widget or not self.export_modals or not self.export_modals[widget] then
+        return false
+    end
+    UIManager:close(widget)
+    return true
+end
+
+--[[--
+What this reader could export right now, in the order the dialog offers them.
+
+Each entry is a claim that the work is actually possible: the page scope is
+gated on the renderer accepting this document and view mode, and the whole-book
+scope on the anchor index having finished, because without it the sheets have
+no reading order (ADR-15).
+]]
+function JustDraw:exportScopes()
+    local scopes = {}
+    if self.is_docless then return scopes end
+    if ExportReader.supports(self.ui, self.view) then
+        scopes[#scopes + 1] = { value = "page", label = _("This page") }
+    end
+    local session = self.session
+    if self.canvas_open and session and session:activeCanvas() then
+        scopes[#scopes + 1] = { value = "sheet", label = _("This sheet") }
+    end
+    if session and session:isAvailable() then
+        local repository, index = session:exportSources()
+        if repository and index and index:isComplete() then
+            local canvases = session:allCanvases()
+            if canvases and #canvases > 0 then
+                scopes[#scopes + 1] = {
+                    value = "sheets", label = _("All sheets in this book") }
+            end
+        end
+    end
+    return scopes
+end
+
+--[[--
+Whether the menu entry is live. Deliberately cheap.
+
+`enabled_func` runs while every menu item is built, on every tap and on every
+hold, so this asks the anchor index -- which already holds every canvas row --
+rather than the repository. `exportScopes` does the full work once, when the
+entry is actually chosen.
+]]
+function JustDraw:canExport()
+    if self.is_docless then return false end
+    if ExportReader.supports(self.ui, self.view) then return true end
+    local session = self.session
+    if not session or not session:isAvailable() then return false end
+    if self.canvas_open and session:activeCanvas() then return true end
+    local _repository, index = session:exportSources()
+    return index ~= nil and index:isComplete() and index:count() > 0
+end
+
+--[[--
+The page an exported file's name should carry, or nil.
+
+Nil for "all sheets in this book", because one page number in the name of a
+file that holds twenty would be a lie; and nil for a sheet the anchor index has
+not placed, because inventing a page for an orphan is worse than leaving it
+out. Only a scope that is exactly one page of the book gets one.
+]]
+function JustDraw:exportScopePage(scope)
+    if scope == "page" then return self:currentPage() end
+    if scope ~= "sheet" then return nil end
+    local session = self.session
+    local canvas = session and session:activeCanvas()
+    if not canvas then return nil end
+    local _repository, index = session:exportSources()
+    if type(index) ~= "table" or type(index.pageOf) ~= "function" then
+        return nil
+    end
+    return index:pageOf(canvas.id)
+end
+
+--[[--
+A file name that says which book it came from, which page, and when.
+
+The stamp is passed in rather than read here so that every scope of one dialog
+shares it: recomputing it per scope would make tapping a radio button move the
+time, which is not what the reader asked for. It stays inside what a VFAT
+volume will hold once the suffix and extension are added.
+]]
+function JustDraw:exportStem(scope, stamp)
+    local base = "JustDraw"
+    local file = self.ui and self.ui.document and self.ui.document.file
+    if type(file) == "string" then
+        local name = file:match("([^/]+)$")
+        if name then base = name:match("^(.+)%.[^.]*$") or name end
+    end
+    local page = self:exportScopePage(scope)
+    if page then base = base .. " p" .. tostring(page) end
+    return base .. " " .. (stamp or os.date("%Y-%m-%d-%H%M%S"))
+end
+
+--[[--
+Assemble one export: what to render, how, and what has to be durable first.
+
+Nothing here reads a stroke. The point of doing it up front is that every
+reason an export cannot run -- an unsupported document, a sheet index still
+building, a pen still on the panel -- is found before the reader has been shown
+a progress dialog or a single byte has been written.
+]]
+function JustDraw:buildExport(scope)
+    local lease = self.input_lease
+    if lease and lease:hasActiveContact() then return nil, "contact_active" end
+
+    if scope == "page" then
+        local supported, reason = ExportReader.supports(self.ui, self.view)
+        if not supported then return nil, reason end
+        local page = self:currentPage()
+        -- Read once, here: the store must not be walked again while the job
+        -- runs, and the ink of the page being exported is what was on screen
+        -- when the reader asked.
+        local strokes = self.store and self.store:get(page) or {}
+        return {
+            items = { { page = page } },
+            -- The same product `ExportReader.supports` measured against the
+            -- pixel budget: the page is rasterised at its own screen size.
+            pixels = math.floor(self.view.dimen.w) * math.floor(self.view.dimen.h),
+            -- No `title`: `ExportDialog.run` falls back to the name the reader
+            -- actually chose, which is a better `/Title` than a stem
+            -- regenerated here -- and one that cannot disagree with the file
+            -- name by a few seconds of clock.
+            render = function(item, index, done)
+                local result, render_err = ExportReader.render{
+                    ui = self.ui, view = self.view,
+                    strokes = strokes, ink = INK,
+                }
+                done(result, render_err)
+            end,
+        }
+    end
+
+    local session = self.session
+    if not session or not session:isAvailable() then return nil, "unavailable" end
+    local repository, index = session:exportSources()
+    if not repository then return nil, index or "unavailable" end
+
+    local items
+    if scope == "sheet" then
+        local canvas = session:activeCanvas()
+        if not canvas then return nil, "no_items" end
+        items = { canvas }
+    else
+        local canvases, list_err = session:allCanvases()
+        if not canvases then return nil, list_err or "list_failed" end
+        local ordered, order_err = ExportSource.orderedCanvases(canvases, index)
+        if not ordered then return nil, order_err end
+        items = ordered
+    end
+
+    local tracker = {}
+    return {
+        items = items,
+        pixels = ExportSource.totalPixels(items, ExportSource.canvasGeometry),
+        -- No `title` here either; see the page scope above.
+        -- The ink has to be durable before it is read back out of the
+        -- database; the queue may still be holding the last stroke.
+        flush = function() return session:flush() end,
+        render = ExportSource.surfaceRenderer{
+            repository = repository,
+            schedule = function(fn) UIManager:nextTick(fn) end,
+            geometry = ExportSource.canvasGeometry,
+            track = function(job) tracker.job = job end,
+        },
+        finish = function()
+            if tracker.job then tracker.job:close() end
+        end,
+        -- Closing the raster in flight is what makes Cancel land between
+        -- batches instead of after the page being replayed finishes.
+        cancel = function()
+            if tracker.job then tracker.job:close() end
+        end,
+    }
+end
+
+function JustDraw:showExportDialog()
+    local scopes = self:exportScopes()
+    if #scopes == 0 then
+        local _supported, reason = ExportReader.supports(self.ui, self.view)
+        self:notify(ExportDialog.reason(reason or "no_items"))
+        return nil, reason
+    end
+    -- One stamp for the whole dialog. Reading the clock per scope would make
+    -- tapping a radio button move the time in the proposed name.
+    local stamp = os.date("%Y-%m-%d-%H%M%S")
+    return ExportDialog.show{
+        title = _("Export"),
+        stem = function(scope) return self:exportStem(scope, stamp) end,
+        scopes = scopes,
+        build = function(scope) return self:buildExport(scope) end,
+        settings = G_reader_settings,
+        show_modal = function(widget) return self:showExportModal(widget) end,
+        close_modal = function(widget) return self:closeExportModal(widget) end,
+        notify = function(text) self:notify(text) end,
+    }
+end
+
 function JustDraw:addToMainMenu(menu_items)
     if self.is_docless then
         menu_items.justdraw_notebooks = {
@@ -2756,6 +3000,16 @@ function JustDraw:addToMainMenu(menu_items)
                 end,
                 help_text = _([[Blank sheets anchored to a position in a reflowable book. Not available in PDFs and other fixed layouts, where drawing goes straight onto the page instead.]]),
                 sub_item_table_func = function() return self:canvasMenu() end,
+            },
+            {
+                -- Deliberately closes the menu: the export dialog is a modal,
+                -- and arranging one underneath an open menu leaves two window
+                -- stacks competing for the same taps.
+                text = _("Export…"),
+                separator = true,
+                enabled_func = function() return self:canExport() end,
+                callback = function() self:showExportDialog() end,
+                help_text = _([[Writes what you have drawn to a PDF, PNG or JPEG in a folder of your choosing. Exports the page you are reading, the sheet that is open, or every sheet in this book. Nothing in the book itself is changed.]]),
             },
             {
                 text = _("Clear this page"),

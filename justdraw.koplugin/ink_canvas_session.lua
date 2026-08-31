@@ -469,6 +469,27 @@ function Session:activeCanvas()
     return self.canvas
 end
 
+--[[--
+The read side of this book's canvases, for one export.
+
+Borrowed rather than owned: the export reads strokes through the same
+repository and orders sheets through the same index, and it writes to neither.
+Handing both out together is deliberate -- an export that had the rows but not
+the index would have no reading order and would fall back on `updated_at`,
+which is when a sheet was last drawn on and not where it sits in the book.
+]]
+function Session:exportSources()
+    if not self:isAvailable() then return nil, "unavailable" end
+    return self.repository, self.index
+end
+
+--- Every canvas of this book, metadata only. `canvasesHere` answers for one
+--- page; an export of the whole book needs all of them, orphans included.
+function Session:allCanvases()
+    if not self:isAvailable() then return nil, "unavailable" end
+    return self.repository:listCanvases(self.book_id)
+end
+
 function Session:overlay()
     return self.overlay_widget
 end
