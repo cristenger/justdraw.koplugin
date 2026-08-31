@@ -79,6 +79,17 @@ luajit test.lua
 ## Origin and license
 
 JustDraw began as a fork of
-[Finger Ink](https://github.com/SMUsamaShah/fingerink.koplugin). The upstream
-project does not currently declare a software license. Until that is resolved,
-this repository cannot be offered under the MIT License as a whole.
+[Finger Ink](https://github.com/SMUsamaShah/fingerink.koplugin), which is
+licensed under the GNU Affero General Public License, version 3. JustDraw is a
+derivative work of it and is distributed under the same terms: **AGPL-3.0**.
+The `LICENSE` file is the upstream one, byte for byte.
+
+That is also KOReader's own license, so a plugin under these terms fits its
+host exactly. In practice the network clause is inert here — nothing about
+drawing on a page involves a user interacting with the plugin over a network —
+but the copyleft is not: if you distribute JustDraw, or a modified version of
+it, you have to offer the corresponding source under the AGPL as well.
+
+Version 3 only, not "or later". Upstream's `LICENSE` carries no notice
+choosing a version policy, so this repository does not claim to grant more
+than it received.
