@@ -154,6 +154,7 @@ function JustDraw:init()
     self.canvas_open = false
     self.canvas_erase_ctx = nil
     self.canvas_erase_x, self.canvas_erase_y = nil, nil
+    self.direct_erase_x, self.direct_erase_y = nil, nil
     self.canvas_stroke = nil
     self.canvas_backpressure_notified = false
     self.canvas_backpressure_notice_pending = false
@@ -965,7 +966,10 @@ function JustDraw:setEraser(on)
         return
     end
     self.eraser = on and true or false
-    if not self.eraser then self:endCanvasErase() end
+    if not self.eraser then
+        self:endCanvasErase()
+        self.direct_erase_x, self.direct_erase_y = nil, nil
+    end
     if self.eraser and not self.drawing then
         self:setDrawing(true)   -- also updates the bar
     elseif self.bar then
@@ -1788,6 +1792,7 @@ end
 --- what that is depends on whether a sheet is open.
 function JustDraw:endStroke()
     if self.canvas_open then return self:endCanvasStroke() end
+    self.direct_erase_x, self.direct_erase_y = nil, nil
 
     local s = self.stroke
     self.stroke = nil
@@ -1808,6 +1813,7 @@ function JustDraw:abortStroke()
         self.draw_slot = nil
         return self:abortCanvasStroke()
     end
+    self.direct_erase_x, self.direct_erase_y = nil, nil
     if not self.stroke then
         self.draw_slot = nil
         return
@@ -1817,13 +1823,22 @@ function JustDraw:abortStroke()
     self:repaint()
 end
 
+--[[--
+One eraser sample on the page itself.
+
+The capsule from the previous sample is what a fast hand needs: strokes
+between two samples are cut, not skipped. The anchor is per contact --
+endStroke and abortStroke forget it -- so a new touch never inherits a sweep
+from wherever the last one lifted.
+]]
 function JustDraw:eraseAt(x, y)
     local page = self:currentPage()
-    local list = self.store:get(page)
-    local idx = Store.hit(list, x, y, ERASER_RADIUS)
-    if not idx then return end
-    self.store:removeAt(page, idx)
-    self:repaint()
+    local x0 = self.direct_erase_x or x
+    local y0 = self.direct_erase_y or y
+    self.direct_erase_x, self.direct_erase_y = x, y
+    if self.store:sweep(page, x0, y0, x, y, ERASER_RADIUS) then
+        self:repaint()
+    end
 end
 
 -- ------------------------------------------------------------- canvas ink
