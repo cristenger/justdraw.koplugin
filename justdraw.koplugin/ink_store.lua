@@ -8,6 +8,8 @@ This table goes straight into the document sidecar, so it must stay made of
 plain numbers and plain tables.
 ]]
 
+local Split = require("ink_stroke_split")
+
 local Store = {}
 Store.__index = Store
 
@@ -68,23 +70,58 @@ function Store:countPages()
     return n
 end
 
---[[--
-Index of the topmost stroke with a stored point within r of (x,y), or nil.
-Squared distance, back to front, no allocation. Point-based, not
-segment-based — see ADR-7.
-]]
+--- Topmost stroke within `r` of (x, y), measured against the drawn segments
+--- rather than the sampled points, so a fast stroke's sparse samples leave
+--- no gaps the eraser slides through (the fix ADR-7 left noted). Reach grows
+--- with the stroke's own width, matching what the canvas engine counts as
+--- touching.
 function Store.hit(list, x, y, r)
     if not list then return nil end
-    local r2 = r * r
     for i = #list, 1, -1 do
         local s = list[i]
-        for j = 1, s.n * 2, 2 do
-            local dx = s[j] - x
-            local dy = s[j + 1] - y
-            if dx * dx + dy * dy <= r2 then return i end
+        local reach = r + (s.w or 0) / 2
+        if Split.capsuleHitsRange(s, 1, s.n, x, y, x, y, reach * reach) then
+            return i
         end
     end
     return nil
+end
+
+--[[--
+Sweep an eraser capsule across a page, cutting every stroke it touches.
+
+Fragments keep their stroke's place in the list, so the z-order and what
+`pop` means -- the newest thing drawn -- both survive a split. A surviving
+run shorter than its stroke's own nib is dropped as dirt. Returns true when
+anything changed; the caller owns the repaint.
+]]
+function Store:sweep(page, x0, y0, x1, y1, r)
+    local list = self.pages[page]
+    if not list then return false end
+    local changed = false
+    for i = #list, 1, -1 do
+        local s = list[i]
+        local reach = r + (s.w or 0) / 2
+        local fragments = Split.splitByCapsule(s, s.n, x0, y0, x1, y1,
+            reach, s.w or 0)
+        if fragments then
+            changed = true
+            table.remove(list, i)
+            for f = #fragments, 1, -1 do
+                local range = fragments[f]
+                local frag = { n = range.last - range.first + 1, w = s.w }
+                local at = 0
+                for p = range.first, range.last do
+                    at = at + 1
+                    frag[at * 2 - 1] = s[p * 2 - 1]
+                    frag[at * 2] = s[p * 2]
+                end
+                table.insert(list, i, frag)
+            end
+        end
+    end
+    if changed and #list == 0 then self.pages[page] = nil end
+    return changed
 end
 
 return Store
