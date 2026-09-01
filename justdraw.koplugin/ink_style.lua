@@ -49,9 +49,11 @@ end
 
 --- Whether this style paints a colour the fast (forced-monochrome) refresh
 --- cannot show. Refresh decisions key on it: a DU update over gray ink drops
---- the ink on device (ADR-36).
+--- the ink on device (ADR-36). rawequal, never `~= nil`: a gray style's
+--- lookup answers a real colour cdata, whose __eq indexes its argument and
+--- raises on nil — on the replay path that took the whole process down.
 function Style.isGray(style)
-    return COLORS[style] ~= nil
+    return not rawequal(COLORS[style], nil)
 end
 
 --- The one per-contact rule. Callers settle the eraser BEFORE this: an

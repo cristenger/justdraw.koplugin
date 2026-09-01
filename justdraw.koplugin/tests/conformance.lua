@@ -346,6 +346,26 @@ do
         true, not rawequal(Blitbuffer.COLOR_LIGHT_GRAY, nil), "COLOR_LIGHT_GRAY")
     claim("Blitbuffer exposes COLOR_GRAY_6 for graphite",
         true, not rawequal(Blitbuffer.COLOR_GRAY_6, nil), "COLOR_GRAY_6")
+
+    -- Style.isGray sits on the cache's replay path (_paintStroke), where its
+    -- COLORS lookup answers a real colour cdata for a gray style. The fakes
+    -- use strings, whose `~= nil` never invokes a metamethod, so only this
+    -- claim can see the __eq trap on the lookup's result: `cdata ~= nil`
+    -- calls the colour's __eq with nil and raises — which took the whole
+    -- process down on the first reopened note that held a gray stroke.
+    local Style = require("ink_style")
+    local function probe(style) return pcall(Style.isGray, style) end
+    local ok_pen, pen = probe(Style.PEN)
+    local ok_marker, marker = probe(Style.MARKER)
+    local ok_graphite, graphite = probe(Style.GRAPHITE)
+    local ok_unknown, unknown = probe(999)
+    claim("Style.isGray survives real colour cdata for every known style",
+        true,
+        ok_pen and pen == false
+        and ok_marker and marker == true
+        and ok_graphite and graphite == true
+        and ok_unknown and unknown == false,
+        "a gray-style lookup answers cdata; testing it against nil needs rawequal")
 end
 
 -- =====================================================================
