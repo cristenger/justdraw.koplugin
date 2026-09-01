@@ -722,14 +722,16 @@ else
         now = function() return 1000 end,
     }
 
-    claim("canvas database: the v1 schema is accepted by SQLite",
+    claim("canvas database: the v2 schema is accepted by SQLite",
         true, repo ~= nil, tostring(open_err or db_path))
 
     if repo then
         local conn = repo.conn
 
-        claim("canvas database: user_version is stamped at the schema version",
-            true, tonumber(conn:rowexec("PRAGMA user_version;")) == Repository.SCHEMA_VERSION)
+        claim("canvas database: user_version is stamped at 2",
+            true, tonumber(conn:rowexec("PRAGMA user_version;")) == 2
+                and Repository.SCHEMA_VERSION == 2,
+            "user_version = " .. tostring(conn:rowexec("PRAGMA user_version;")))
 
         claim("canvas database: foreign keys are actually enforced",
             true, tonumber(conn:rowexec("PRAGMA foreign_keys;")) == 1)
@@ -759,9 +761,15 @@ else
         claim("canvas database: a canvas row is created",
             true, canvas ~= nil and type(canvas.id) == "number")
 
-        -- The next two constraints fire on purpose, and the repository logs
-        -- an error with a traceback for each. That is correct behaviour and it
-        -- buries the report, so it is muted for exactly these two calls.
+        claim("canvas database: a fresh canvas is a sheet in surface coordinates",
+            true, canvas ~= nil and canvas.surface_role == "sheet"
+                and canvas.coordinate_space == "surface",
+            tostring(canvas and canvas.surface_role) .. "/"
+                .. tostring(canvas and canvas.coordinate_space))
+
+        -- The constraints below fire on purpose, and the repository logs an
+        -- error with a traceback for each. That is correct behaviour and it
+        -- buries the report, so it is muted for exactly these calls.
         local logger = require("logger")
         local real_err = logger.err
         logger.err = function() end
@@ -780,7 +788,73 @@ else
                 anchor_kind = "nonsense", anchor_key = "other",
                 logical_w = 10, logical_h = 10 }) == nil)
 
+        -- `createCanvas` refuses these combinations itself, so the only way to
+        -- ask SQLite whether the CHECKs are real is to go around it.
+        local function rawSurface(role, space)
+            local ok, err = pcall(conn.exec, conn, string.format([[
+                INSERT INTO canvases (book_id, anchor_kind, anchor_key,
+                                      logical_w, logical_h, created_at,
+                                      updated_at, surface_role, coordinate_space)
+                VALUES (%d, 'page', 'raw:%s:%s', 10, 10, 1, 1, '%s', '%s');]],
+                book_id, role, space, role, space))
+            -- The driver's message carries a traceback; one line of it is the
+            -- claim, and the rest would break this report across three lines.
+            err = tostring(err)
+            return ok, err:match("CHECK constraint failed: [^\n]*") or err
+        end
+        local bad_role, bad_role_err = rawSurface("scribble", "surface")
+        local bad_space, bad_space_err = rawSurface("sheet", "elsewhere")
+        claim("canvas database: surface_role and coordinate_space are constrained",
+            true, not bad_role and not bad_space
+                and bad_role_err:find("CHECK constraint failed", 1, true) ~= nil
+                and bad_space_err:find("CHECK constraint failed", 1, true) ~= nil,
+            bad_role_err .. " | " .. bad_space_err)
+
+        -- One page, one surface. `UNIQUE(book_id, anchor_key)` and the
+        -- `page-ink:N` key shape are what make that a constraint rather than a
+        -- convention, which is why callers may find-then-create without a lock.
+        local page_ink = repo:createPageInkSurface(book_id, 12, 612, 792)
+        local dup_page, dup_page_err = repo:createPageInkSurface(book_id, 12, 612, 792)
+        local dup_page_text = tostring(dup_page_err)
+        claim("canvas database: two page-ink surfaces for one page are rejected",
+            true, page_ink ~= nil and dup_page == nil
+                and dup_page_text:find(
+                    "UNIQUE constraint failed: canvases.book_id, canvases.anchor_key",
+                    1, true) ~= nil,
+            dup_page_text:match("UNIQUE constraint failed: [^\n]*") or dup_page_text)
+
         logger.err = real_err
+
+        -- The keyset listing: a bound LIMIT and a two-column cursor are both
+        -- things the recorder in tests/run.lua cannot parse for us.
+        repo:createPageInkSurface(book_id, 4, 612, 792)
+        repo:createPageInkSurface(book_id, 30, 612, 792)
+        local walked, after_page, after_id = {}, nil, nil
+        for _ = 1, 4 do
+            local batch = repo:listPageInkSurfaces(book_id,
+                { after_page = after_page, after_id = after_id, limit = 1 })
+            if not batch or #batch == 0 then break end
+            walked[#walked + 1] = batch[1].fixed_page
+            after_page, after_id = batch[1].fixed_page, batch[1].id
+        end
+        claim("canvas database: page ink pages by (fixed_page, id), one row per batch",
+            true, table.concat(walked, ",") == "4,12,30",
+            "walked " .. table.concat(walked, ","))
+
+        local sheets = repo:listCanvases(book_id)
+        local page_ink_rows = repo:listPageInkSurfaces(book_id)
+        claim("canvas database: the sheet listing and the page-ink listing are disjoint",
+            true, sheets ~= nil and #sheets == 1 and sheets[1].id == canvas.id
+                and page_ink_rows ~= nil and #page_ink_rows == 3
+                and repo:countCanvases(book_id) == 1
+                and repo:countPageInkSurfaces(book_id) == 3,
+            tostring(sheets and #sheets) .. " sheets, "
+                .. tostring(page_ink_rows and #page_ink_rows) .. " page-ink rows")
+
+        repo:deleteAllPageInkSurfaces(book_id)
+        claim("canvas database: deleting every page-ink surface leaves the sheets",
+            true, repo:countPageInkSurfaces(book_id) == 0
+                and repo:countCanvases(book_id) == 1)
 
         -- A stroke long enough to span chunks, with coordinates that exercise
         -- the whole quantiser range.
@@ -918,6 +992,170 @@ else
     os.remove(db_path)
     os.remove(db_path .. "-wal")
     os.remove(db_path .. "-shm")
+
+    -- -----------------------------------------------------------------
+    -- v1 to v2, against a file this plugin's previous release could have
+    -- written.
+    --
+    -- The v1 schema is frozen here, copied out of the module before the
+    -- surface columns were added. Deriving it from `Repository.SCHEMA` would
+    -- make this claim say only that the schema equals itself.
+    -- -----------------------------------------------------------------
+
+    local V1_SCHEMA = [[
+CREATE TABLE books (
+    id           INTEGER PRIMARY KEY,
+    partial_md5  TEXT    NOT NULL,
+    file_size    INTEGER NOT NULL,
+    last_path    TEXT,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    UNIQUE(partial_md5, file_size)
+);
+CREATE TABLE canvases (
+    id                    INTEGER PRIMARY KEY,
+    book_id               INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    anchor_kind           TEXT    NOT NULL CHECK(anchor_kind IN ('xpointer', 'page')),
+    anchor_key            TEXT    NOT NULL,
+    anchor_raw            TEXT,
+    anchor_normalized     TEXT,
+    anchor_dom_version    INTEGER,
+    fixed_page            INTEGER,
+    logical_w             INTEGER NOT NULL,
+    logical_h             INTEGER NOT NULL,
+    created_at            INTEGER NOT NULL,
+    updated_at            INTEGER NOT NULL,
+    UNIQUE(book_id, anchor_key),
+    UNIQUE(id, book_id)
+);
+CREATE TABLE canvas_layout_cache (
+    canvas_id      INTEGER NOT NULL,
+    book_id        INTEGER NOT NULL,
+    layout_hash    TEXT    NOT NULL,
+    resolved_page  INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL,
+    PRIMARY KEY(canvas_id, layout_hash),
+    FOREIGN KEY(canvas_id, book_id)
+        REFERENCES canvases(id, book_id) ON DELETE CASCADE
+);
+CREATE TABLE strokes (
+    id           INTEGER PRIMARY KEY,
+    canvas_id    INTEGER NOT NULL REFERENCES canvases(id) ON DELETE CASCADE,
+    seq          INTEGER NOT NULL,
+    width        REAL    NOT NULL,
+    tool         INTEGER NOT NULL,
+    codec        INTEGER NOT NULL,
+    point_count  INTEGER NOT NULL,
+    min_x        REAL    NOT NULL,
+    min_y        REAL    NOT NULL,
+    max_x        REAL    NOT NULL,
+    max_y        REAL    NOT NULL,
+    created_at   INTEGER NOT NULL,
+    UNIQUE(canvas_id, seq)
+);
+CREATE TABLE stroke_chunks (
+    stroke_id    INTEGER NOT NULL REFERENCES strokes(id) ON DELETE CASCADE,
+    chunk_no     INTEGER NOT NULL,
+    point_count  INTEGER NOT NULL,
+    points       BLOB    NOT NULL,
+    PRIMARY KEY(stroke_id, chunk_no)
+);
+CREATE INDEX canvases_by_book ON canvases(book_id, updated_at);
+CREATE INDEX layout_by_page
+    ON canvas_layout_cache(book_id, layout_hash, resolved_page, canvas_id);
+CREATE INDEX strokes_by_canvas ON strokes(canvas_id, seq);
+]]
+
+    --- A v1 file with one of everything in it.
+    local function writeV1(path)
+        os.remove(path)
+        local v1 = SQ3.open(path, "rwc")
+        v1:exec("PRAGMA foreign_keys=ON;")
+        v1:exec(V1_SCHEMA)
+        v1:exec("PRAGMA user_version=1;")
+        v1:exec([[INSERT INTO books (id, partial_md5, file_size, last_path,
+            created_at, updated_at) VALUES (1, 'v1-md5', 42, '/tmp/v1.epub', 1, 1);]])
+        v1:exec([[INSERT INTO canvases (id, book_id, anchor_kind, anchor_key,
+            anchor_raw, anchor_normalized, anchor_dom_version, logical_w,
+            logical_h, created_at, updated_at)
+            VALUES (7, 1, 'xpointer', 'xp:/body/p[1]', '/body/p[1]',
+                    '/body/p[1]', 20240101, 1860, 2480, 1, 1);]])
+        v1:exec([[INSERT INTO strokes (id, canvas_id, seq, width, tool, codec,
+            point_count, min_x, min_y, max_x, max_y, created_at)
+            VALUES (5, 7, 1, 4, 1, 1, 2, 0, 0, 10, 10, 1);]])
+        v1:exec([[INSERT INTO stroke_chunks (stroke_id, chunk_no, point_count, points)
+            VALUES (5, 0, 2, CAST('v1-points' AS BLOB));]])
+        v1:exec([[INSERT INTO canvas_layout_cache (canvas_id, book_id,
+            layout_hash, resolved_page, updated_at) VALUES (7, 1, 'hash-a', 3, 1);]])
+        v1:close()
+    end
+
+    local v1_path = os.tmpname() .. ".justdraw-v1.sqlite3"
+    writeV1(v1_path)
+    local migrated_v1, v1_err = Repository.open{
+        path = v1_path, driver = SQ3, wal = false, now = function() return 1000 end,
+    }
+    local v1_detail, v1_ok = tostring(v1_err), false
+    if migrated_v1 then
+        local c = migrated_v1.conn
+        local function count(table_name)
+            return tonumber(c:rowexec("SELECT count(*) FROM " .. table_name .. ";"))
+        end
+        local version = tonumber(c:rowexec("PRAGMA user_version;"))
+        local role = c:rowexec("SELECT surface_role FROM canvases WHERE id = 7;")
+        local space = c:rowexec("SELECT coordinate_space FROM canvases WHERE id = 7;")
+        local listed = migrated_v1:listCanvases(1)
+        local backup = io.open(v1_path .. ".backup-v1", "rb")
+        if backup then backup:close() end
+        v1_ok = version == 2 and role == "sheet" and space == "surface"
+            and count("books") == 1 and count("canvases") == 1
+            and count("strokes") == 1 and count("stroke_chunks") == 1
+            and count("canvas_layout_cache") == 1
+            and listed ~= nil and #listed == 1 and listed[1].id == 7
+            and listed[1].surface_role == "sheet"
+            and backup ~= nil
+        v1_detail = "user_version = " .. tostring(version) .. ", row reads back "
+            .. tostring(role) .. "/" .. tostring(space)
+            .. ", backup " .. (backup and "kept" or "missing")
+        migrated_v1:close()
+    end
+    claim("canvas database: a v1 file migrates to v2 keeping its rows",
+        true, v1_ok, v1_detail)
+    os.remove(v1_path)
+    os.remove(v1_path .. ".backup-v1")
+
+    -- A step that raises after its DDL ran. What has to survive is the file:
+    -- ADD COLUMN inside a transaction is undone by the ROLLBACK, so a reader
+    -- whose migration died still has the v1 database an older plugin can read.
+    local rollback_path = os.tmpname() .. ".justdraw-v1-rollback.sqlite3"
+    writeV1(rollback_path)
+    local logger = require("logger")
+    local real_err = logger.err
+    logger.err = function() end
+    local refused, refused_err = Repository.open{
+        path = rollback_path, driver = SQ3, wal = false,
+        migrations = {
+            [1] = function(conn)
+                Repository.MIGRATIONS[1](conn)
+                error("conformance: a migration step that fails", 0)
+            end,
+        },
+    }
+    logger.err = real_err
+    if refused then refused:close() end
+    local after = SQ3.open(rollback_path, "rw")
+    local after_version = tonumber(after:rowexec("PRAGMA user_version;"))
+    local column_survived = pcall(after.rowexec, after,
+        "SELECT surface_role FROM canvases WHERE id = 7;")
+    local rows_left = tonumber(after:rowexec("SELECT count(*) FROM canvases;"))
+    after:close()
+    claim("canvas database: a failed migration step rolls the file back to v1",
+        true, refused == nil and refused_err == "migration_failed"
+            and after_version == 1 and not column_survived and rows_left == 1,
+        tostring(refused_err) .. ", user_version = " .. tostring(after_version)
+            .. ", surface_role " .. (column_survived and "present" or "absent"))
+    os.remove(rollback_path)
+    os.remove(rollback_path .. ".backup-v1")
 end
 
 -- =====================================================================
