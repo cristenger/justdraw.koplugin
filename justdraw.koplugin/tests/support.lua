@@ -298,7 +298,7 @@ local function newFakeBB(w, h, bbtype, root, ox, oy)
         freed = false,
     }, FakeBB)
     bb.root = root or bb
-    if bb.root == bb then bb.writes = {} end
+    if bb.root == bb then bb.writes = {}; bb.clears = {} end
     return bb
 end
 
@@ -334,7 +334,11 @@ function FakeBB:viewport(x, y, w, h)
     return v
 end
 
-function FakeBB:blitFrom(src, dest_x, dest_y, offs_x, offs_y, w, h)
+--- The bounded blit both entry points share. `alpha` is what separates them in
+--- the record: the two calls carry the same rectangle, and only the recorded
+--- flag says whether the source was copied over the destination or composed
+--- onto it.
+local function recordBlit(self, alpha, src, dest_x, dest_y, offs_x, offs_y, w, h)
     dest_x, dest_y = dest_x or 0, dest_y or 0
     offs_x, offs_y = offs_x or 0, offs_y or 0
     w = w or src.w
@@ -349,7 +353,25 @@ function FakeBB:blitFrom(src, dest_x, dest_y, offs_x, offs_y, w, h)
     self.blits[#self.blits + 1] = {
         src = src, dest_x = dest_x, dest_y = dest_y,
         offs_x = offs_x, offs_y = offs_y, w = w, h = h,
+        alpha = alpha,
     }
+end
+
+function FakeBB:blitFrom(src, dest_x, dest_y, offs_x, offs_y, w, h)
+    return recordBlit(self, false, src, dest_x, dest_y, offs_x, offs_y, w, h)
+end
+
+--[[--
+The alpha composition, which a transparent overlay is painted with.
+
+Real `alphablitFrom` leaves the destination untouched where the source's alpha
+is 0, copies where it is 0xFF and blends in between; the fake has no pixels, so
+what it can honestly record is that this call was made, over which rectangle,
+and that it was not the opaque `blitFrom`. tests/conformance.lua states the
+per-pixel behaviour against the real blitter.
+]]
+function FakeBB:alphablitFrom(src, dest_x, dest_y, offs_x, offs_y, w, h)
+    return recordBlit(self, true, src, dest_x, dest_y, offs_x, offs_y, w, h)
 end
 
 function FakeBB:getType() return self.bbtype end
@@ -378,7 +400,7 @@ function FakeBB:free() self.freed = true end
 
 function FakeBB:clear()
     self.rects, self.fills, self.blits, self.viewports = {}, {}, {}, {}
-    if self.root == self then self.writes = {} end
+    if self.root == self then self.writes = {}; self.clears = {} end
 end
 
 --- How many recorded writes fall wholly or partly outside a rectangle. The
@@ -395,6 +417,27 @@ end
 
 function support.newBlitbuffer(w, h, bbtype)
     return newFakeBB(w, h, bbtype)
+end
+
+--[[--
+The transparent clear, as the raster cache takes it: a plain function, not a
+method on the buffer.
+
+An overlay raster is cleared by writing zero bytes over its pixel rows -- the
+only way to get alpha back to 0, because `fill` and `paintRect` force it to
+0xFF -- and this fake has no pixels at all. Injecting the clear is what keeps
+the fake honest: a `bb:clearTransparent` here would be a method the real
+BlitBuffer does not have, so a spec built on it would prove something about
+KOReader that is not true. What is recorded is the region, in root
+coordinates, exactly as `writes` records a paint.
+]]
+function support.recordingClear()
+    return function(bb, x, y, w, h)
+        local root = bb.root
+        root.clears[#root.clears + 1] =
+            { x = x + bb.ox, y = y + bb.oy, w = w, h = h }
+        return true
+    end
 end
 
 --[[--

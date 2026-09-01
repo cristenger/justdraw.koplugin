@@ -22,10 +22,31 @@ boxes turns "what is near here" into a local question, so an erase clears its
 own region and repaints only the strokes that overlap it -- into a
 `BlitBuffer:viewport` of that region, so the repair physically cannot write
 outside it. Clipping the refresh rectangle alone would not stop the pixels.
+
+A second composition serves ink on a fixed-layout page, where the raster is not
+a page of its own but a transparent layer over the book's. `overlay` allocates
+a BB8A -- transparent straight out of `calloc` -- never fills it, rules no
+paper on it, and puts it on screen with `alphablitFrom` rather than a copy.
+Two facts about KOReader's C blitter shape the rest. `fill` and `paintRect`
+force alpha to 0xFF whatever colour they are handed (`Y8_To_Y8A`), which is
+exactly what the ink wants and exactly what the page under it does not: so
+nothing built on them can make a pixel transparent again, and a region is
+cleared by writing zero bytes over its pixel rows instead
+(`Cache.clearTransparent`, injectable because the suite's fake buffer has no
+pixels to write). And a transparent layer cannot un-paint the framebuffer --
+clearing the overlay leaves whatever the erase covered still on screen -- so an
+overlay's dirty box has to be repainted through the reader's view rather than
+re-blitted from here. That belongs to the surface that owns the view, and
+arrives with it in a later task (ADR-38).
 ]]
 
 local Blitbuffer = require("ffi/blitbuffer")
 local logger = require("logger")
+-- The one thing the blitter cannot do is write alpha 0 over a region, so the
+-- transparent clear goes straight at the pixel bytes. Protected: the opaque
+-- composition needs none of this, and the module still has to load wherever
+-- the suite is run without LuaJIT's FFI.
+local ffi_ok, ffi = pcall(require, "ffi")
 
 local Grid = require("ink_spatial_grid")
 local Paper = require("ink_paper")
@@ -67,6 +88,47 @@ local DEFAULT_CHUNK_BUDGET = 32
 local REPAIR_PAD = 4
 local ERASER_LRU_CHUNKS = 8
 
+--- The two ways a raster can meet what is behind it. `opaque` is a page in its
+--- own right; `overlay` is a transparent layer composed onto one.
+local OVERLAY = "overlay"
+
+--[[--
+Clear a region of a BB8A raster back to fully transparent.
+
+Module-level and buffer-only on purpose: this is the one operation the blitter
+cannot express -- `fill` and `paintRect` force alpha to 0xFF -- and it is
+stated against a real BlitBuffer in `tests/conformance.lua`, which needs to
+call it without a cache.
+
+The rectangle is bounded to the buffer first, and then each row is zeroed from
+`getPixelP`, which answers a pointer into *this* buffer's own data. That is
+what makes it safe on a `viewport`: the pointer is the viewport's, so the write
+stays inside it exactly as `paintRect` would.
+
+Rotation and type are asserted rather than handled. A rotated buffer would make
+`getPixelP`'s physical coordinates disagree with the caller's, and any other
+type has a different pixel size; the cache's buffers are never rotated and an
+overlay's is always BB8A, so either would be a programming error, not a
+condition to recover from.
+]]
+function Cache.clearTransparent(bb, x, y, w, h)
+    if not ffi_ok then error("JustDraw: transparent clear needs the FFI", 0) end
+    assert(bb:getRotation() == 0, "JustDraw: transparent clear on a rotated buffer")
+    assert(bb:getType() == Blitbuffer.TYPE_BB8A,
+        "JustDraw: transparent clear on a buffer that carries no alpha")
+    if x < 0 then w = w + x; x = 0 end
+    if y < 0 then h = h + y; y = 0 end
+    local bw, bh = bb:getWidth(), bb:getHeight()
+    if x + w > bw then w = bw - x end
+    if y + h > bh then h = bh - y end
+    if w <= 0 or h <= 0 then return false end
+    local bytes = w * bb:getBytesPerPixel()
+    for row = y, y + h - 1 do
+        ffi.fill(bb:getPixelP(x, row), bytes, 0)
+    end
+    return true
+end
+
 --[[--
   opts.repository  canvas store: listStrokes, readStrokeChunk
   opts.canvas      the canvas row (id and logical geometry)
@@ -80,12 +142,20 @@ local ERASER_LRU_CHUNKS = 8
   opts.paper_kind  ruling to compose under the ink (default: the surface's
                    own template_kind, so a canvas row without one is blank)
   opts.paper_mark  ruling colour
+  opts.composition "opaque" (default) or "overlay"
+  opts.clear       function(bb, x, y, w, h) clearing an overlay region to
+                   transparent (default Cache.clearTransparent)
   opts.on_ready    called once the canvas is fully rasterised
 ]]
 function Cache.new(opts)
     -- `canvas` remains as an internal compatibility name while the same
     -- cache starts serving standalone notebook pages.
     local surface = opts.surface or opts.canvas
+    local overlay = opts.composition == OVERLAY
+    -- An overlay has no paper to rule at all: whatever ruling was asked for,
+    -- it is blank, because a mark here would land over the book's own page.
+    local paper_kind = opts.paper_kind or (surface and surface.template_kind)
+    if overlay then paper_kind = "blank" end
     return setmetatable({
         repository = opts.repository,
         canvas = surface,
@@ -99,8 +169,10 @@ function Cache.new(opts)
         -- The ruling is composed into this raster rather than painted under
         -- it, because everything the surface shows is a blit out of here and
         -- a background below would not survive the first one (ADR-27).
-        paper_kind = opts.paper_kind or (surface and surface.template_kind),
+        paper_kind = paper_kind,
         paper_mark = opts.paper_mark or Blitbuffer.COLOR_GRAY,
+        overlay = overlay,
+        clear = opts.clear or Cache.clearTransparent,
         on_ready = opts.on_ready,
         on_error = opts.on_error,
 
@@ -161,6 +233,13 @@ end
 
 function Cache:isReady()
     return self.state == "ready" and not self.closed
+end
+
+--- Whether this raster is a transparent layer over something else rather than
+--- a page of its own. What the owner asks before deciding how a box is
+--- refreshed, and what `paintTo` composes with.
+function Cache:isOverlay()
+    return self.overlay == true
 end
 
 function Cache:stateName()
@@ -235,17 +314,40 @@ end
 
 --- Whether adopting this ruling would replay the raster. The owner asks
 --- before mutating anything, for the same reason it asks about a transform.
+--- An overlay answers no to every ruling: it has no paper of its own, and a
+--- mark on it would land over the page it is composed onto.
 function Cache:needsPaperRebuild(kind)
-    if self.closed then return false end
+    if self.closed or self.overlay then return false end
     return kind ~= self.paper_kind
 end
 
 --- Rule the paper over a region the caller has just cleared to `background`.
 --- Bounded by that region, in cache coordinates, and allocating nothing.
-function Cache:_rulePaper(x, y, w, h)
-    if not self.bb or not self.transform then return false end
-    return Paper.paint(self.bb, self.paper_kind, self.transform.scale,
+function Cache:_rulePaper(x, y, w, h, target)
+    local bb = target or self.bb
+    if not bb or not self.transform then return false end
+    return Paper.paint(bb, self.paper_kind, self.transform.scale,
         x, y, w, h, self.paper_mark)
+end
+
+--[[--
+Clear a region back to nothing -- in whichever sense this composition has one.
+
+An opaque raster is a page: it is cleared to the page colour and immediately
+re-ruled, because the ruling lives inside the raster and stopping at the flat
+colour is how erasing a word leaves a white hole in the lines (ADR-27).
+
+An overlay is a layer over the book's own page, so "nothing" means transparent,
+and there is no paper to put back. It cannot go through `paintRect`: the C
+blitter forces alpha to 0xFF whatever colour it is handed, so clearing that way
+would replace the erased ink with an opaque patch hiding the page underneath.
+]]
+local function clearRegion(self, bb, x, y, w, h)
+    if self.overlay then
+        return self.clear(bb, x, y, w, h)
+    end
+    bb:paintRect(x, y, w, h, self.background)
+    return self:_rulePaper(x, y, w, h, bb)
 end
 
 --- Whether adopting this transform would allocate and replay the raster.
@@ -264,6 +366,13 @@ function Cache:paintTo(dest)
     -- validates; the database and metadata remain untouched underneath.
     if not self.bb or self.state == "load_failed" then return end
     local r = self.transform:canvasRect()
+    if self.overlay then
+        -- The same rectangle, composed rather than copied: alpha 0 leaves the
+        -- book's page exactly as it was, 0xFF puts the ink over it.
+        dest:alphablitFrom(self.bb, r.x, r.y,
+            r.cache_x or 0, r.cache_y or 0, r.w, r.h)
+        return
+    end
     dest:blitFrom(self.bb, r.x, r.y, r.cache_x or 0, r.cache_y or 0, r.w, r.h)
 end
 
@@ -373,11 +482,7 @@ function Cache:repair(m)
     if not self.bb then return nil end
     local box = self:_regionFor(m)
     if box.w <= 0 or box.h <= 0 then return box end
-    self.bb:paintRect(box.x, box.y, box.w, box.h, self.background)
-    -- Put the ruling back before the neighbours go on top of it. Clearing to
-    -- a flat colour and stopping there is how erasing a word on ruled paper
-    -- would leave a white hole in the lines (ADR-27).
-    self:_rulePaper(box.x, box.y, box.w, box.h)
+    clearRegion(self, self.bb, box.x, box.y, box.w, box.h)
 
     local scale = self.transform.scale
     local neighbours = self:_metaNear(
@@ -654,9 +759,16 @@ function Cache:_build()
         return nil, "bad_geometry"
     end
     local w, h = self.transform:cacheSize()
-    self.bb = Blitbuffer.new(w, h, Blitbuffer.TYPE_BB8)
-    self.bb:fill(self.background)
-    self:_rulePaper(0, 0, w, h)
+    if self.overlay then
+        -- Transparent out of `calloc`, and it has to stay that way: `fill`
+        -- forces alpha to 0xFF over every pixel, which would hide the whole
+        -- page under an opaque sheet before a single stroke was painted.
+        self.bb = Blitbuffer.new(w, h, Blitbuffer.TYPE_BB8A)
+    else
+        self.bb = Blitbuffer.new(w, h, Blitbuffer.TYPE_BB8)
+        self.bb:fill(self.background)
+        self:_rulePaper(0, 0, w, h)
+    end
 
     local grid, grid_err = Grid.new{
         width = self.canvas.logical_w,

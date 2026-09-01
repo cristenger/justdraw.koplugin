@@ -43,7 +43,7 @@ return function(ctx)
     end
 
     --- opts.strokes: array of stroke tables to preload. opts.batch, opts.cell,
-    --- opts.sheet_top.
+    --- opts.sheet_top, opts.composition, opts.clear.
     local function fixture(opts)
         opts = opts or {}
         local store = support.newCanvasStore({ CANVAS })
@@ -59,6 +59,8 @@ return function(ctx)
             point_budget = opts.point_budget,
             cell = opts.cell or 100,
             paper_kind = opts.paper_kind,
+            composition = opts.composition,
+            clear = opts.clear,
             schedule = function(fn) sched:schedule(fn) end,
         }
         return cache, store, sched
@@ -798,6 +800,134 @@ return function(ctx)
         -- ...but the count is a property of the paper, in logical units, so
         -- rotating a page does not add or remove a single rule.
         t:eq(rows_after, rows_before, "and it is the same sheet of paper")
+    end)
+
+    -- =================================================================
+    --[[--
+    The alpha overlay, and the two blitter facts it is built out of.
+
+    Ink on a fixed-layout page is a transparent layer over the book's own
+    page, so its raster cannot be the opaque white BB8 a sheet gets. A BB8A is
+    transparent from `calloc`, and the C blitter's `fill`/`paintRect` force
+    alpha to 0xFF whatever colour they are handed -- which is exactly right for
+    the ink and exactly wrong for the page under it. So an overlay build fills
+    nothing, rules no paper, and clears a region by writing zero bytes over its
+    pixel rows instead. The fake buffer has no pixels, so that clear arrives
+    injected and is asserted as a recorded region; tests/conformance.lua states
+    the per-pixel half against the real blitter.
+    ]]
+    t:describe("ink_canvas_cache / alpha overlay")
+
+    local Blitbuffer = require("ffi/blitbuffer")
+
+    local function overlayCache(opts)
+        opts = opts or {}
+        opts.composition = "overlay"
+        opts.clear = opts.clear or support.recordingClear()
+        return readyCache(opts)
+    end
+
+    t:case("an overlay raster is an alpha buffer that is never filled", function()
+        local cache = overlayCache{
+            paper_kind = "ruled", strokes = { bar(100, 100) },
+        }
+        local bb = cache:buffer()
+        t:eq(cache:isOverlay(), true, "the cache reports its composition")
+        t:eq(bb.bbtype, Blitbuffer.TYPE_BB8A,
+            "the raster is BB8A, transparent from calloc")
+        t:eq(#bb.fills, 0,
+            "and nothing filled it: fill would force every pixel to alpha 0xFF")
+        t:eq(#marksIn(bb, "gray"), 0,
+            "a ruling cannot be composed under a transparent page")
+        t:check(#bb.rects > 0,
+            "the strokes are still painted with the ordinary paintRect")
+    end)
+
+    t:case("an opaque cache is built exactly as it was", function()
+        local cache = readyCache{ strokes = { bar(100, 100) } }
+        t:eq(cache:isOverlay(), false, "the default composition is opaque")
+        t:eq(cache:buffer().bbtype, Blitbuffer.TYPE_BB8, "over a BB8")
+        t:eq(#cache:buffer().fills, 1, "filled once, with the page colour")
+    end)
+
+    t:case("an overlay still notices gray ink", function()
+        local graphite = bar(200, 200)
+        graphite.tool = 65
+        local cache = overlayCache{ strokes = { bar(10, 10), graphite } }
+        t:eq(cache:hasGrayInk(), true,
+            "a replayed graphite stroke still forces the grayscale pass")
+        local pen_only = overlayCache{ strokes = { bar(10, 10) } }
+        t:eq(pen_only:hasGrayInk(), false, "a pen-only overlay keeps the fast path")
+    end)
+
+    t:case("erasing an overlay clears to transparent, not to the page colour",
+    function()
+        -- The neighbour sits inside the erased stroke's padded box, so the
+        -- repair has something to put back through its viewport.
+        local function pair() return { bar(100, 100), bar(100, 104) } end
+        local opaque = readyCache{ strokes = pair() }
+        local overlay = overlayCache{ strokes = pair() }
+        local obb, vbb = opaque:buffer(), overlay:buffer()
+        obb:clear(); vbb:clear()
+
+        local obox = opaque:removeStroke(opaque:strokes()[1].id)
+        local vbox = overlay:removeStroke(overlay:strokes()[1].id)
+        t:check(obox ~= nil and vbox ~= nil, "both strokes were removed")
+        t:eq(vbox.x .. "," .. vbox.y .. "," .. vbox.w .. "," .. vbox.h,
+            obox.x .. "," .. obox.y .. "," .. obox.w .. "," .. obox.h,
+            "the two compositions repair the same box")
+
+        t:eq(#vbb.clears, 1, "the overlay's hole went through the clear")
+        local c = vbb.clears[1]
+        t:eq(c.x .. "," .. c.y .. "," .. c.w .. "," .. c.h,
+            obox.x .. "," .. obox.y .. "," .. obox.w .. "," .. obox.h,
+            "over exactly the region the opaque path repaints")
+        t:eq(#obb.clears, 0, "and the opaque path clears no pixels that way")
+
+        local page_coloured = 0
+        for _, r in ipairs(vbb.rects) do
+            if r.c == "white" then page_coloured = page_coloured + 1 end
+        end
+        t:eq(page_coloured, 0,
+            "nothing painted the page colour over the book underneath")
+        t:eq(#vbb.viewports, 1, "the survivor was repainted through a viewport")
+        t:check(#vbb.viewports[1].rects > 0, "and it really was repainted")
+        t:eq(vbb:writesOutside(vbox.x, vbox.y, vbox.w, vbox.h), 0,
+            "strictly inside the repaired box")
+    end)
+
+    t:case("an overlay is composed onto the page, an opaque cache copied over it",
+    function()
+        local top = math.floor(H * 0.6)
+        local overlay = overlayCache{ strokes = { bar(10, 10) }, sheet_top = top }
+        local opaque = readyCache{ strokes = { bar(10, 10) }, sheet_top = top }
+        local over_dest = support.newBlitbuffer(W, H)
+        local flat_dest = support.newBlitbuffer(W, H)
+        overlay:paintTo(over_dest)
+        opaque:paintTo(flat_dest)
+
+        t:eq(#over_dest.blits, 1, "one blit each")
+        t:eq(#flat_dest.blits, 1, "one blit each")
+        t:eq(over_dest.blits[1].alpha, true, "the overlay goes through alphablitFrom")
+        t:eq(flat_dest.blits[1].alpha, false, "the opaque cache still copies")
+        for _, key in ipairs({ "dest_x", "dest_y", "offs_x", "offs_y", "w", "h" }) do
+            t:eq(over_dest.blits[1][key], flat_dest.blits[1][key],
+                "the same " .. key)
+        end
+    end)
+
+    t:case("paper is inert on an overlay rather than a rebuild", function()
+        local cache, store, sched = overlayCache{ strokes = { bar(100, 100) } }
+        local bb, reads = cache:buffer(), store.calls.stroke_read
+        t:eq(cache:needsPaperRebuild("ruled"), false,
+            "no ruling can survive under a transparent layer")
+        t:eq(cache:setPaper("ruled"), true, "adopting one is accepted")
+        t:eq(cache:buffer(), bb, "over the same raster")
+        t:eq(bb.freed, false, "which was not released")
+        t:eq(cache:isReady(), true, "and never went back to building")
+        sched:drain()
+        t:eq(store.calls.stroke_read, reads, "nothing was replayed")
+        t:eq(#marksIn(bb, "gray"), 0, "and not one mark was painted")
     end)
 
     -- =================================================================

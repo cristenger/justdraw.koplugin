@@ -25,6 +25,7 @@ return function(ctx)
             unschedule = function(fn) sched:unschedule(fn) end,
             max_open_points = opts.max_open_points,
             queue_opts = opts.queue_opts,
+            cache_opts = opts.cache_opts,
         }
         return session, store, sched
     end
@@ -40,6 +41,49 @@ return function(ctx)
         t:eq(session:pendingWrites(), 1, "queued")
         t:eq(session:flush(), true, "durable")
         t:eq(#store.strokes[SURFACE.id], 1, "stored")
+    end)
+
+    --[[--
+    The composition is the surface's to choose, not the cache's to guess: a
+    sheet is an opaque page, page ink on a fixed-layout document is a
+    transparent layer over the book. The session is the only thing that knows
+    which, so the three options that describe it have to travel from
+    `cache_opts` to `Cache.new` intact -- and a forwarding that quietly drops
+    one leaves the surface looking right and painting a white page over the
+    reader's text.
+    ]]
+    t:case("the composition options reach the raster cache", function()
+        local ruled = fixture{ cache_opts = { paper_kind = "grid" } }
+        ruled:open()
+        t:eq(ruled:cache().paper_kind, "grid", "the ruling was forwarded")
+        t:eq(ruled:cache():isOverlay(), false, "and an ordinary surface is opaque")
+
+        local cleared = {}
+        local session, _, sched = fixture{
+            stroke = { width = 4, tool = 1, n = 3,
+                       points = { 100, 100, 200, 100, 300, 100 } },
+            cache_opts = {
+                composition = "overlay",
+                paper_kind = "grid",
+                clear = function(bb, x, y, w, h)
+                    cleared[#cleared + 1] = { x = x, y = y, w = w, h = h }
+                    return true
+                end,
+            },
+        }
+        session:open()
+        sched:drain()
+        t:eq(session:isReady(), true, "the overlay surface opened")
+        t:eq(session:cache():isOverlay(), true, "as an overlay")
+        t:eq(#session:cache():buffer().fills, 0, "so its raster was never filled")
+        t:eq(session:cache():needsPaperRebuild("grid"), false,
+            "and the ruling is inert on it")
+
+        local ctx = session:beginErase()
+        t:check(session:eraseAt(200, 100, 18, ctx) ~= nil, "the eraser cut it")
+        session:endErase(ctx)
+        t:eq(#cleared, 1, "through the injected transparent clear")
+        t:check(cleared[1].w > 0 and cleared[1].h > 0, "over a real region")
     end)
 
     t:case("a failed commit preserves cache and blocks new ink until retry", function()

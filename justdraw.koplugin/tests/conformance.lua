@@ -485,6 +485,94 @@ do
     ruled:free()
 
     --[[--
+    The alpha overlay, against the real blitter (ADR-38).
+
+    Ink on a fixed-layout page is a transparent layer over the book's own page,
+    and every fact that composition is built out of is a fact about pixels --
+    which is exactly what tests/support.lua's recording BlitBuffer does not
+    have. The unit suite can prove that the cache asked for a BB8A, never
+    filled it, and composed it with `alphablitFrom`; only this can prove that
+    those calls mean what the cache believes they mean.
+
+    The load-bearing surprise is the third claim: the C blitter's `fill` and
+    `paintRect` force alpha to 0xFF whatever colour they are handed
+    (`Y8_To_Y8A`), so nothing built on them can ever make a pixel transparent
+    again, and clearing an erased region has to go at the pixel bytes instead.
+    ]]
+    local Cache = require("ink_canvas_cache")
+    local TRANSPARENT = BB.Color8A(0x00, 0x00)
+    local layer = BB.new(16, 16, BB.TYPE_BB8A)
+
+    local fresh = layer:getPixel(0, 0)
+    claim("a fresh BB8A is transparent",
+        true, fresh.a == 0 and fresh.alpha == 0,
+        string.format("Color8A(%d, %d) straight out of calloc",
+            fresh.a, fresh.alpha))
+
+    layer:fill(TRANSPARENT)
+    local filled_alpha = layer:getPixel(0, 0).alpha
+    layer:paintRect(0, 0, 4, 4, TRANSPARENT)
+    local painted_alpha = layer:getPixel(0, 0).alpha
+    claim("fill and paintRect on a BB8A force alpha to 0xFF",
+        true, filled_alpha == 0xFF and painted_alpha == 0xFF,
+        string.format("fill -> alpha %d, paintRect -> alpha %d",
+            filled_alpha, painted_alpha))
+
+    layer:setPixel(1, 1, BB.Color8A(0x40, 0x80))
+    local set = layer:getPixel(1, 1)
+    claim("setPixel honours a Color8A alpha",
+        true, set.a == 0x40 and set.alpha == 0x80,
+        string.format("Color8A(%d, %d)", set.a, set.alpha))
+
+    -- Black over the whole layer first, so "transparent" is a change and not
+    -- the state it was already in. The second call is deliberately far larger
+    -- than the buffer: an unbounded row write here would not fail a pixel
+    -- test, it would corrupt memory past the allocation.
+    layer:fill(BB.COLOR_BLACK)
+    local cleared = Cache.clearTransparent(layer, 4, 4, 6, 6)
+    local oversized = Cache.clearTransparent(layer, 14, 14, 99, 99)
+    claim("Cache.clearTransparent leaves alpha 0 in the region and nothing outside it",
+        true, cleared == true and oversized == true
+            and layer:getPixel(4, 4).alpha == 0
+            and layer:getPixel(9, 9).alpha == 0
+            and layer:getPixel(15, 15).alpha == 0
+            and layer:getPixel(3, 4).alpha == 0xFF
+            and layer:getPixel(10, 9).alpha == 0xFF
+            and layer:getPixel(4, 3).alpha == 0xFF
+            and layer:getPixel(4, 10).alpha == 0xFF
+            and layer:getPixel(13, 14).alpha == 0xFF,
+        string.format("in %d/%d, out %d/%d",
+            layer:getPixel(4, 4).alpha, layer:getPixel(9, 9).alpha,
+            layer:getPixel(3, 4).alpha, layer:getPixel(4, 10).alpha))
+    layer:free()
+
+    -- The ink is painted opaque by the ordinary paintRect, which is what makes
+    -- the composition a two-value one in practice: leave the page, or cover it.
+    local ink = BB.new(4, 4, BB.TYPE_BB8A)
+    ink:paintRect(1, 1, 1, 1, BLACK)
+    local page = BB.new(4, 4, BB.TYPE_BB8)
+    page:fill(WHITE)
+    page:alphablitFrom(ink, 0, 0, 0, 0, 4, 4)
+    claim("alphablitFrom leaves a BB8 destination untouched where alpha is 0 and copies where it is 0xFF",
+        true, page:getPixel(0, 0) == WHITE and page:getPixel(1, 1) == BLACK,
+        "an empty overlay pixel is a no-op, not a white patch")
+    page:free()
+
+    -- The emulator's Screen.bb, and the reason the same call has to survive a
+    -- destination that is not 8bpp at all.
+    local screen_like = BB.new(4, 4, BB.TYPE_BBRGB32)
+    screen_like:fill(WHITE)
+    local composed = pcall(screen_like.alphablitFrom, screen_like,
+        ink, 0, 0, 0, 0, 4, 4)
+    claim("the same alphablitFrom composes onto a BBRGB32 destination",
+        true, composed
+            and screen_like:getPixel(1, 1):getR() == 0x00
+            and screen_like:getPixel(0, 0):getR() == 0xFF,
+        "the emulator's screen type")
+    screen_like:free()
+    ink:free()
+
+    --[[--
     The four KOReader behaviours the modal-close fix rests on (ADR-28).
 
     All of them belong to KOReader, not to us, and none is visible to

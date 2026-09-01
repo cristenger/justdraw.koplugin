@@ -177,6 +177,11 @@ function SurfaceSession:open()
         cell = self.cache_opts.cell,
         ink = self.cache_opts.ink,
         background = self.cache_opts.background,
+        -- Whether this surface is a page of its own or a transparent layer
+        -- over one is the owner's to say; the cache cannot infer it.
+        composition = self.cache_opts.composition,
+        paper_kind = self.cache_opts.paper_kind,
+        clear = self.cache_opts.clear,
         on_ready = function()
             local synced, sync_err = self:_syncNextSeq()
             if not synced then
