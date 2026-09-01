@@ -139,6 +139,30 @@ return function(ctx)
         t:eq(strokes[1].tool, 1, "a plain pen contact resolves to Style.PEN")
     end)
 
+    t:case("an injected style seam reaches the built stroke", function()
+        -- Task 4: the notebook's own get_pen_style seam is resolved against
+        -- the hardware tool exactly like the reader routes, latched once at
+        -- the contact that opens the stroke.
+        local session, _, adapter, spec = fixture("stylus")
+        adapter.get_pen_style = function() return 3 end
+        spec.stylus_handler{ slot = 4, id = 9, x = 10, y = 10, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 9, x = 20, y = 30, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 20, y = 30, tool = 0 }
+        local strokes = session:surface():cache():strokes()
+        t:eq(strokes[1].tool, 3, "the injected style reached the stored stroke")
+    end)
+
+    t:case("a notebook marker stroke bakes in the nib width", function()
+        local session, _, adapter, spec = fixture("stylus",
+            { get_pen_width = function() return 4 end })
+        adapter.get_pen_style = function() return 3 end
+        spec.stylus_handler{ slot = 4, id = 9, x = 10, y = 10, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 9, x = 20, y = 30, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 20, y = 30, tool = 0 }
+        local strokes = session:surface():cache():strokes()
+        t:eq(strokes[1].width, 4 * 3, "marker width is baked into logical units")
+    end)
+
     t:case("a valid live-raster token prevents repaint on stylus lift", function()
         local session, _, _, spec = fixture("stylus")
         local cache = session:surface():cache()

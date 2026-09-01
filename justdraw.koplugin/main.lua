@@ -114,6 +114,8 @@ function JustDraw:init()
     self.eraser = false
     self.bar = nil
     self.pen_width = Compat.readSetting(G_reader_settings, "pen_width", PEN_MEDIUM)
+    self.pen_style = Style.normalize(
+        Compat.readSetting(G_reader_settings, "pen_style", Style.PEN))
     self.live_fast = Compat.readSetting(G_reader_settings, "live_fast", true)
     self.bar_side = Compat.readSetting(G_reader_settings, "bar_side", "right")
     self.notebook_rail_side = Compat.readSetting(G_reader_settings, "notebook_rail_side")
@@ -131,6 +133,11 @@ function JustDraw:init()
     self.passthrough = false
     self.draw_slot = nil
     self.stroke = nil
+    -- Resolved once, at the physical contact-down frame -- before the
+    -- geometry policy has even proven a coherent pair to draw from -- so a
+    -- style flipped mid-contact cannot retroactively restyle it. See
+    -- onStylusContactStart / onStylusContactEnd.
+    self.contact_style = nil
 
     -- One contact normalizer, one palm ledger and one geometry policy per
     -- capture lease, shared with the notebook route. See buildStylusMachine.
@@ -190,6 +197,7 @@ function JustDraw:notebookController()
     self.notebook_input = NotebookInput.new{
         get_mode = function() return self.input_mode end,
         get_pen_width = function() return self.pen_width end,
+        get_pen_style = function() return self.pen_style end,
         get_eraser = function() return self.eraser end,
         on_error = function(reason) self:notify(reason or "input_failed") end,
         on_domain_error = function(reason, session)
@@ -1241,7 +1249,7 @@ function JustDraw:applyPoint(x, y, tool)
     elseif self.stroke then
         self:addPoint(x, y)
     else
-        self:startStroke(x, y, Style.PEN)
+        self:startStroke(x, y, self.contact_style or self:effectiveStyle(tool))
     end
 end
 
@@ -1345,6 +1353,11 @@ end
 
 function JustDraw:onStylusContactStart()
     self.stylus_budget_notified = false
+    -- Latch here, not at the first drawable point: the geometry policy can
+    -- withhold several frames proving a coherent pair, and a manual style
+    -- change in that window must not reach a contact already under way.
+    self.contact_style = self:effectiveStyle(
+        self.stylus_sequence and self.stylus_sequence.current_tool)
     if self.canvas_open and self.router then
         -- The pen is on the page from this frame, even though where is not
         -- known yet. A finger arriving in that window is no less of a palm.
@@ -1401,6 +1414,7 @@ function JustDraw:onStylusAbort(reason)
 end
 
 function JustDraw:onStylusContactEnd()
+    self.contact_style = nil
     if self.router then self.router:penUp() end
     return true
 end
@@ -2126,7 +2140,8 @@ function JustDraw:applyCanvasPoint(x, y, tool)
         if self.canvas_stroke then
             if not self:addCanvasPoint(cx, cy, tr) then return false end
         else
-            self:startCanvasStroke(cx, cy, tr, Style.PEN)
+            self:startCanvasStroke(cx, cy, tr,
+                self.contact_style or self:effectiveStyle(tool))
         end
     end
     return true
@@ -2489,6 +2504,23 @@ end
 function JustDraw:setPenWidth(w)
     self.pen_width = w
     Compat.saveSetting(G_reader_settings, "pen_width", w)
+end
+
+function JustDraw:setPenStyle(style)
+    style = Style.normalize(style)
+    self.pen_style = style
+    Compat.saveSetting(G_reader_settings, "pen_style", style)
+    if self.bar then self.bar:update(true) end
+end
+
+--- Where the marker may draw: a surface this plugin owns end to end. The
+--- book's own page is not ours to fill (phase 1.5 revisits it).
+function JustDraw:markerAvailable()
+    return self.canvas_open == true
+end
+
+function JustDraw:effectiveStyle(hw_tool)
+    return Style.resolve(self.pen_style, hw_tool, self:markerAvailable())
 end
 
 function JustDraw:penItem(text, w)

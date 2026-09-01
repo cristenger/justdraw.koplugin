@@ -83,7 +83,7 @@ function Adapter.new(opts)
         stroke = nil,
         erase_ctx = nil,
         erase_radius = nil,
-        get_pen_style = nil,
+        get_pen_style = opts.get_pen_style,
         edit_pending = false,
         contacts = {},
         contact_count = 0,
@@ -101,7 +101,7 @@ end
 function Adapter:configure(opts)
     opts = opts or {}
     local keys = {
-        "get_mode", "get_pen_width", "get_eraser", "eraser_radius",
+        "get_mode", "get_pen_width", "get_pen_style", "get_eraser", "eraser_radius",
         "touch_passthrough", "stylus_passthrough", "on_dirty",
         "on_edit_changed", "on_physical_contact_end", "on_stylus_frame", "on_error",
         "on_domain_error", "get_stylus_trace",
@@ -239,9 +239,18 @@ function Adapter:_beginInk(sx, sy, tool)
     -- rotation or on a different-sized device.
     local width = (tonumber(self.get_pen_width(self.active_session)) or 4)
         / self.transform.scale
+    -- The notebook's own hardware latch flows through `tool`; the manual
+    -- selection arrives through the seam. `_beginInk` runs exactly once per
+    -- contact -- on its first coherent point -- so resolving here already
+    -- writes the stroke's style once, at creation, and never revisits it.
+    -- Bake the marker's nib into the logical width too, so a wider raster
+    -- segment needs no per-frame style lookup on the hot path.
+    local style_from_seam = tonumber(self.get_pen_style and self.get_pen_style())
+    local resolved_style = Style.resolve(style_from_seam, tonumber(tool), true)
+    width = width * Style.widthScale(resolved_style)
     self.stroke = {
         points = { cx, cy }, n = 1, width = width,
-        tool = Style.normalize(tonumber(self.get_pen_style and self.get_pen_style()) or nil),
+        tool = resolved_style,
         min_x = cx, min_y = cy, max_x = cx, max_y = cy,
     }
     local box, raster_cache, raster_generation =

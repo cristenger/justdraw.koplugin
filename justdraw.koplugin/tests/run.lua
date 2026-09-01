@@ -864,13 +864,39 @@ t:case("pen slot reporting tool=FINGER with id<0 is a lift, not a point", functi
     t:eq(#p.store:get(1), 1, "exactly one stroke stored")
 end)
 
-t:case("highlighter behaves as a pen in this release", function()
+t:case("on the page the barrel highlighter still draws plain ink", function()
+    -- No sheet under the pen: the marker has nowhere honest to draw, so the
+    -- hardware latch degrades to pen rather than covering the book's text.
     local p = drawingPlugin()
     local bus = support.newSlotBus()
     p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 3 }))
     p:onStylusEvent(bus:set(4, { x = 150, y = 120 }))
     p:onStylusEvent(bus:set(4, { id = -1 }))
-    t:eq(#p.store:get(1), 1, "highlighter drew a normal stroke")
+    local s = p.store:get(1)[1]
+    t:eq(s.t, 1, "stored as pen")
+    t:eq(#p.store:get(1), 1, "one ordinary stroke")
+end)
+
+t:case("a manual graphite draws graphite on the page", function()
+    local p = drawingPlugin()
+    p:setPenStyle(65)
+    local bus = support.newSlotBus()
+    p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 1 }))
+    p:onStylusEvent(bus:set(4, { x = 150, y = 120 }))
+    p:onStylusEvent(bus:set(4, { id = -1 }))
+    t:eq(p.store:get(1)[1].t, 65, "the chosen style reached the record")
+    t:eq(_G.G_reader_settings.data.justdraw_pen_style, 65, "and is remembered")
+end)
+
+t:case("the style latches at contact start", function()
+    local p = drawingPlugin()
+    p:setPenStyle(65)
+    local bus = support.newSlotBus()
+    p:onStylusEvent(bus:set(4, { id = 4, x = 100, y = 100, tool = 1 }))
+    p:setPenStyle(1)          -- flipped mid-contact: must not restyle
+    p:onStylusEvent(bus:set(4, { x = 150, y = 120 }))
+    p:onStylusEvent(bus:set(4, { id = -1 }))
+    t:eq(p.store:get(1)[1].t, 65, "the contact keeps the style it started with")
 end)
 
 t:case("highlighter defers to the manual tool, it is not a forced pen", function()

@@ -9,6 +9,7 @@ local _ = require("gettext")
 local Errors = require("ink_notebook_errors")
 local Editor = require("ink_notebook_editor")
 local Library = require("ink_notebook_library")
+local Style = require("ink_style")
 
 local NotebookUI = {}
 NotebookUI.__index = NotebookUI
@@ -175,6 +176,9 @@ function NotebookUI:openNotebook(item)
         set_input_mode = function(value) return self.plugin:setInputMode(value) end,
         get_pen_width = function() return self.plugin.pen_width end,
         set_pen_width = function(value) return self.plugin:setPenWidth(value) end,
+        get_pen_style = function()
+            return Style.resolve(self.plugin.pen_style, nil, true)
+        end,
         get_live_fast = function() return self.plugin.live_fast end,
         get_rail_side = function() return self.plugin.notebook_rail_side end,
         show_stylus_diagnostics = function()
