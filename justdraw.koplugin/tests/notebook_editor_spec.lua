@@ -717,7 +717,8 @@ return function(ctx)
         local Geom = require("ui/geometry")
         local transform = {}
         local buffer = { w = 1000, h = 1400 }
-        local cache = { buffer = function() return buffer end }
+        local cache = { buffer = function() return buffer end,
+            hasGrayInk = function() return false end }
         local editor, _, _, _, session, _, scheduler = newEditor{
             transform = transform, cache = cache,
         }
@@ -747,11 +748,39 @@ return function(ctx)
         t:eq(cleanup[3].h, 50, "union spans both segments vertically")
     end)
 
+    t:case("gray ink on the page leaves the fast path", function()
+        -- The fast refresh is forced monochrome on device and drops gray, so
+        -- a page holding graphite/marker refreshes live ink through the
+        -- grayscale pass instead (ADR-36). That pass leaves no DU debt, so
+        -- no quality cleanup is armed for it.
+        ctx.reset()
+        local Geom = require("ui/geometry")
+        local transform = {}
+        local buffer = { w = 1000, h = 1400 }
+        local cache = {
+            buffer = function() return buffer end,
+            hasGrayInk = function() return true end,
+        }
+        local editor, _, _, _, session, _, scheduler = newEditor{
+            transform = transform, cache = cache,
+        }
+        local before = #ctx.env.UIManager.dirty
+        editor:onDirty(Geom:new{ x = 100, y = 200, w = 20, h = 30 },
+            "ink", session, transform, { x = 10, y = 20, w = 20, h = 30 })
+        local refresh = ctx.env.UIManager.dirty[#ctx.env.UIManager.dirty]
+        t:eq(#ctx.env.UIManager.dirty, before + 1, "the segment still refreshes")
+        t:eq(refresh[1], nil, "editor is not marked for repaint")
+        t:eq(refresh[2], "partial", "through the grayscale pass, not DU")
+        editor:onEditChanged(session)
+        t:eq(scheduler:pending(), 0, "no quality cleanup is armed: no DU debt")
+    end)
+
     t:case("live-fast off uses partial for ink and eraser with no cleanup", function()
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
-        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end,
+            hasGrayInk = function() return false end }
         local runtime = { live_fast = false, active_contact = false }
         local editor, _, _, _, session, _, scheduler = newEditor{
             transform = transform, cache = cache, runtime = runtime,
@@ -775,7 +804,8 @@ return function(ctx)
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
-        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end,
+            hasGrayInk = function() return false end }
         local editor, _, _, _, session, _, scheduler = newEditor{
             transform = transform, cache = cache,
         }
@@ -811,7 +841,8 @@ return function(ctx)
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
-        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end,
+            hasGrayInk = function() return false end }
         local runtime = { live_fast = true, active_contact = false }
         local editor, _, _, _, session, _, scheduler = newEditor{
             transform = transform, cache = cache, runtime = runtime,
@@ -856,7 +887,8 @@ return function(ctx)
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
-        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end,
+            hasGrayInk = function() return false end }
         local runtime = { live_fast = true, active_contact = false }
         local editor, _, _, _, session, _, scheduler = newEditor{
             transform = transform, cache = cache, runtime = runtime,
@@ -912,7 +944,8 @@ return function(ctx)
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
-        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end,
+            hasGrayInk = function() return false end }
         local runtime = { live_fast = true, active_contact = false }
         local editor, _, _, _, session, _, scheduler = newEditor{
             transform = transform, cache = cache, runtime = runtime,
@@ -952,7 +985,8 @@ return function(ctx)
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
-        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end,
+            hasGrayInk = function() return false end }
         local runtime = { live_fast = true, active_contact = false }
         local editor, _, _, _, session, _, scheduler = newEditor{
             transform = transform, cache = cache, runtime = runtime,
@@ -985,7 +1019,8 @@ return function(ctx)
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
-        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end,
+            hasGrayInk = function() return false end }
         local runtime = { live_fast = true, active_contact = false }
         local scheduler = ctx.support.newScheduler()
         local editor, _, _, _, session = newEditor{
@@ -1035,7 +1070,8 @@ return function(ctx)
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
-        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end,
+            hasGrayInk = function() return false end }
         local runtime = { live_fast = true, active_contact = false }
         local editor, _, _, _, session, _, scheduler = newEditor{
             transform = transform, cache = cache, runtime = runtime,
@@ -1063,7 +1099,8 @@ return function(ctx)
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
-        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end,
+            hasGrayInk = function() return false end }
         local runtime = { live_fast = true, active_contact = false }
         local editor, _, _, _, session, _, scheduler = newEditor{
             transform = transform, cache = cache, runtime = runtime,
@@ -1086,7 +1123,8 @@ return function(ctx)
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
-        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end,
+            hasGrayInk = function() return false end }
         local runtime = { live_fast = true, active_contact = false }
         local editor, _, _, _, session, _, scheduler = newEditor{
             transform = transform, cache = cache, runtime = runtime,
@@ -1107,7 +1145,8 @@ return function(ctx)
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
-        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end,
+            hasGrayInk = function() return false end }
         local runtime = { live_fast = true, active_contact = false }
         local editor, _, _, _, session, _, scheduler = newEditor{
             transform = transform, cache = cache, runtime = runtime,
@@ -1126,7 +1165,8 @@ return function(ctx)
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
-        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end,
+            hasGrayInk = function() return false end }
         local runtime = { live_fast = true, active_contact = false }
         local editor, _, _, _, session, _, scheduler = newEditor{
             transform = transform, cache = cache, runtime = runtime,
@@ -1154,7 +1194,8 @@ return function(ctx)
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
-        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end,
+            hasGrayInk = function() return false end }
         local runtime = { live_fast = true, active_contact = false }
         local clock = 10
         local editor, _, _, _, session, _, scheduler = newEditor{
@@ -1207,7 +1248,8 @@ return function(ctx)
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
-        local cache = { buffer = function() return { w = 1200, h = 1600 } end }
+        local cache = { buffer = function() return { w = 1200, h = 1600 } end,
+            hasGrayInk = function() return false end }
         local runtime = { live_fast = true, active_contact = false }
         local editor, _, _, _, session, _, scheduler = newEditor{
             transform = transform, cache = cache, runtime = runtime,
@@ -1245,7 +1287,8 @@ return function(ctx)
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
-        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end,
+            hasGrayInk = function() return false end }
         local runtime = { live_fast = true, active_contact = false }
         local editor, _, _, _, session, _, scheduler = newEditor{
             transform = transform, cache = cache, runtime = runtime,
@@ -1267,7 +1310,8 @@ return function(ctx)
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
-        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end,
+            hasGrayInk = function() return false end }
         local editor, _, _, _, session, _, scheduler = newEditor{
             transform = transform, cache = cache,
         }
@@ -1296,7 +1340,8 @@ return function(ctx)
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
-        local cache = { buffer = function() return { w = 1200, h = 1600 } end }
+        local cache = { buffer = function() return { w = 1200, h = 1600 } end,
+            hasGrayInk = function() return false end }
         local runtime = { live_fast = true, active_contact = true }
         local editor, _, _, _, session, _, scheduler = newEditor{
             transform = transform, cache = cache, runtime = runtime,
@@ -1326,7 +1371,8 @@ return function(ctx)
         local Geom = require("ui/geometry")
         local transform = {}
         local buffer = { w = 1000, h = 1400 }
-        local cache = { buffer = function() return buffer end }
+        local cache = { buffer = function() return buffer end,
+            hasGrayInk = function() return false end }
         local editor, _, _, _, session = newEditor{
             transform = transform, cache = cache,
         }
@@ -1386,7 +1432,8 @@ return function(ctx)
             ctx.reset()
             local transform = {}
             local buffer = { w = 1000, h = 1400 }
-            local cache = { buffer = function() return buffer end }
+            local cache = { buffer = function() return buffer end,
+            hasGrayInk = function() return false end }
             local editor, _, _, _, session = newEditor{
                 side = side, transform = transform, cache = cache,
             }
@@ -1430,7 +1477,8 @@ return function(ctx)
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
-        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end,
+            hasGrayInk = function() return false end }
         local editor, _, _, _, session, _, scheduler = newEditor{
             transform = transform, cache = cache,
         }
@@ -1477,6 +1525,7 @@ return function(ctx)
         local cache = {
             generation = 1,
             buffer = function() return { w = 1000, h = 1400 } end,
+            hasGrayInk = function() return false end,
         }
         local editor, _, _, _, session = newEditor{
             transform = transform, cache = cache,
@@ -1508,6 +1557,7 @@ return function(ctx)
         local cache = {
             buffer = function() return { w = 1000, h = 1400 } end,
             paintTo = function() end,
+            hasGrayInk = function() return false end,
         }
         local editor, _, _, _, session, _, scheduler = newEditor{
             transform = transform, cache = cache,
@@ -1546,7 +1596,8 @@ return function(ctx)
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
-        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end,
+            hasGrayInk = function() return false end }
         local editor, _, _, _, session, _, scheduler = newEditor{
             transform = transform, cache = cache,
         }
@@ -1592,7 +1643,8 @@ return function(ctx)
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
-        local cache = { buffer = function() return { w = 1000, h = 1400 } end }
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end,
+            hasGrayInk = function() return false end }
         local editor, _, _, _, session, _, scheduler = newEditor{
             transform = transform, cache = cache,
         }
@@ -1613,7 +1665,8 @@ return function(ctx)
         local Geom = require("ui/geometry")
         local transform = {}
         local buffer = { w = 1000, h = 1400 }
-        local cache = { buffer = function() return buffer end }
+        local cache = { buffer = function() return buffer end,
+            hasGrayInk = function() return false end }
         local editor, _, _, _, session = newEditor{
             transform = transform, cache = cache,
         }

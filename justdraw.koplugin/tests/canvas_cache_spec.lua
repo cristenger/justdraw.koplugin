@@ -241,6 +241,34 @@ return function(ctx)
         t:eq(rects2[#rects2].c, "black", "and nil defaults to the cache's own ink")
     end)
 
+    t:case("the cache knows when its raster holds gray ink", function()
+        -- The fast refresh is forced monochrome on device, so every box
+        -- refresh that could cover gray ink must ride a grayscale pass
+        -- instead (ADR-36). The flag is monotone within a build -- erasing
+        -- the last gray stroke leaves it set, which fails toward correctness.
+        local cache = readyCache()
+        t:eq(cache:hasGrayInk(), false, "a fresh sheet holds none")
+        cache:drawSegment(100, 100, 110, 100, 4)
+        t:eq(cache:hasGrayInk(), false, "ink-colored segments leave it unset")
+        cache:drawSegment(120, 100, 130, 100, 4, "gray_6")
+        t:eq(cache:hasGrayInk(), true, "a live graphite segment sets it")
+
+        local by_meta = readyCache()
+        local s = bar(100, 100)
+        by_meta:addStroke({ id = 99, seq = 1, width = 4, tool = 65,
+                            point_count = s.n, min_x = 100, min_y = 100,
+                            max_x = 130, max_y = 100 }, s.points, s.n)
+        t:eq(by_meta:hasGrayInk(), true, "a graphite stroke meta sets it")
+
+        local graphite = bar(200, 200)
+        graphite.tool = 65
+        local replayed = readyCache{ strokes = { bar(10, 10), graphite } }
+        t:eq(replayed:hasGrayInk(), true, "a persisted graphite stroke sets it on build")
+
+        local pen_only = readyCache{ strokes = { bar(10, 10), bar(300, 300) } }
+        t:eq(pen_only:hasGrayInk(), false, "a pen-only sheet keeps the fast path")
+    end)
+
     t:case("a matching complete live token registers without repainting", function()
         local cache = readyCache()
         local bb = cache:buffer()

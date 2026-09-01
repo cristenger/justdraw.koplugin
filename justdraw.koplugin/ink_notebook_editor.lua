@@ -1067,6 +1067,11 @@ function Editor:onDirty(screen_box, kind, session, transform, source_box)
         self:_resetQualityRefresh()
     end
     local live_fast = self:_syncQualitySetting(session, transform, cache)
+    -- The fast refresh is forced monochrome on device and drops gray, so a
+    -- page holding graphite/marker rides the grayscale pass instead (ADR-36).
+    -- That pass leaves no DU debt behind, so it takes the plain-partial
+    -- branches below and touches no quality bookkeeping.
+    local fast_ok = live_fast and not cache:hasGrayInk()
     local exact_box, exact_source = self:_clipDirtyBox(screen_box, source_box)
     if not exact_box then return end
     local live_kind = kind == "ink" or kind == "erase"
@@ -1075,8 +1080,8 @@ function Editor:onDirty(screen_box, kind, session, transform, source_box)
     -- to this exact page/cache/transform and present it after uncover.
     if Stack.visualAbove(self) then
         self:_queueCoveredRepaint(exact_box, exact_source,
-            session, transform, cache, live_kind and live_fast)
-        if live_kind and live_fast then
+            session, transform, cache, live_kind and fast_ok)
+        if live_kind and fast_ok then
             self:_accumulateQualityBox(exact_box, session, transform, cache)
         end
         self:_qualityCovered()
@@ -1091,7 +1096,7 @@ function Editor:onDirty(screen_box, kind, session, transform, source_box)
         self:_restorePaperChromeIfIntersecting(Screen.bb, exact_box)
     end
 
-    if live_kind and live_fast then
+    if live_kind and fast_ok then
         -- Passing nil schedules only the panel update; repainting Editor here
         -- would redraw the full page and controls for every pen segment.
         UIManager:setDirty(nil, "fast", exact_box)

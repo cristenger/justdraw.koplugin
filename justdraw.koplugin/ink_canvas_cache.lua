@@ -119,6 +119,12 @@ function Cache.new(opts)
         -- the deleted maximum -- so anything that outlives a stroke, like
         -- the erase context's chunk LRU, must key on this instead.
         meta_tokens = 0,
+        -- Whether the raster holds any gray ink. The device's fast refresh is
+        -- forced monochrome and drops gray, so box refreshes key on this to
+        -- pick a grayscale pass instead (ADR-36). Monotone within a build --
+        -- erasing the last gray stroke leaves it set, failing toward
+        -- correctness -- and re-derived by every rebuild's replay.
+        gray_ink = false,
         --- Bumped by every rebuild and by close, so a batch in flight from an
         --- earlier geometry does nothing.
         generation = 0,
@@ -182,6 +188,12 @@ function Cache:metaById(id)
 end
 
 --- The raster buffer, for the overlay's regional blits. nil once closed.
+--- Whether any gray ink has reached the raster since the last rebuild. Box
+--- refreshes over this cache must ride a grayscale pass while true (ADR-36).
+function Cache:hasGrayInk()
+    return self.gray_ink == true
+end
+
 function Cache:buffer()
     return self.bb
 end
@@ -593,6 +605,9 @@ function Cache:drawSegment(x0, y0, x1, y1, width, color)
     local painted, left, top, right, bottom =
         Render.segment(self.bb, kx0, ky0, kx1, ky1, w, color or self.ink)
     if not painted then return nil end
+    -- An explicit colour is exactly a gray style's (colorFor hands nil for
+    -- pen). rawequal: a real colour is cdata whose __eq indexes its argument.
+    if not rawequal(color, nil) then self.gray_ink = true end
     return {
         x = left, y = top, w = right - left, h = bottom - top,
     }, self, self.generation
@@ -631,6 +646,7 @@ function Cache:_build()
     self.load_error = nil
     self.state = "loading"
     self.chunks_by_id = {}
+    self.gray_ink = false
 
     self:_freeBuffer()
     if not self.transform or type(self.transform.cacheSize) ~= "function" then
@@ -839,6 +855,9 @@ end
 
 function Cache:_paintStroke(m, points, n, target, ox, oy)
     local tr = self.transform
+    -- Every persisted-stroke paint funnels through here -- build replay,
+    -- repair, fragment repaint -- so this is where gray content is noticed.
+    if Style.isGray(m.tool) then self.gray_ink = true end
     return Render.points(target or self.bb, points, n, tr.scale,
         ox or 0, oy or 0, tr:scaleWidth(m.width),
         Style.colorFor(m.tool, self.ink))

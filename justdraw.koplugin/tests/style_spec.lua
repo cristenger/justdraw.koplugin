@@ -29,6 +29,16 @@ return function(ctx)
         t:eq(Style.colorFor(nil, "ink"), "ink", "legacy strokes render as before")
     end)
 
+    t:case("isGray names exactly the styles DU cannot show", function()
+        -- The fast refresh is forced monochrome on device; refresh decisions
+        -- key on this predicate (ADR-36).
+        t:eq(Style.isGray(Style.GRAPHITE), true, "graphite paints gray")
+        t:eq(Style.isGray(Style.MARKER), true, "marker paints gray")
+        t:eq(Style.isGray(Style.PEN), false, "pen rides the surface ink")
+        t:eq(Style.isGray(nil), false, "legacy strokes ride the surface ink")
+        t:eq(Style.isGray(999), false, "unknown styles degrade to ink")
+    end)
+
     t:case("only the marker widens the nib", function()
         t:eq(Style.widthScale(Style.MARKER), 3, "marker nib")
         t:eq(Style.widthScale(Style.PEN), 1, "pen")

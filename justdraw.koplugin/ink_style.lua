@@ -47,6 +47,13 @@ function Style.widthScale(style)
     return WIDTH_SCALE[style] or 1
 end
 
+--- Whether this style paints a colour the fast (forced-monochrome) refresh
+--- cannot show. Refresh decisions key on it: a DU update over gray ink drops
+--- the ink on device (ADR-36).
+function Style.isGray(style)
+    return COLORS[style] ~= nil
+end
+
 --- The one per-contact rule. Callers settle the eraser BEFORE this: an
 --- erasing contact never has a style. `marker_allowed` is "this surface is
 --- ours to fill" -- a sheet or a notebook page, never the book's own page.

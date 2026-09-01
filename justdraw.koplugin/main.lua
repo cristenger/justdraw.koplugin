@@ -1815,7 +1815,11 @@ function JustDraw:addPoint(x, y)
 
     local painted, left, top, right, bottom =
         Render.segment(Screen.bb, px, py, x, y, s.w, Style.colorFor(s.t, INK))
-    if painted then self:refreshBox(left, top, right, bottom) end
+    -- Direct ink has no raster to remember gray content, so the pass is
+    -- chosen per stroke, by its own style (ADR-36).
+    if painted then
+        self:refreshBox(left, top, right, bottom, Style.isGray(s.t))
+    end
     return true
 end
 
@@ -1834,7 +1838,9 @@ function JustDraw:endStroke()
     if s.n == 1 then -- a dot: never painted live, paint it now
         local painted, left, top, right, bottom =
             Render.stroke(Screen.bb, s, 0, 0, Style.colorFor(s.t, INK))
-        if painted then self:refreshBox(left, top, right, bottom) end
+        if painted then
+            self:refreshBox(left, top, right, bottom, Style.isGray(s.t))
+        end
     end
     self.store:add(self:currentPage(), s)
 end
@@ -2298,7 +2304,8 @@ function JustDraw:_flushCanvasPendingRepaint(already_painted)
             UIManager:setDirty(nil, "partial",
                 Geom:new{ x = x, y = y, w = w, h = h })
         else
-            self:refreshBox(x, y, x + w, y + h)
+            self:refreshBox(x, y, x + w, y + h,
+                pending.cache:hasGrayInk())
         end
     end
     return true
@@ -2331,7 +2338,7 @@ function JustDraw:blitCanvasBox(box, tr)
         overlay:restoreChromeIfIntersecting(Screen.bb,
             { x = sx, y = sy, w = box.w, h = box.h }, 0, 0)
     end
-    self:refreshBox(sx, sy, sx + box.w, sy + box.h)
+    self:refreshBox(sx, sy, sx + box.w, sy + box.h, cache:hasGrayInk())
 end
 
 function JustDraw:endCanvasStroke()
@@ -2470,7 +2477,10 @@ function JustDraw:repaint()
 end
 
 --- Refresh the half-open coverage returned by InkRender, clamped to screen.
-function JustDraw:refreshBox(left, top, right, bottom)
+--- `grayscale` overrides the fast path: the device's fast refresh is forced
+--- monochrome and drops gray ink, so any box that may hold gray content must
+--- ride a grayscale pass instead (ADR-36).
+function JustDraw:refreshBox(left, top, right, bottom, grayscale)
     left, top, right, bottom = tonumber(left), tonumber(top),
         tonumber(right), tonumber(bottom)
     if not left or not top or not right or not bottom
@@ -2491,7 +2501,7 @@ function JustDraw:refreshBox(left, top, right, bottom)
     local w, h = edge_x - x, edge_y - y
     if w <= 0 or h <= 0 then return end
 
-    if self.live_fast then
+    if self.live_fast and not grayscale then
         Screen:refreshFast(x, y, w, h)
     else
         Screen:refreshPartial(x, y, w, h)
