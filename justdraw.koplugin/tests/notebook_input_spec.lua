@@ -163,6 +163,24 @@ return function(ctx)
         t:eq(strokes[1].width, 4 * 3, "marker width is baked into logical units")
     end)
 
+    t:case("the notebook latches style at contact start, not the first coherent point", function()
+        -- Mirrors run.lua's "the style latches at contact start": the
+        -- contact-down frame is a geometry baseline only, so the first
+        -- coherent point (the one that actually calls _beginInk) can arrive
+        -- after the seam has already been flipped. The stroke must still
+        -- carry the style that was current when the contact began.
+        local session, _, adapter, spec = fixture("stylus",
+            { get_pen_width = function() return 4 end })
+        adapter.get_pen_style = function() return 3 end  -- style A: marker
+        spec.stylus_handler{ slot = 4, id = 9, x = 10, y = 10, tool = 1 }
+        adapter.get_pen_style = function() return 1 end  -- flipped mid-contact
+        spec.stylus_handler{ slot = 4, id = 9, x = 20, y = 30, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 20, y = 30, tool = 0 }
+        local strokes = session:surface():cache():strokes()
+        t:eq(strokes[1].tool, 3, "the contact keeps the style it started with")
+        t:eq(strokes[1].width, 4 * 3, "and the marker width latched with it")
+    end)
+
     t:case("a valid live-raster token prevents repaint on stylus lift", function()
         local session, _, _, spec = fixture("stylus")
         local cache = session:surface():cache()

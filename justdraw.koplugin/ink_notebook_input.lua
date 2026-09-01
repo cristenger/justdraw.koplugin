@@ -84,6 +84,11 @@ function Adapter.new(opts)
         erase_ctx = nil,
         erase_radius = nil,
         get_pen_style = opts.get_pen_style,
+        -- Resolved once, at the physical contact-down frame -- before the
+        -- geometry policy has proven a coherent pair for `_beginInk` to draw
+        -- from -- so a style flipped mid-contact cannot retroactively
+        -- restyle it. See _stylusContactStart / _stylusContactEnd.
+        contact_style = nil,
         edit_pending = false,
         contacts = {},
         contact_count = 0,
@@ -239,14 +244,19 @@ function Adapter:_beginInk(sx, sy, tool)
     -- rotation or on a different-sized device.
     local width = (tonumber(self.get_pen_width(self.active_session)) or 4)
         / self.transform.scale
-    -- The notebook's own hardware latch flows through `tool`; the manual
-    -- selection arrives through the seam. `_beginInk` runs exactly once per
-    -- contact -- on its first coherent point -- so resolving here already
-    -- writes the stroke's style once, at creation, and never revisits it.
+    -- The style is latched at the true contact-down frame, in
+    -- _stylusContactStart -- before the geometry policy has necessarily
+    -- proven the coherent pair that lets `_beginInk` run -- so a manual
+    -- style change in that window cannot reach a contact already under way.
+    -- Fall back to resolving here only for a route that never latched one
+    -- (finger-drawn ink reaches _beginInk directly; see _stylusPoint).
+    local resolved_style = self.contact_style
+    if resolved_style == nil then
+        local style_from_seam = tonumber(self.get_pen_style and self.get_pen_style())
+        resolved_style = Style.resolve(style_from_seam, tonumber(tool), true)
+    end
     -- Bake the marker's nib into the logical width too, so a wider raster
     -- segment needs no per-frame style lookup on the hot path.
-    local style_from_seam = tonumber(self.get_pen_style and self.get_pen_style())
-    local resolved_style = Style.resolve(style_from_seam, tonumber(tool), true)
     width = width * Style.widthScale(resolved_style)
     self.stroke = {
         points = { cx, cy }, n = 1, width = width,
@@ -472,6 +482,12 @@ end
 
 function Adapter:_stylusContactStart()
     self.stylus_budget_notified = false
+    -- Latch here, not at the first drawable point: the geometry policy can
+    -- withhold several frames proving a coherent pair, and a manual style
+    -- change in that window must not reach a contact already under way.
+    local style_from_seam = tonumber(self.get_pen_style and self.get_pen_style())
+    self.contact_style = Style.resolve(style_from_seam,
+        tonumber(self.sequence and self.sequence.current_tool), true)
     self:_markPhysicalContact()
     return true
 end
@@ -535,6 +551,7 @@ end
 
 function Adapter:_stylusContactEnd(reason)
     self.last_stylus_lift_time = self.now()
+    self.contact_style = nil
     -- Logical ink end is not physical contact end: a palm or a finger may
     -- still be down, and the editor must not re-enable anything until the
     -- glass is clear.
