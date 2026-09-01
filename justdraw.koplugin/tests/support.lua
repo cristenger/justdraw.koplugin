@@ -774,11 +774,17 @@ end
 --[[--
 An in-memory stand-in for the canvas repository.
 
-This one fakes an *interface*, not a database: the four methods the anchor
-index actually calls, backed by Lua tables. The repository's own behaviour is
-covered against a recorder and against real SQLite elsewhere, so nothing here
-is claiming anything about SQL. What it gives the index tests is a call count,
-which is how "a page turn issues no query" becomes a check rather than a claim.
+This one fakes an *interface*, not a database: the methods the anchor index,
+the sessions and the export actually call, backed by Lua tables. The
+repository's own behaviour is covered against a recorder and against real
+SQLite elsewhere, so nothing here is claiming anything about SQL. What it gives
+the index tests is a call count, which is how "a page turn issues no query"
+becomes a check rather than a claim.
+
+Two things it does model, because a fake that got them wrong would let a whole
+suite pass over a broken device: rowid reuse, and the surface roles -- sheets
+and page ink are separate listings with separate cursors, and a spec the
+schema's CHECKs would reject is refused here too (ADR-37).
 ]]
 function support.newCanvasStore(canvases)
     local store = {
@@ -787,14 +793,24 @@ function support.newCanvasStore(canvases)
         calls = { list = 0, read = 0, save = 0 },
         saves = {},          -- every saveLayoutPages call, in order
     }
+    --- The role a row plays. A row that never stated one is a sheet, exactly
+    --- the way the column's DEFAULT reads back for every row written before
+    --- schema v2 -- so a fixture built as a bare table is still a sheet here.
+    local function roleOf(canvas) return canvas.surface_role or "sheet" end
+
     function store:listCanvases()
         self.calls.list = self.calls.list + 1
         if self.fail_list_canvases then return nil, self.fail_list_canvases end
         -- A fresh array, the way the real repository builds one per query.
         -- Handing out the live table lets a caller that appends to the result
         -- quietly grow the store, which is a bug the fake would then hide.
+        -- Sheets only, like `listCanvases`: page ink has no anchor to resolve.
         local out = {}
-        for i = 1, #self.canvases do out[i] = self.canvases[i] end
+        for i = 1, #self.canvases do
+            if roleOf(self.canvases[i]) == "sheet" then
+                out[#out + 1] = self.canvases[i]
+            end
+        end
         return out
     end
     function store:layoutPages(_, hash)
@@ -1031,8 +1047,59 @@ function support.newCanvasStore(canvases)
         return 12
     end
 
+    --[[--
+    The surface a spec describes, or nil for one the schema would refuse.
+
+    Deliberately a copy of `ink_canvas_repository`'s rule rather than a call
+    into it: a fake that shares the implementation can never disagree with it,
+    and so can never catch the day the rule itself is what changed. A copy can
+    drift, which is why tests/conformance.lua states every one of these against
+    SQLite's own CHECK and UNIQUE constraints, and canvas_repository_spec runs
+    both over one table of refusals.
+    ]]
+    local function surfaceOf(spec)
+        local kind = spec.anchor_kind or "xpointer"
+        local role = spec.surface_role or "sheet"
+        local space = spec.coordinate_space
+        if role == "sheet" then
+            if space == nil then space = "surface" end
+            if space ~= "surface" then return nil end
+        elseif role == "page_ink" then
+            if space == nil then space = "native_page" end
+            if space ~= "native_page" then return nil end
+            if kind ~= "page" then return nil end
+            local page = spec.fixed_page
+            if type(page) ~= "number" or page ~= page
+                or page == math.huge or page == -math.huge
+                or page < 1 or page ~= math.floor(page) then
+                return nil
+            end
+            if spec.anchor_raw ~= nil or spec.anchor_normalized ~= nil
+                or spec.anchor_dom_version ~= nil then
+                return nil
+            end
+        else
+            return nil
+        end
+        return role, space
+    end
+
+    --- Absent or unusable falls back to the default, anything else is clamped
+    --- to 1..500 -- `ink_canvas_repository.batchLimit`, so a suite that pages
+    --- through the fake sees the batch sizes the device will see.
+    local function batchLimit(v, default)
+        local n = tonumber(v)
+        if n == nil or n ~= n then return default end
+        n = math.floor(n)
+        if n < 1 then return 1 end
+        if n > 500 then return 500 end
+        return n
+    end
+
     function store:createCanvas(book_id, spec)
         if self.fail_create then return nil, self.fail_create end
+        local role, space = surfaceOf(spec)
+        if not role then return nil, "bad_surface" end
         for _, c in ipairs(self.canvases) do
             if c.anchor_key == spec.anchor_key then return nil, "duplicate" end
         end
@@ -1045,11 +1112,126 @@ function support.newCanvasStore(canvases)
             anchor_raw = spec.anchor_raw,
             anchor_normalized = spec.anchor_normalized,
             anchor_dom_version = spec.anchor_dom_version,
+            fixed_page = spec.fixed_page,
+            surface_role = role,
+            coordinate_space = space,
             logical_w = spec.logical_w,
             logical_h = spec.logical_h,
         }
         self.canvases[#self.canvases + 1] = canvas
         return canvas
+    end
+
+    function store:countCanvases()
+        local n = 0
+        for i = 1, #self.canvases do
+            if roleOf(self.canvases[i]) == "sheet" then n = n + 1 end
+        end
+        return n
+    end
+
+    --- Sheet metadata by id, the way the index pages through it. Counted as a
+    --- listing, and pointedly not as a stroke read: the promise this fake is
+    --- here to check is that building an index opens no stroke at all.
+    function store:listCanvasesBatch(_, opts)
+        self.calls.list = self.calls.list + 1
+        if self.fail_list_canvases then return nil, self.fail_list_canvases end
+        opts = opts or {}
+        local limit = batchLimit(opts.limit, 200)
+        local after_id = tonumber(opts.after_id)
+        local rows = {}
+        for i = 1, #self.canvases do
+            local c = self.canvases[i]
+            if roleOf(c) == "sheet" and (not after_id or c.id > after_id) then
+                rows[#rows + 1] = c
+            end
+        end
+        table.sort(rows, function(a, b) return a.id < b.id end)
+        local out = {}
+        for i = 1, math.min(#rows, limit) do out[i] = rows[i] end
+        return out
+    end
+
+    function store:findPageInkSurface(_, fixed_page)
+        if self.fail_find_page_ink then return nil, self.fail_find_page_ink end
+        for i = 1, #self.canvases do
+            local c = self.canvases[i]
+            if roleOf(c) == "page_ink" and c.fixed_page == fixed_page then
+                return c
+            end
+        end
+        return nil, "not_found"
+    end
+
+    function store:createPageInkSurface(book_id, fixed_page, logical_w, logical_h)
+        return self:createCanvas(book_id, {
+            anchor_kind = "page",
+            anchor_key = "page-ink:" .. tostring(fixed_page),
+            fixed_page = fixed_page,
+            surface_role = "page_ink",
+            coordinate_space = "native_page",
+            logical_w = logical_w,
+            logical_h = logical_h,
+        })
+    end
+
+    --- Page ink by `(fixed_page, id)`, keyset-paginated. The pair, not the
+    --- page: see `Repository.listPageInkSurfaces`.
+    function store:listPageInkSurfaces(_, opts)
+        if self.fail_list_page_ink then return nil, self.fail_list_page_ink end
+        opts = opts or {}
+        local limit = batchLimit(opts.limit, 100)
+        local after_page = tonumber(opts.after_page)
+        local after_id = after_page and (tonumber(opts.after_id) or 0) or nil
+        local rows = {}
+        for i = 1, #self.canvases do
+            local c = self.canvases[i]
+            if roleOf(c) == "page_ink"
+                and (not after_page
+                     or c.fixed_page > after_page
+                     or (c.fixed_page == after_page and c.id > after_id)) then
+                rows[#rows + 1] = c
+            end
+        end
+        table.sort(rows, function(a, b)
+            if a.fixed_page ~= b.fixed_page then return a.fixed_page < b.fixed_page end
+            return a.id < b.id
+        end)
+        local out = {}
+        for i = 1, math.min(#rows, limit) do out[i] = rows[i] end
+        return out
+    end
+
+    function store:countPageInkSurfaces()
+        local n = 0
+        for i = 1, #self.canvases do
+            if roleOf(self.canvases[i]) == "page_ink" then n = n + 1 end
+        end
+        return n
+    end
+
+    function store:deletePageInkSurface(_, fixed_page)
+        if self.fail_delete_canvas then return nil, self.fail_delete_canvas end
+        for i = #self.canvases, 1, -1 do
+            local c = self.canvases[i]
+            if roleOf(c) == "page_ink" and c.fixed_page == fixed_page then
+                self.strokes[c.id] = nil
+                table.remove(self.canvases, i)
+            end
+        end
+        return true
+    end
+
+    function store:deleteAllPageInkSurfaces()
+        if self.fail_delete_canvas then return nil, self.fail_delete_canvas end
+        for i = #self.canvases, 1, -1 do
+            local c = self.canvases[i]
+            if roleOf(c) == "page_ink" then
+                self.strokes[c.id] = nil
+                table.remove(self.canvases, i)
+            end
+        end
+        return true
     end
 
     function store:deleteCanvas(canvas_id)

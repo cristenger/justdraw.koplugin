@@ -756,4 +756,596 @@ return function(ctx)
         t:check(err ~= nil, "a reason")
         t:eq(driver.last().closed, false, "and the database stays open")
     end)
+
+    -- =================================================================
+    t:describe("ink_canvas_repository / schema v2")
+
+    --[[
+    The v1 schema, frozen.
+
+    Copied out of the module before the surface columns were added, and
+    deliberately *not* derived from `Repository.SCHEMA`: a constant that tracks
+    the module can never notice that the fresh schema and the migration have
+    drifted apart, which is the one thing a reader's existing database depends
+    on.
+    ]]
+    local V1_SCHEMA = [[
+CREATE TABLE books (
+    id           INTEGER PRIMARY KEY,
+    partial_md5  TEXT    NOT NULL,
+    file_size    INTEGER NOT NULL,
+    last_path    TEXT,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    UNIQUE(partial_md5, file_size)
+);
+CREATE TABLE canvases (
+    id                    INTEGER PRIMARY KEY,
+    book_id               INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    anchor_kind           TEXT    NOT NULL CHECK(anchor_kind IN ('xpointer', 'page')),
+    anchor_key            TEXT    NOT NULL,
+    anchor_raw            TEXT,
+    anchor_normalized     TEXT,
+    anchor_dom_version    INTEGER,
+    fixed_page            INTEGER,
+    logical_w             INTEGER NOT NULL,
+    logical_h             INTEGER NOT NULL,
+    created_at            INTEGER NOT NULL,
+    updated_at            INTEGER NOT NULL,
+    UNIQUE(book_id, anchor_key),
+    UNIQUE(id, book_id)
+);
+CREATE TABLE canvas_layout_cache (
+    canvas_id      INTEGER NOT NULL,
+    book_id        INTEGER NOT NULL,
+    layout_hash    TEXT    NOT NULL,
+    resolved_page  INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL,
+    PRIMARY KEY(canvas_id, layout_hash),
+    FOREIGN KEY(canvas_id, book_id)
+        REFERENCES canvases(id, book_id) ON DELETE CASCADE
+);
+CREATE TABLE strokes (
+    id           INTEGER PRIMARY KEY,
+    canvas_id    INTEGER NOT NULL REFERENCES canvases(id) ON DELETE CASCADE,
+    seq          INTEGER NOT NULL,
+    width        REAL    NOT NULL,
+    tool         INTEGER NOT NULL,
+    codec        INTEGER NOT NULL,
+    point_count  INTEGER NOT NULL,
+    min_x        REAL    NOT NULL,
+    min_y        REAL    NOT NULL,
+    max_x        REAL    NOT NULL,
+    max_y        REAL    NOT NULL,
+    created_at   INTEGER NOT NULL,
+    UNIQUE(canvas_id, seq)
+);
+CREATE TABLE stroke_chunks (
+    stroke_id    INTEGER NOT NULL REFERENCES strokes(id) ON DELETE CASCADE,
+    chunk_no     INTEGER NOT NULL,
+    point_count  INTEGER NOT NULL,
+    points       BLOB    NOT NULL,
+    PRIMARY KEY(stroke_id, chunk_no)
+);
+CREATE INDEX canvases_by_book ON canvases(book_id, updated_at);
+CREATE INDEX layout_by_page
+    ON canvas_layout_cache(book_id, layout_hash, resolved_page, canvas_id);
+CREATE INDEX strokes_by_canvas ON strokes(canvas_id, seq);
+]]
+
+    --- Alignment inside the DDL is cosmetic; the declaration is not.
+    local function squash(s) return (tostring(s):gsub("%s+", " ")) end
+
+    --- Every statement `MIGRATIONS[1]` executes, in order, against a
+    --- connection that records and runs nothing.
+    local function migrationStatements()
+        local seen = {}
+        local conn = {}
+        function conn:exec(sql) seen[#seen + 1] = sql end
+        Repository.MIGRATIONS[1](conn)
+        return seen
+    end
+
+    --- A v1 database migrated by the real ladder, not an injected one.
+    local function realMigratingRepo(extra)
+        extra = extra or {}
+        local backups = {}
+        local driver
+        driver = ctx.support.newSqlDriver{
+            fail_on = extra.fail_on,
+            on_open = function(conn)
+                conn:answer("PRAGMA user_version", { { 1 } })
+            end,
+        }
+        local repo, err = Repository.open{
+            path = PATH,
+            driver = driver,
+            wal = true,
+            now = function() return 4242 end,
+            backup = function(src, dest)
+                local live = driver.conns[#driver.conns]
+                backups[#backups + 1] = {
+                    src = src, dest = dest, closed = live.closed,
+                    wrote = live:saw("ALTER TABLE") or live:saw("BEGIN"),
+                }
+                return true
+            end,
+        }
+        return repo, driver, backups, err
+    end
+
+    t:case("the schema version is 2 and the fresh schema declares both surfaces", function()
+        t:eq(Repository.SCHEMA_VERSION, 2, "version 2")
+        local schema = squash(Repository.SCHEMA)
+        t:check(schema:find(squash([[surface_role TEXT NOT NULL DEFAULT 'sheet']]), 1, true) ~= nil,
+            "surface_role defaults to sheet, so every existing row stays one")
+        t:check(schema:find(squash([[CHECK(surface_role IN ('sheet', 'page_ink'))]]), 1, true) ~= nil,
+            "and only those two roles exist")
+        t:check(schema:find(squash([[coordinate_space TEXT NOT NULL DEFAULT 'surface']]), 1, true) ~= nil,
+            "coordinate_space defaults to surface")
+        t:check(schema:find(squash([[CHECK(coordinate_space IN ('surface', 'native_page'))]]), 1, true) ~= nil,
+            "and only those two spaces exist")
+        t:check(schema:find(squash(
+            "CREATE INDEX canvases_by_book_role_page ON canvases(book_id, surface_role, fixed_page, id)"),
+            1, true) ~= nil, "with the index the page-ink lookups need")
+    end)
+
+    t:case("the v1 schema had neither column, so the migration is the only way in", function()
+        t:eq(V1_SCHEMA:find("surface_role", 1, true), nil, "no role column")
+        t:eq(V1_SCHEMA:find("coordinate_space", 1, true), nil, "no coordinate space")
+        t:eq(V1_SCHEMA:find("canvases_by_book_role_page", 1, true), nil, "and no index")
+    end)
+
+    t:case("a migrated database ends up declaring what a fresh one declares", function()
+        -- The failure this closes is a fresh install and a migrated one
+        -- disagreeing about a constraint, which shows up much later as a write
+        -- that works on one device and raises on another.
+        local ran = squash(table.concat(migrationStatements(), " "))
+        local schema = squash(Repository.SCHEMA)
+        local declarations = {
+            [[surface_role TEXT NOT NULL DEFAULT 'sheet']],
+            [[CHECK(surface_role IN ('sheet', 'page_ink'))]],
+            [[coordinate_space TEXT NOT NULL DEFAULT 'surface']],
+            [[CHECK(coordinate_space IN ('surface', 'native_page'))]],
+            "CREATE INDEX canvases_by_book_role_page ON canvases(book_id, surface_role, fixed_page, id)",
+        }
+        for i = 1, #declarations do
+            local decl = squash(declarations[i])
+            t:check(ran:find(decl, 1, true) ~= nil, "the migration adds " .. decl)
+            t:check(schema:find(decl, 1, true) ~= nil, "and the fresh schema has " .. decl)
+        end
+    end)
+
+    t:case("the migration step is DDL only and leaves the transaction to _migrate", function()
+        local seen = migrationStatements()
+        t:eq(#seen, 3, "three statements")
+        t:check(seen[1]:find("ALTER TABLE canvases ADD COLUMN surface_role", 1, true) ~= nil,
+            "the role column first")
+        t:check(seen[2]:find("ALTER TABLE canvases ADD COLUMN coordinate_space", 1, true) ~= nil,
+            "then the coordinate space")
+        t:check(seen[3]:find("CREATE INDEX canvases_by_book_role_page", 1, true) ~= nil,
+            "then the index, which needs both columns to exist")
+        local joined = table.concat(seen, " ")
+        t:eq(joined:find("BEGIN", 1, true), nil,
+            "it opens no transaction -- an inner COMMIT would end _migrate's early")
+        t:eq(joined:find("COMMIT", 1, true), nil, "nor closes one")
+        t:eq(joined:find("user_version", 1, true), nil, "the version stamp is _migrate's job")
+        t:eq(joined:find("UPDATE", 1, true), nil, "the DEFAULTs are the backfill, not an UPDATE")
+        for i = 1, #seen do
+            local _, semicolons = seen[i]:gsub(";", "")
+            t:eq(semicolons, 1, "exactly one statement per exec, because exec splits on ;")
+            t:eq(seen[i]:sub(-1), ";", "and the ; is the terminator, not part of a literal")
+        end
+    end)
+
+    t:case("a v1 database is migrated by the real ladder, backup first", function()
+        local repo, driver, backups = realMigratingRepo()
+        t:check(repo ~= nil, "opened")
+        t:eq(repo.version, 2, "at version 2")
+        local conn = driver.last()
+        local begin_at = conn:indexOf("BEGIN")
+        local role_at = conn:indexOf("ADD COLUMN surface_role")
+        local space_at = conn:indexOf("ADD COLUMN coordinate_space")
+        local index_at = conn:indexOf("CREATE INDEX canvases_by_book_role_page")
+        local stamp_at = conn:indexOf("PRAGMA user_version=2")
+        local commit_at = conn:indexOf("COMMIT")
+        t:check(begin_at and role_at and space_at and index_at and stamp_at and commit_at,
+            "every step ran")
+        t:check(begin_at < role_at and role_at < space_at and space_at < index_at
+            and index_at < stamp_at and stamp_at < commit_at, "in that order")
+        t:eq(conn:saw("UPDATE canvases"), false, "no row was rewritten to fill the columns in")
+        t:eq(#backups, 1, "exactly one backup")
+        t:eq(backups[1].dest, PATH .. ".backup-v1", "named for the version it holds")
+        t:eq(backups[1].wrote, false, "taken before a single migration statement")
+    end)
+
+    t:case("a migration step that raises refuses the open and leaves the stamp alone", function()
+        local repo, driver, backups, _, err = migratingRepo{
+            migrations = { [1] = function() error("no space left on device", 0) end },
+        }
+        t:eq(repo, nil, "no repository")
+        t:eq(err, "migration_failed", "and the caller can say why")
+        t:check(driver.last():saw("ROLLBACK"), "the transaction was rolled back")
+        t:eq(driver.last():saw("PRAGMA user_version=2"), false,
+            "so the file is still a v1 file, stamp included")
+        t:eq(#backups, 1, "with the v1 backup beside it either way")
+    end)
+
+    -- =================================================================
+    t:describe("ink_canvas_repository / surface roles")
+
+    --[[
+    Everything section 2 of the schema refuses. The repository and the suite's
+    fake store are both run over this table: a fake that accepts a row SQLite's
+    CHECK would reject is a mismatch nobody notices until a device writes it.
+    ]]
+    local BAD_SURFACES = {
+        { "a sheet in native page coordinates", {
+            anchor_key = "k", logical_w = 10, logical_h = 10,
+            surface_role = "sheet", coordinate_space = "native_page" } },
+        { "page ink in surface coordinates", {
+            anchor_kind = "page", anchor_key = "page-ink:3", fixed_page = 3,
+            logical_w = 10, logical_h = 10,
+            surface_role = "page_ink", coordinate_space = "surface" } },
+        { "page ink anchored by xpointer", {
+            anchor_kind = "xpointer", anchor_key = "page-ink:3", fixed_page = 3,
+            logical_w = 10, logical_h = 10, surface_role = "page_ink" } },
+        { "page ink with no page number", {
+            anchor_kind = "page", anchor_key = "page-ink:3",
+            logical_w = 10, logical_h = 10, surface_role = "page_ink" } },
+        { "page ink on page zero", {
+            anchor_kind = "page", anchor_key = "page-ink:0", fixed_page = 0,
+            logical_w = 10, logical_h = 10, surface_role = "page_ink" } },
+        { "page ink on a fractional page", {
+            anchor_kind = "page", anchor_key = "page-ink:2.5", fixed_page = 2.5,
+            logical_w = 10, logical_h = 10, surface_role = "page_ink" } },
+        { "page ink on an infinite page", {
+            anchor_kind = "page", anchor_key = "page-ink:inf", fixed_page = math.huge,
+            logical_w = 10, logical_h = 10, surface_role = "page_ink" } },
+        { "page ink carrying a raw xpointer", {
+            anchor_kind = "page", anchor_key = "page-ink:3", fixed_page = 3,
+            anchor_raw = "/body/p[1]",
+            logical_w = 10, logical_h = 10, surface_role = "page_ink" } },
+        { "page ink carrying a normalised xpointer", {
+            anchor_kind = "page", anchor_key = "page-ink:3", fixed_page = 3,
+            anchor_normalized = "/body/p[1]",
+            logical_w = 10, logical_h = 10, surface_role = "page_ink" } },
+        { "page ink carrying a dom version", {
+            anchor_kind = "page", anchor_key = "page-ink:3", fixed_page = 3,
+            anchor_dom_version = 20240101,
+            logical_w = 10, logical_h = 10, surface_role = "page_ink" } },
+        { "a role that is neither", {
+            anchor_key = "k", logical_w = 10, logical_h = 10,
+            surface_role = "scribble" } },
+    }
+
+    t:case("a sheet defaults to the surface coordinate space", function()
+        local repo, driver = openRepo{
+            answers = function(conn) conn:answer("last_insert_rowid", { { 31 } }) end,
+        }
+        local c = repo:createCanvas(12, {
+            anchor_kind = "xpointer", anchor_key = "xp:/body/p[7]",
+            logical_w = 1860, logical_h = 2480,
+        })
+        t:eq(c.surface_role, "sheet", "a canvas with no role stated is a sheet")
+        t:eq(c.coordinate_space, "surface", "in surface coordinates")
+        local binds = driver.last():bindsFor("INSERT INTO canvases")
+        t:eq(binds[8], "sheet", "both are written, not left to the column default")
+        t:eq(binds[9], "surface", "which is what makes a v1 row and a v2 row agree")
+    end)
+
+    t:case("a page-ink surface defaults to native page coordinates", function()
+        local repo, driver = openRepo{
+            answers = function(conn) conn:answer("last_insert_rowid", { { 32 } }) end,
+        }
+        local c = repo:createCanvas(12, {
+            anchor_kind = "page", anchor_key = "page-ink:7", fixed_page = 7,
+            surface_role = "page_ink", logical_w = 612, logical_h = 792,
+        })
+        t:check(c ~= nil, "created")
+        t:eq(c.coordinate_space, "native_page", "page ink is in the page's own units")
+        t:eq(c.fixed_page, 7, "and carries its page")
+        local binds = driver.last():bindsFor("INSERT INTO canvases")
+        t:eq(binds[7], 7, "the page is bound")
+        t:eq(binds[8], "page_ink", "with the role")
+    end)
+
+    t:case("every surface rule the schema states is refused before the insert", function()
+        for i = 1, #BAD_SURFACES do
+            local repo, driver = openRepo{
+                answers = function(conn) conn:answer("last_insert_rowid", { { 31 } }) end,
+            }
+            local c, err = repo:createCanvas(12, BAD_SURFACES[i][2])
+            t:eq(c, nil, BAD_SURFACES[i][1] .. " is not created")
+            t:eq(err, "bad_surface", BAD_SURFACES[i][1] .. " is named")
+            t:eq(driver.last():saw("INSERT INTO canvases"), false,
+                "and nothing reached the database")
+        end
+    end)
+
+    t:case("the fake store refuses exactly what the repository refuses", function()
+        for i = 1, #BAD_SURFACES do
+            local store = support.newCanvasStore{}
+            local c, err = store:createCanvas(12, BAD_SURFACES[i][2])
+            t:eq(c, nil, BAD_SURFACES[i][1] .. " is not created")
+            t:eq(err, "bad_surface", BAD_SURFACES[i][1] .. " is named")
+            t:eq(#store.canvases, 0, "and nothing was stored")
+        end
+    end)
+
+    t:case("a listed canvas carries its role and coordinate space", function()
+        local repo = openRepo{
+            answers = function(conn)
+                conn:answer("FROM canvases", {
+                    { 3, "xpointer", "xp:/body/p[7]", "raw", "norm", 20240101, nil,
+                      1860, 2480, 4242, "sheet", "surface" },
+                })
+            end,
+        }
+        local c = repo:listCanvases(12)[1]
+        t:eq(c.surface_role, "sheet", "role")
+        t:eq(c.coordinate_space, "surface", "coordinate space")
+    end)
+
+    -- =================================================================
+    t:describe("ink_canvas_repository / page-ink queries")
+
+    local function pageInkRepo(rows)
+        return openRepo{
+            answers = function(conn)
+                -- Scripted answers are matched in order and a count is also a
+                -- statement "FROM canvases", so the narrower pattern goes first.
+                conn:answer("count%(%*%)", { { 3 } })
+                conn:answer("FROM canvases", rows or {})
+                conn:answer("last_insert_rowid", { { 44 } })
+            end,
+        }
+    end
+
+    t:case("the sheet listing asks for sheets only", function()
+        local repo, driver = pageInkRepo()
+        repo:listCanvases(12)
+        local sql = driver.last():statement("FROM canvases")
+        t:check(sql:find("surface_role = 'sheet'", 1, true) ~= nil,
+            "page ink never reaches the anchor index")
+    end)
+
+    t:case("sheets are counted without their rows", function()
+        local repo, driver = pageInkRepo()
+        t:eq(repo:countCanvases(12), 3, "the count comes back as a Lua number")
+        local sql = driver.last():statement("count")
+        t:check(sql:find("surface_role = 'sheet'", 1, true) ~= nil, "sheets only")
+        t:eq(sql:find("stroke_chunks", 1, true), nil, "and no point data is touched")
+    end)
+
+    t:case("a sheet batch walks by id and drags no points along", function()
+        local repo, driver = pageInkRepo{
+            { 3, "xpointer", "k", nil, nil, nil, nil, 1860, 2480, 4242, "sheet", "surface" },
+        }
+        local batch = repo:listCanvasesBatch(12)
+        t:eq(#batch, 1, "rows come back mapped")
+        t:eq(batch[1].id, 3, "as canvas rows")
+        local sql = driver.last():statement("FROM canvases")
+        t:check(sql:find("ORDER BY id", 1, true) ~= nil, "ordered by id, which is stable")
+        t:eq(sql:find("stroke_chunks", 1, true), nil, "the chunk table is not joined")
+        t:eq(sql:find("points", 1, true), nil, "and the points column is not named")
+    end)
+
+    t:case("a batch defaults to 200 rows and is clamped to 500", function()
+        local function limitOf(opts)
+            local repo, driver = pageInkRepo()
+            repo:listCanvasesBatch(12, opts)
+            local binds = driver.last():bindsFor("FROM canvases")
+            return binds[#binds]
+        end
+        t:eq(limitOf(nil), 200, "the default batch")
+        t:eq(limitOf{ limit = 50 }, 50, "a smaller batch is honoured")
+        t:eq(limitOf{ limit = 5000 }, 500, "a caller cannot ask for the whole book")
+        t:eq(limitOf{ limit = 0 }, 1, "nor for nothing at all")
+    end)
+
+    t:case("a batch cursor selects strictly beyond the last id", function()
+        local repo, driver = pageInkRepo()
+        repo:listCanvasesBatch(12, { after_id = 41, limit = 10 })
+        local sql = driver.last():statement("FROM canvases")
+        t:check(sql:find("id > ", 1, true) ~= nil, "strictly greater, so no row repeats")
+        local binds = driver.last():bindsFor("FROM canvases")
+        t:eq(binds[2], 41, "the cursor is bound")
+        t:eq(binds[3], 10, "and the limit after it")
+    end)
+
+    t:case("a page-ink surface is looked up by role and page", function()
+        local repo, driver = pageInkRepo{
+            { 9, "page", "page-ink:7", nil, nil, nil, 7, 612, 792, 4242,
+              "page_ink", "native_page" },
+        }
+        local row = repo:findPageInkSurface(12, 7)
+        t:eq(row.id, 9, "found")
+        t:eq(row.fixed_page, 7, "on its page")
+        t:eq(row.coordinate_space, "native_page", "in page units")
+        local sql = driver.last():statement("FROM canvases")
+        t:check(sql:find("surface_role = 'page_ink'", 1, true) ~= nil, "page ink only")
+        local binds = driver.last():bindsFor("FROM canvases")
+        t:eq(binds[2], 7, "and the page is bound, not interpolated")
+    end)
+
+    t:case("a page with no surface answers not_found, not an empty list", function()
+        local repo = pageInkRepo()
+        local row, err = repo:findPageInkSurface(12, 7)
+        t:eq(row, nil, "nothing there")
+        t:eq(err, "not_found", "which the caller turns into a create")
+    end)
+
+    t:case("creating a page-ink surface fills in the whole spec", function()
+        local repo, driver = pageInkRepo()
+        local row = repo:createPageInkSurface(12, 7, 612, 792)
+        t:eq(row.id, 44, "the new id")
+        t:eq(row.anchor_kind, "page", "anchored by page")
+        t:eq(row.anchor_key, "page-ink:7", "with the key the UNIQUE constraint keys on")
+        t:eq(row.surface_role, "page_ink", "as page ink")
+        t:eq(row.coordinate_space, "native_page", "in page units")
+        t:eq(row.logical_w, 612, "at the page's own width")
+        t:eq(row.logical_h, 792, "and height")
+        t:check(driver.last():saw("INSERT INTO canvases"), "written")
+    end)
+
+    t:case("a page-ink surface with no usable page is refused before the insert", function()
+        local repo, driver = pageInkRepo()
+        local row, err = repo:createPageInkSurface(12, nil, 612, 792)
+        t:eq(row, nil, "not created")
+        t:eq(err, "bad_surface", "named")
+        t:eq(driver.last():saw("INSERT INTO canvases"), false, "and nothing was written")
+    end)
+
+    t:case("page-ink surfaces are listed by page, then by id", function()
+        local repo, driver = pageInkRepo()
+        repo:listPageInkSurfaces(12)
+        local sql = driver.last():statement("FROM canvases")
+        t:check(sql:find("surface_role = 'page_ink'", 1, true) ~= nil, "page ink only")
+        t:check(sql:find("ORDER BY fixed_page, id", 1, true) ~= nil,
+            "the order the export reads them in")
+        local binds = driver.last():bindsFor("FROM canvases")
+        t:eq(binds[2], 100, "a page-ink batch is 100 rows by default")
+    end)
+
+    t:case("the page-ink cursor is the pair, so a shared page cannot loop", function()
+        local repo, driver = pageInkRepo()
+        repo:listPageInkSurfaces(12, { after_page = 7, after_id = 9, limit = 600 })
+        local sql = driver.last():statement("FROM canvases")
+        t:check(sql:find("fixed_page > ", 1, true) ~= nil, "past that page")
+        t:check(sql:find("id > ", 1, true) ~= nil, "or past that id on the same page")
+        local binds = driver.last():bindsFor("FROM canvases")
+        t:eq(binds[2], 7, "the page is bound")
+        t:eq(binds[3], 9, "and the id")
+        t:eq(binds[4], 500, "with the same clamp as any other batch")
+    end)
+
+    t:case("page-ink surfaces are counted, deleted by page and deleted wholesale", function()
+        local repo, driver = pageInkRepo()
+        t:eq(repo:countPageInkSurfaces(12), 3, "counted")
+        t:check(driver.last():statement("count"):find("surface_role = 'page_ink'", 1, true) ~= nil,
+            "page ink only")
+
+        local one, one_driver = pageInkRepo()
+        t:eq(one:deletePageInkSurface(12, 7), true, "one page deleted")
+        local sql = one_driver.last():statement("DELETE FROM canvases")
+        t:check(sql:find("surface_role = 'page_ink'", 1, true) ~= nil, "never a sheet")
+        t:eq(one_driver.last():bindsFor("DELETE FROM canvases")[2], 7, "on that page alone")
+
+        local all, all_driver = pageInkRepo()
+        t:eq(all:deleteAllPageInkSurfaces(12), true, "and the whole book can go")
+        local all_sql = all_driver.last():statement("DELETE FROM canvases")
+        t:check(all_sql:find("surface_role = 'page_ink'", 1, true) ~= nil,
+            "still never a sheet")
+        t:eq(all_sql:find("fixed_page", 1, true), nil, "and no page narrows it")
+    end)
+
+    -- =================================================================
+    t:describe("ink_canvas_repository / page ink through the fake store")
+
+    --[[
+    The fake is what every other suite drives, so it has to answer the way the
+    repository does -- roles, defaults, ordering, cursors, limits. What the
+    recorder above cannot show, because it executes nothing, is that those
+    orderings and that keyset actually walk a set of rows exactly once.
+    ]]
+    local function sheetStore(n)
+        local store = support.newCanvasStore{}
+        for i = 1, n do
+            store:createCanvas(12, {
+                anchor_kind = "xpointer", anchor_key = "xp:" .. i,
+                logical_w = 100, logical_h = 100,
+            })
+        end
+        return store
+    end
+
+    t:case("a page-ink surface is found only once it exists", function()
+        local store = support.newCanvasStore{}
+        local missing, err = store:findPageInkSurface(12, 7)
+        t:eq(missing, nil, "nothing yet")
+        t:eq(err, "not_found", "said the way the repository says it")
+
+        local made = store:createPageInkSurface(12, 7, 612, 792)
+        t:check(made ~= nil, "created")
+        t:eq(made.anchor_key, "page-ink:7", "keyed by page")
+        t:eq(made.surface_role, "page_ink", "as page ink")
+        t:eq(made.coordinate_space, "native_page", "in page units")
+
+        local found = store:findPageInkSurface(12, 7)
+        t:eq(found.id, made.id, "and found again")
+
+        local dup, dup_err = store:createPageInkSurface(12, 7, 612, 792)
+        t:eq(dup, nil, "a second surface for one page is refused")
+        t:check(dup_err ~= nil, "with a reason -- on SQLite it is the UNIQUE constraint")
+    end)
+
+    t:case("page-ink surfaces walk page order across batches, once each", function()
+        local store = support.newCanvasStore{}
+        for _, page in ipairs{ 9, 2, 5 } do
+            store:createPageInkSurface(12, page, 612, 792)
+        end
+        local pages, after_page, after_id = {}, nil, nil
+        for _ = 1, 4 do
+            local batch = store:listPageInkSurfaces(12,
+                { after_page = after_page, after_id = after_id, limit = 1 })
+            if #batch == 0 then break end
+            t:eq(#batch, 1, "one row per batch, as asked")
+            pages[#pages + 1] = batch[1].fixed_page
+            after_page, after_id = batch[1].fixed_page, batch[1].id
+        end
+        t:eq(table.concat(pages, ","), "2,5,9", "in page order, no repeats and no gaps")
+        local done = store:listPageInkSurfaces(12,
+            { after_page = after_page, after_id = after_id, limit = 1 })
+        t:eq(#done, 0, "and the cursor runs out")
+    end)
+
+    t:case("counting and deleting page ink never touches a sheet", function()
+        local store = sheetStore(2)
+        store:createPageInkSurface(12, 3, 612, 792)
+        store:createPageInkSurface(12, 4, 612, 792)
+        t:eq(store:countPageInkSurfaces(12), 2, "two page surfaces")
+        t:eq(store:countCanvases(12), 2, "and two sheets, counted apart")
+        t:eq(#store:listCanvases(12), 2, "the sheet listing excludes page ink")
+
+        t:eq(store:deletePageInkSurface(12, 3), true, "one page deleted")
+        t:eq(store:countPageInkSurfaces(12), 1, "only that one")
+        t:eq(store:countCanvases(12), 2, "the sheets are untouched")
+
+        t:eq(store:deleteAllPageInkSurfaces(12), true, "and then all of it")
+        t:eq(store:countPageInkSurfaces(12), 0, "no page ink left")
+        t:eq(store:countCanvases(12), 2, "and still every sheet")
+    end)
+
+    t:case("a sheet batch walks ids once and opens no stroke", function()
+        local store = sheetStore(5)
+        store:createPageInkSurface(12, 3, 612, 792)
+        store:putStroke(store.canvases[1].id,
+            { width = 4, tool = 1, points = { 1, 1, 2, 2 }, n = 2 })
+        local ids, after = {}, nil
+        while true do
+            local batch = store:listCanvasesBatch(12, { after_id = after, limit = 2 })
+            if #batch == 0 then break end
+            for i = 1, #batch do
+                ids[#ids + 1] = batch[i].id
+                after = batch[i].id
+            end
+        end
+        t:eq(#ids, 5, "every sheet, and only the sheets")
+        local sorted = true
+        for i = 2, #ids do
+            if ids[i] <= ids[i - 1] then sorted = false end
+        end
+        t:check(sorted, "in ascending id order")
+        t:eq(store.calls.stroke_read, 0, "no stroke was read")
+        t:eq(store.calls.stroke_chunk, 0, "and no chunk was decoded")
+    end)
+
+    t:case("the fake clamps a batch the way the repository does", function()
+        local store = sheetStore(501)
+        t:eq(#store:listCanvasesBatch(12), 200, "the default batch")
+        t:eq(#store:listCanvasesBatch(12, { limit = 5000 }), 500, "clamped high")
+        t:eq(#store:listCanvasesBatch(12, { limit = 0 }), 1, "and clamped low")
+        t:eq(#store:listCanvasesBatch(12, { limit = 50 }), 50, "otherwise honoured")
+    end)
 end

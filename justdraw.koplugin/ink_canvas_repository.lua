@@ -43,19 +43,28 @@ Repository.__index = Repository
 
 --- Bumped when the schema changes. Every bump needs a MIGRATIONS entry for the
 --- version below it, or opening an older database refuses rather than guesses.
-Repository.SCHEMA_VERSION = 1
+Repository.SCHEMA_VERSION = 2
 
---- `MIGRATIONS[v]` upgrades a database at version v to version v + 1. Empty
---- while there has only ever been one schema.
+--- `MIGRATIONS[v]` upgrades a database at version v to version v + 1. A step is
+--- DDL and nothing else: `_migrate` owns the checkpoint, the backup copy, the
+--- one transaction, the version stamp and the rollback, and a step that opened
+--- a transaction of its own would end that outer one at its first COMMIT.
 Repository.MIGRATIONS = {}
 
 --[[--
-The v1 schema.
+The current schema, for databases created from nothing.
 
 `conn:exec` splits on `;` without regard for quoting, so no statement here may
 contain one inside a literal. `UNIQUE(id, book_id)` on canvases exists only so
 `canvas_layout_cache` can carry a composite foreign key and have its rows
 cascade away with the canvas.
+
+`surface_role` and `coordinate_space` are last in the canvases table and
+defaulted, so a database migrated up from v1 by `ALTER TABLE ADD COLUMN` --
+which can only append -- ends up declaring exactly what this creates (ADR-37).
+A sheet hung on a fixed page would share `anchor_kind = 'page'` and
+`fixed_page` with page ink, which is why the role is a column of its own rather
+than a reading of those two.
 ]]
 Repository.SCHEMA = [[
 CREATE TABLE books (
@@ -80,6 +89,10 @@ CREATE TABLE canvases (
     logical_h             INTEGER NOT NULL,
     created_at            INTEGER NOT NULL,
     updated_at            INTEGER NOT NULL,
+    surface_role          TEXT    NOT NULL DEFAULT 'sheet'
+        CHECK(surface_role IN ('sheet', 'page_ink')),
+    coordinate_space      TEXT    NOT NULL DEFAULT 'surface'
+        CHECK(coordinate_space IN ('surface', 'native_page')),
     UNIQUE(book_id, anchor_key),
     UNIQUE(id, book_id)
 );
@@ -116,10 +129,32 @@ CREATE TABLE stroke_chunks (
     PRIMARY KEY(stroke_id, chunk_no)
 );
 CREATE INDEX canvases_by_book ON canvases(book_id, updated_at);
+CREATE INDEX canvases_by_book_role_page ON canvases(book_id, surface_role, fixed_page, id);
 CREATE INDEX layout_by_page
     ON canvas_layout_cache(book_id, layout_hash, resolved_page, canvas_id);
 CREATE INDEX strokes_by_canvas ON strokes(canvas_id, seq);
 ]]
+
+--[[--
+v1 to v2: surface roles (ADR-37).
+
+Three DDL statements and nothing else. The `NOT NULL DEFAULT` is the backfill --
+SQLite reads the default back for every row that predates the column -- so
+there is no UPDATE to run, no file to copy and no version to stamp here; a
+sheet written before this schema existed stays a sheet by construction.
+
+Each `exec` carries exactly one statement, because `conn:exec` splits on `;`
+and none of these has one inside a literal. A raise leaves `_migrate` to roll
+the whole thing back, which takes the columns with it.
+]]
+Repository.MIGRATIONS[1] = function(conn)
+    conn:exec([[ALTER TABLE canvases ADD COLUMN surface_role TEXT NOT NULL
+        DEFAULT 'sheet' CHECK(surface_role IN ('sheet', 'page_ink'));]])
+    conn:exec([[ALTER TABLE canvases ADD COLUMN coordinate_space TEXT NOT NULL
+        DEFAULT 'surface' CHECK(coordinate_space IN ('surface', 'native_page'));]])
+    conn:exec(
+        "CREATE INDEX canvases_by_book_role_page ON canvases(book_id, surface_role, fixed_page, id);")
+end
 
 -- ------------------------------------------------------------------ helpers
 
@@ -138,6 +173,23 @@ end
 local function finite(v)
     return type(v) == "number" and v == v
         and v ~= math.huge and v ~= -math.huge
+end
+
+--- The most rows any one batch may ask SQLite for. A batch exists so that
+--- building an index never holds a whole book's rows at once; a caller that
+--- could pass its own ceiling could undo that by asking for one big page.
+local MAX_BATCH = 500
+
+--- Resolve a caller's batch size: absent or unusable falls back to `default`,
+--- anything else is clamped. Never zero -- a batch of nothing is a cursor that
+--- reports the end of a listing it has not reached.
+local function batchLimit(v, default)
+    local n = tonumber(v)
+    if n == nil or n ~= n then return default end
+    n = math.floor(n)
+    if n < 1 then return 1 end
+    if n > MAX_BATCH then return MAX_BATCH end
+    return n
 end
 
 --- Byte-for-byte copy, used before a migration. Deliberately not a rename: the
@@ -562,7 +614,8 @@ end
 
 local CANVAS_COLUMNS = [[
     SELECT id, anchor_kind, anchor_key, anchor_raw, anchor_normalized,
-           anchor_dom_version, fixed_page, logical_w, logical_h, updated_at
+           anchor_dom_version, fixed_page, logical_w, logical_h, updated_at,
+           surface_role, coordinate_space
       FROM canvases]]
 
 local function canvasRow(row)
@@ -577,30 +630,116 @@ local function canvasRow(row)
         logical_w          = num(row[8]),
         logical_h          = num(row[9]),
         updated_at         = num(row[10]),
+        surface_role       = str(row[11]),
+        coordinate_space   = str(row[12]),
     }
 end
 
 --[[--
-Every canvas of a book, metadata only.
+Every *sheet* of a book, metadata only.
 
 This is what runs when a book opens, so it must not touch a point. The anchor
 index is built from these rows; the strokes of a canvas are read only when that
 canvas is opened.
+
+Page ink is deliberately absent: it has no xpointer to resolve and the index
+would have nothing to do with it (ADR-37). Its own listing is below.
 ]]
 function Repository:listCanvases(book_id)
     local ready, reason = self:_ready(false)
     if not ready then return nil, reason end
     return self:_select(
-        CANVAS_COLUMNS .. " WHERE book_id = ?1 ORDER BY updated_at DESC, id;",
+        CANVAS_COLUMNS .. [[
+         WHERE book_id = ?1 AND surface_role = 'sheet'
+         ORDER BY updated_at DESC, id;]],
         { book_id }, canvasRow)
 end
 
+--- How many sheets this book has, without reading one of them.
+function Repository:countCanvases(book_id)
+    local ready, reason = self:_ready(false)
+    if not ready then return nil, reason end
+    local rows, err = self:_select([[
+        SELECT count(*) FROM canvases
+         WHERE book_id = ?1 AND surface_role = 'sheet';]],
+        { book_id }, function(row) return num(row[1]) or 0 end)
+    if not rows then return nil, err end
+    return rows[1] or 0
+end
+
+--[[--
+One bounded page of sheet metadata, keyed by id.
+
+The index is built from these so that a book with a thousand sheets never puts
+a whole-book result set in memory at once, and so that the build can stop
+between batches while a contact is live (ADR-42). Id order, not `updated_at`:
+a cursor has to be over something a concurrent touch cannot reorder underneath
+it, or a batch would repeat rows and skip others.
+
+  opts.after_id  last id of the previous batch, nil for the first
+  opts.limit     rows to ask for, default 200, clamped to 1..500
+]]
+function Repository:listCanvasesBatch(book_id, opts)
+    local ready, reason = self:_ready(false)
+    if not ready then return nil, reason end
+    opts = opts or {}
+    local limit = batchLimit(opts.limit, 200)
+    local after_id = tonumber(opts.after_id)
+    if after_id then
+        return self:_select(CANVAS_COLUMNS .. [[
+             WHERE book_id = ?1 AND surface_role = 'sheet' AND id > ?2
+             ORDER BY id LIMIT ?3;]],
+            { book_id, after_id, limit }, canvasRow)
+    end
+    return self:_select(CANVAS_COLUMNS .. [[
+         WHERE book_id = ?1 AND surface_role = 'sheet'
+         ORDER BY id LIMIT ?2;]],
+        { book_id, limit }, canvasRow)
+end
+
+--[[--
+Which surface a spec describes, or nil when it describes an impossible one.
+
+The schema's CHECKs cover the two columns one at a time; what they cannot say
+is that the *combination* has to hold together, and a row that lies about that
+is worse than a refused one -- a page-ink surface carrying an xpointer would be
+resolved by the anchor index against a document that has no such position.
+
+So: a sheet is in surface coordinates, and page ink is in the page's own units,
+anchored by a page number that is a real page, with none of the xpointer fields
+set (ADR-37/38). Anything else is `bad_surface`, before the insert.
+]]
+local function surfaceOf(spec, kind)
+    local role = spec.surface_role or "sheet"
+    local space = spec.coordinate_space
+    if role == "sheet" then
+        if space == nil then space = "surface" end
+        if space ~= "surface" then return nil end
+    elseif role == "page_ink" then
+        if space == nil then space = "native_page" end
+        if space ~= "native_page" then return nil end
+        if kind ~= "page" then return nil end
+        local page = spec.fixed_page
+        if not finite(page) or page < 1 or page ~= math.floor(page) then return nil end
+        if spec.anchor_raw ~= nil or spec.anchor_normalized ~= nil
+            or spec.anchor_dom_version ~= nil then
+            return nil
+        end
+    else
+        return nil
+    end
+    return role, space
+end
 
 --[[--
 Create a canvas and return its row, geometry included.
 
 The geometry travels with the row because every coordinate transform needs it
 and re-reading it per stroke would be a query per stroke.
+
+Both surface columns are written explicitly rather than left to their DEFAULTs,
+so a row created here and a row a v1 database was migrated into say the same
+thing about themselves.
 ]]
 function Repository:createCanvas(book_id, spec)
     local ready, reason = self:_ready(true)
@@ -614,14 +753,18 @@ function Repository:createCanvas(book_id, spec)
     end
 
     local kind = spec.anchor_kind or "xpointer"
+    local role, space = surfaceOf(spec, kind)
+    if not role then return nil, "bad_surface" end
+
     local now = self.now()
     local ok, err = self:_run([[
         INSERT INTO canvases (book_id, anchor_kind, anchor_key, anchor_raw,
                               anchor_normalized, anchor_dom_version, fixed_page,
+                              surface_role, coordinate_space,
                               logical_w, logical_h, created_at, updated_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11);]],
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13);]],
         { book_id, kind, spec.anchor_key, spec.anchor_raw, spec.anchor_normalized,
-          spec.anchor_dom_version, spec.fixed_page, w, h, now, now })
+          spec.anchor_dom_version, spec.fixed_page, role, space, w, h, now, now })
     if not ok then return nil, err end
 
     local id, ierr = self:_lastId()
@@ -635,6 +778,8 @@ function Repository:createCanvas(book_id, spec)
         anchor_normalized  = spec.anchor_normalized,
         anchor_dom_version = spec.anchor_dom_version,
         fixed_page         = spec.fixed_page,
+        surface_role       = role,
+        coordinate_space   = space,
         logical_w          = w,
         logical_h          = h,
         updated_at         = now,
@@ -654,6 +799,119 @@ function Repository:deleteCanvas(canvas_id)
     local ready, reason = self:_ready(true)
     if not ready then return nil, reason end
     return self:_run("DELETE FROM canvases WHERE id = ?1;", { canvas_id })
+end
+
+-- ----------------------------------------------------------------- page ink
+
+--[[--
+The page-ink surface of one fixed page, or `not_found`.
+
+`not_found` rather than an empty list because there can only ever be one: the
+key is `page-ink:N` and `UNIQUE(book_id, anchor_key)` is what makes that a
+constraint rather than a convention. A caller finds first and creates on the
+miss, and the constraint is still what settles a race.
+]]
+function Repository:findPageInkSurface(book_id, fixed_page)
+    local ready, reason = self:_ready(false)
+    if not ready then return nil, reason end
+    local rows, err = self:_select(CANVAS_COLUMNS .. [[
+         WHERE book_id = ?1 AND surface_role = 'page_ink' AND fixed_page = ?2;]],
+        { book_id, fixed_page }, canvasRow)
+    if not rows then return nil, err end
+    if not rows[1] then return nil, "not_found" end
+    return rows[1]
+end
+
+--[[--
+The surface for a page that has none yet.
+
+The whole spec is filled in here so no caller has to know the shape of a
+page-ink row: get one field wrong and `createCanvas` refuses it, which is
+correct but is a refusal every caller would then have to rediscover.
+
+`logical_w/h` are the page's own units and are stored as given. A duplicate
+comes back as the driver's UNIQUE message, not as `not_found` inverted --
+callers find first.
+]]
+function Repository:createPageInkSurface(book_id, fixed_page, logical_w, logical_h)
+    return self:createCanvas(book_id, {
+        anchor_kind      = "page",
+        -- tostring, not concatenation: a nil or a table here has to reach
+        -- createCanvas's refusal rather than raise on its way to it.
+        anchor_key       = "page-ink:" .. tostring(fixed_page),
+        fixed_page       = fixed_page,
+        surface_role     = "page_ink",
+        coordinate_space = "native_page",
+        logical_w        = logical_w,
+        logical_h        = logical_h,
+    })
+end
+
+--[[--
+One bounded page of page-ink surfaces, in the order an export reads them.
+
+The cursor is the pair `(fixed_page, id)` and not the page alone: pages are
+unique today only because of the anchor key, and a cursor that trusted that
+would skip or repeat rows the moment it stopped being true. `after_id` defaults
+to 0 so a half-stated cursor still moves forward instead of looping.
+
+  opts.after_page / opts.after_id  the last row of the previous batch
+  opts.limit                       rows to ask for, default 100, clamped 1..500
+]]
+function Repository:listPageInkSurfaces(book_id, opts)
+    local ready, reason = self:_ready(false)
+    if not ready then return nil, reason end
+    opts = opts or {}
+    local limit = batchLimit(opts.limit, 100)
+    local after_page = tonumber(opts.after_page)
+    if after_page then
+        local after_id = tonumber(opts.after_id) or 0
+        return self:_select(CANVAS_COLUMNS .. [[
+             WHERE book_id = ?1 AND surface_role = 'page_ink'
+               AND (fixed_page > ?2 OR (fixed_page = ?2 AND id > ?3))
+             ORDER BY fixed_page, id LIMIT ?4;]],
+            { book_id, after_page, after_id, limit }, canvasRow)
+    end
+    return self:_select(CANVAS_COLUMNS .. [[
+         WHERE book_id = ?1 AND surface_role = 'page_ink'
+         ORDER BY fixed_page, id LIMIT ?2;]],
+        { book_id, limit }, canvasRow)
+end
+
+--- How many pages of this book carry ink, without reading any of it.
+function Repository:countPageInkSurfaces(book_id)
+    local ready, reason = self:_ready(false)
+    if not ready then return nil, reason end
+    local rows, err = self:_select([[
+        SELECT count(*) FROM canvases
+         WHERE book_id = ?1 AND surface_role = 'page_ink';]],
+        { book_id }, function(row) return num(row[1]) or 0 end)
+    if not rows then return nil, err end
+    return rows[1] or 0
+end
+
+--- Delete the ink of one page. The role is in the WHERE clause and not merely
+--- implied by the page number, because a sheet may one day be anchored to a
+--- fixed page too and deleting page notes must never take one with it.
+function Repository:deletePageInkSurface(book_id, fixed_page)
+    local ready, reason = self:_ready(true)
+    if not ready then return nil, reason end
+    return self:_run([[
+        DELETE FROM canvases
+         WHERE book_id = ?1 AND surface_role = 'page_ink' AND fixed_page = ?2;]],
+        { book_id, fixed_page })
+end
+
+--- Delete every page-ink surface of a book, and no sheet. This is the "delete
+--- the page notes" confirmation, which names something different from the
+--- sheets and from legacy ink (ADR-39).
+function Repository:deleteAllPageInkSurfaces(book_id)
+    local ready, reason = self:_ready(true)
+    if not ready then return nil, reason end
+    return self:_run([[
+        DELETE FROM canvases
+         WHERE book_id = ?1 AND surface_role = 'page_ink';]],
+        { book_id })
 end
 
 -- ------------------------------------------------------------------ strokes
