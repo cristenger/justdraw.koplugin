@@ -912,6 +912,25 @@ t:case("a marker stroke stores a three-nib width", function()
     t:eq(s.w, p.pen_width * 3, "marker width is baked into the stored stroke")
 end)
 
+t:case("direct replay paints each stroke with its style's color", function()
+    local p = drawingPlugin()
+    p.store:add(1, { n = 2, w = 4, t = 65, 100, 100, 140, 100 })
+    p.store:add(1, { n = 2, w = 4, 100, 200, 140, 200 })   -- legacy, no t
+    local bb = Device.screen.bb
+    local before = #bb.rects
+    p:paintTo(bb, 0, 0)
+    -- The fake records every stamp as { x, y, w, h, c } in bb.rects
+    -- (support.lua:317-324). Row y=100 is the graphite stroke, y=200 legacy.
+    local seen_gray, seen_black = false, false
+    for i = before + 1, #bb.rects do
+        local r = bb.rects[i]
+        if r.c == "gray_6" and r.y < 150 then seen_gray = true end
+        if r.c == "black" and r.y > 150 then seen_black = true end
+    end
+    t:eq(seen_gray, true, "graphite painted gray")
+    t:eq(seen_black, true, "a legacy stroke still paints plain ink")
+end)
+
 t:describe("main / stylus latching")
 
 t:case("a sequence starting on the toolbar stays passthrough to the lift", function()

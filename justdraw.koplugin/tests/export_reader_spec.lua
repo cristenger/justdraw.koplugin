@@ -159,6 +159,14 @@ return function(ctx)
         result.release()
     end)
 
+    t:case("a stroke's style picks its color in the export", function()
+        local ui, view = newReader()
+        local result = Reader.render{ ui = ui, view = view,
+            strokes = { { n = 2, w = 4, t = 65, 10, 10, 30, 10 } } }
+        t:eq(result.bb.rects[3].c, "gray_6", "graphite renders gray in the export")
+        result.release()
+    end)
+
     t:case("a page with no ink still exports its content", function()
         local ui, view = newReader()
         local result = Reader.render{ ui = ui, view = view, strokes = {} }

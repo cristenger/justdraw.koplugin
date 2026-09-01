@@ -38,6 +38,7 @@ local Device = require("device")
 
 local Raster = require("ink_export_raster")
 local Render = require("ink_render")
+local Style = require("ink_style")
 
 local Reader = {}
 
@@ -153,7 +154,8 @@ function Reader.render(opts)
     local strokes = opts.strokes
     if type(strokes) == "table" then
         for i = 1, #strokes do
-            Render.stroke(bb, strokes[i], -origin_x, -origin_y, ink)
+            Render.stroke(bb, strokes[i], -origin_x, -origin_y,
+                Style.colorFor(strokes[i].t, ink))
         end
     end
 

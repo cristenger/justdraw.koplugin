@@ -322,4 +322,19 @@ return function(ctx)
             "only erase debris remains")
         t:eq(session:canUndo(), false, "which undo does not offer to remove")
     end)
+
+    t:case("erase fragments inherit the stroke's style", function()
+        local session, _, sched = fixture{ stroke = { width = 4, tool = 3, n = 5,
+            points = { 100, 100, 200, 100, 300, 100, 400, 100, 500, 100 } } }
+        session:open()
+        sched:drain()
+        local ctx = session:beginErase()
+        local box = session:eraseAt(300, 100, 18, ctx)
+        session:endErase(ctx)
+        t:check(box ~= nil, "the cut reports a dirty region")
+        local metas = session:cache():strokes()
+        t:eq(#metas, 2, "two fragments remain")
+        t:eq(metas[1].tool, 3, "the head kept the marker's style")
+        t:eq(metas[2].tool, 3, "and so did the tail")
+    end)
 end

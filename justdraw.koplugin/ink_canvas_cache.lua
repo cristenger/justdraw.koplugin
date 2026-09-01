@@ -32,6 +32,7 @@ local Paper = require("ink_paper")
 local Render = require("ink_render")
 local Codec = require("ink_canvas_codec")
 local Split = require("ink_stroke_split")
+local Style = require("ink_style")
 
 local floor, ceil = math.floor, math.ceil
 
@@ -574,14 +575,14 @@ generation for a live-raster token, or nil if nothing was painted. A segment
 outside the canvas paints nothing at all: the buffer bounds the write, so it
 is dropped rather than wrapped onto the far side.
 ]]
-function Cache:drawSegment(x0, y0, x1, y1, width)
+function Cache:drawSegment(x0, y0, x1, y1, width, color)
     if not self.bb then return nil end
     local tr = self.transform
     local w = tr:scaleWidth(width)
     local kx0, ky0 = tr:toCache(x0, y0)
     local kx1, ky1 = tr:toCache(x1, y1)
     local painted, left, top, right, bottom =
-        Render.segment(self.bb, kx0, ky0, kx1, ky1, w, self.ink)
+        Render.segment(self.bb, kx0, ky0, kx1, ky1, w, color or self.ink)
     if not painted then return nil end
     return {
         x = left, y = top, w = right - left, h = bottom - top,
@@ -830,7 +831,8 @@ end
 function Cache:_paintStroke(m, points, n, target, ox, oy)
     local tr = self.transform
     return Render.points(target or self.bb, points, n, tr.scale,
-        ox or 0, oy or 0, tr:scaleWidth(m.width), self.ink)
+        ox or 0, oy or 0, tr:scaleWidth(m.width),
+        Style.colorFor(m.tool, self.ink))
 end
 
 function Cache:_boxTouches(box, min_x, min_y, max_x, max_y, pad)

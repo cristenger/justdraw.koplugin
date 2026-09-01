@@ -218,6 +218,29 @@ return function(ctx)
         t:check(#cache:buffer().rects > 0, "and it was painted")
     end)
 
+    t:case("replay colors a stroke by its tool", function()
+        local cache = readyCache()
+        cache:buffer():clear()
+        local s = bar(100, 100)
+        cache:addStroke({ id = 99, seq = 1, width = 4, tool = 3,
+                          point_count = s.n, min_x = 100, min_y = 100,
+                          max_x = 130, max_y = 100 }, s.points, s.n)
+        local rects = cache:buffer().rects
+        t:check(#rects > 0, "the stroke was painted")
+        t:eq(rects[#rects].c, "light_gray", "with the marker's color")
+    end)
+
+    t:case("drawSegment takes an explicit color and defaults to ink", function()
+        local cache = readyCache()
+        cache:buffer():clear()
+        cache:drawSegment(100, 100, 100, 100, 4, "gray_6")
+        local rects = cache:buffer().rects
+        t:eq(rects[#rects].c, "gray_6", "the explicit color wins")
+        cache:drawSegment(200, 100, 200, 100, 4)
+        local rects2 = cache:buffer().rects
+        t:eq(rects2[#rects2].c, "black", "and nil defaults to the cache's own ink")
+    end)
+
     t:case("a matching complete live token registers without repainting", function()
         local cache = readyCache()
         local bb = cache:buffer()

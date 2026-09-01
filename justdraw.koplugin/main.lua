@@ -1792,7 +1792,7 @@ function JustDraw:addPoint(x, y)
     s.n = s.n + 1
 
     local painted, left, top, right, bottom =
-        Render.segment(Screen.bb, px, py, x, y, s.w, INK)
+        Render.segment(Screen.bb, px, py, x, y, s.w, Style.colorFor(s.t, INK))
     if painted then self:refreshBox(left, top, right, bottom) end
     return true
 end
@@ -1811,7 +1811,7 @@ function JustDraw:endStroke()
 
     if s.n == 1 then -- a dot: never painted live, paint it now
         local painted, left, top, right, bottom =
-            Render.stroke(Screen.bb, s, 0, 0, INK)
+            Render.stroke(Screen.bb, s, 0, 0, Style.colorFor(s.t, INK))
         if painted then self:refreshBox(left, top, right, bottom) end
     end
     self.store:add(self:currentPage(), s)
@@ -2169,7 +2169,7 @@ function JustDraw:addCanvasPoint(cx, cy, tr)
         return true
     end
     local box, raster_cache, raster_generation =
-        cache:drawSegment(px, py, cx, cy, s.w)
+        cache:drawSegment(px, py, cx, cy, s.w, Style.colorFor(s.t, nil))
     updateLiveRasterToken(s, box, raster_cache, raster_generation)
     self:blitCanvasBox(box, tr)
     return true
@@ -2304,7 +2304,8 @@ function JustDraw:endCanvasStroke()
         local cache = self.session:cache()
         if cache then
             local box, raster_cache, raster_generation =
-                cache:drawSegment(s[1], s[2], s[1], s[2], s.w)
+                cache:drawSegment(s[1], s[2], s[1], s[2], s.w,
+                    Style.colorFor(s.t, nil))
             updateLiveRasterToken(s, box, raster_cache, raster_generation)
             self:blitCanvasBox(box, tr)
         end
@@ -2395,7 +2396,7 @@ function JustDraw:paintTo(bb, x, y)
     local list = self.store:get(self:currentPage())
     if not list then return end
     for i = 1, #list do
-        Render.stroke(bb, list[i], 0, 0, INK)
+        Render.stroke(bb, list[i], 0, 0, Style.colorFor(list[i].t, INK))
     end
 end
 
