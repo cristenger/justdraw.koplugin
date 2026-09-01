@@ -2200,6 +2200,17 @@ t:case("the More dialog offers Pen style with the marker gated on a sheet", func
     t:eq(p.pen_style, 65, "the choice reached the plugin")
 end)
 
+t:case("the marker toggle dispatcher action flips pen_style 1<->3", function()
+    reset()
+    _G.G_reader_settings.data.justdraw_pen_style = nil  -- reset to default
+    local p = newPlugin()
+    t:eq(p.pen_style, 1, "pen is the initial style")
+    t:eq(p:onJustDrawMarker(), true, "the event is consumed")
+    t:eq(p.pen_style, 3, "style flipped to marker")
+    t:eq(p:onJustDrawMarker(), true, "a second press is harmless")
+    t:eq(p.pen_style, 1, "and returns to pen")
+end)
+
 -- =====================================================================
 -- Canvas suites
 --

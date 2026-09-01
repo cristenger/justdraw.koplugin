@@ -103,6 +103,15 @@ return function(ctx)
         t:eq(sheet.event, "JustDrawSheet", "and names its event")
         t:eq(sheet.reader, true, "a sheet needs a document: reader-only")
         t:eq(sheet.general, nil, "and is not promoted to the file browser")
+
+        -- The marker action postdates the rename and has no legacy identity.
+        -- Like the notebook action, it is general: toggling the style is
+        -- meaningful in any context where a pen is available.
+        local marker = actions.justdraw_marker
+        t:check(marker ~= nil, "the marker action is registered")
+        t:eq(marker.event, "JustDrawMarker", "and names its event")
+        t:eq(marker.general, true, "general: bindable in file browser and reader")
+        t:eq(marker.reader, nil, "not confined to the reader section")
         plugin:teardown()
     end)
 

@@ -359,6 +359,13 @@ function JustDraw:onDispatcherRegisterActions()
         category = "none", event = "JustDrawSheet", reader = true,
         title = _("JustDraw: open/close drawing sheet"),
     })
+    -- Also post-rename, no legacy identity. `general`, not `reader`, because
+    -- toggling the pen style is meaningful in any context: reader, notebooks,
+    -- or file browser (when a reader is open underneath).
+    Dispatcher:registerAction("justdraw_marker", {
+        category = "none", event = "JustDrawMarker", general = true,
+        title = _("JustDraw: toggle marker"),
+    })
 end
 
 --[[--
@@ -2113,6 +2120,11 @@ function JustDraw:closeCanvas()
     -- The sheet uncovered a page of text; a partial refresh would leave it
     -- ghosted.
     UIManager:setDirty(self.ui, "full")
+    return true
+end
+
+function JustDraw:onJustDrawMarker()
+    self:setPenStyle(self.pen_style == Style.MARKER and Style.PEN or Style.MARKER)
     return true
 end
 
