@@ -1123,6 +1123,7 @@ function support.newCanvasStore(canvases)
     end
 
     function store:countCanvases()
+        if self.fail_count_canvases then return nil, self.fail_count_canvases end
         local n = 0
         for i = 1, #self.canvases do
             if roleOf(self.canvases[i]) == "sheet" then n = n + 1 end

@@ -32,6 +32,23 @@ return function(ctx)
     local READER = { x = 100, y = 100 }
     local HANDLE = { x = 100, y = 250 }
 
+    --[[--
+    Flush until the sheet index says it is done.
+
+    It reads its metadata a batch per tick and resolves anchors a batch per
+    tick after that (ADR-42), so a fixture is ready when it says so and not
+    after any fixed number of flushes. `keep_indexing` is for the cases that
+    are about the half-built state itself.
+    ]]
+    local function settleIndex(p)
+        local ticks = 0
+        while p.session and p.session:isIndexing() do
+            env.UIManager:flush()
+            ticks = ticks + 1
+            if ticks > 200 then error("the sheet index did not settle", 0) end
+        end
+    end
+
     --- A plugin over a reflowable document whose canvas store is in memory.
     local function canvasPlugin(opts)
         opts = opts or {}
@@ -49,7 +66,30 @@ return function(ctx)
         env.UIManager:flush()
         p:onReaderReady()
         env.UIManager:flush()
+        if not opts.keep_indexing then settleIndex(p) end
         return p, store, doc
+    end
+
+    --- A book's worth of sheets, each anchored on its own page.
+    local function manySheets(n)
+        local canvases, pages = {}, { ["/body/p[7]"] = 1 }
+        for i = 1, n do
+            canvases[i] = {
+                id = i, anchor_kind = "xpointer", anchor_key = "xp:/p" .. i,
+                anchor_raw = "/p" .. i, anchor_normalized = "/p" .. i,
+                anchor_dom_version = 20240114, logical_w = SW, logical_h = SH,
+            }
+            pages["/p" .. i] = i
+        end
+        return canvases, pages
+    end
+
+    --- The entry that opens or creates the sheet at this position: the one the
+    --- reader is looking at when the index is what is holding them up.
+    local function openHereItem(p)
+        for _, item in ipairs(p:canvasMenu()) do
+            if item.text == "Open sheet here" then return item end
+        end
     end
 
     local function penFrame(p, x, y, tool)
@@ -156,6 +196,65 @@ return function(ctx)
         local first = p.session
         p:onReaderReady()
         t:eq(p.session, first, "the same one")
+    end)
+
+    -- =================================================================
+    t:describe("main / while the sheet index builds")
+
+    t:case("the entry that is refusing says how far the index has got", function()
+        local canvases, pages = manySheets(450)
+        local p = canvasPlugin{ canvases = canvases, pages = pages,
+                                keep_indexing = true }
+        local item = openHereItem(p)
+        t:check(item ~= nil, "the entry is there")
+        t:eq(item.enabled_func(), false, "greyed out, as it already was")
+        t:eq(item.text_func(), "Indexing sheets 200/450",
+            "and it says what it is waiting for")
+        t:eq(#env.notifications, 0, "no modal and no notification for it")
+
+        settleIndex(p)
+        t:eq(openHereItem(p).text_func(), "Open sheet here",
+            "and it stops saying it once the sheets are placed")
+        t:eq(openHereItem(p).enabled_func(), true, "with creating allowed again")
+    end)
+
+    t:case("a count it never got is not reported as a zero", function()
+        local p = canvasPlugin()
+        p.session.isIndexing = function() return true end
+        p.session.indexProgress = function()
+            return { phase = "metadata", loaded = 12, total = nil }
+        end
+        t:eq(openHereItem(p).text_func(), "Indexing sheets 12",
+            "what is known is said, what is not is left out")
+    end)
+
+    t:case("a batch stands aside while the pen is on the glass", function()
+        local canvases, pages = manySheets(450)
+        local p, store = canvasPlugin{ canvases = canvases, pages = pages,
+                                       keep_indexing = true }
+        t:eq(store.calls.list, 1, "one batch has been read")
+
+        p:buildStylusMachine(Device.input)
+        seedPenBaseline(p)
+        penDown(p, READER.x, READER.y)
+        t:eq(p:hasActivePhysicalContact(), true, "the pen is down")
+
+        local delays = {}
+        local scheduleIn = env.UIManager.scheduleIn
+        env.UIManager.scheduleIn = function(self, delay, fn)
+            delays[#delays + 1] = delay
+            return scheduleIn(self, delay, fn)
+        end
+        env.UIManager:flush()
+        t:eq(store.calls.list, 1, "nothing was asked of the database")
+        t:eq(delays[1], 0.1, "the batch came back a tenth of a second later")
+
+        penLift(p, READER.x + 2, READER.y + 2)
+        env.UIManager.scheduleIn = scheduleIn
+        t:eq(p:hasActivePhysicalContact(), false, "the glass is clear")
+        env.UIManager:flush()
+        t:eq(store.calls.list, 2, "and the same build carries on")
+        p:releaseStylusMachine()
     end)
 
     -- =================================================================

@@ -300,6 +300,22 @@ do
                 tostring(probe.no_refresh_checkmark))
                 or "probe button not found in buttontable")
     end
+
+    -- The sheet menu's "Indexing sheets n/N" line rides an item's `text_func`
+    -- (ADR-42): the entry is built once when the menu opens and the number has
+    -- to be able to change under it. The suite calls that function itself,
+    -- which says nothing about who KOReader asks -- and it asks
+    -- `Menu.getMenuText`, both from TouchMenuItem's label and from the menu
+    -- search. A runtime that read `text` instead would show a stale entry that
+    -- never explains why creating a sheet is refused.
+    local ok_menu, menu_text = pcall(function()
+        local Menu = require("ui/widget/menu")
+        return Menu.getMenuText{
+            text = "static", text_func = function() return "live" end,
+        }
+    end)
+    claim("a menu item's text_func is what Menu.getMenuText renders",
+        ok_menu, ok_menu and menu_text == "live", tostring(menu_text))
 end
 
 -- =====================================================================

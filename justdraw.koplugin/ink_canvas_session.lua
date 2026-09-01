@@ -62,6 +62,8 @@ local MESSAGES = {
   opts.schedule     UIManager:nextTick
   opts.scheduleIn   UIManager:scheduleIn
   opts.unschedule   UIManager:unschedule
+  opts.can_work     function() -> boolean, false while a contact is live; the
+                    index asks it before every batch (ADR-42)
   opts.notify       function(text) -- one line to the reader
 ]]
 function Session.new(opts)
@@ -76,6 +78,7 @@ function Session.new(opts)
         schedule = opts.schedule,
         scheduleIn = opts.scheduleIn,
         unschedule = opts.unschedule,
+        can_work = opts.can_work,
         notify = opts.notify or function() end,
         batch = opts.batch,
 
@@ -147,6 +150,9 @@ function Session:open()
         book_id = book_id,
         batch = self.batch,
         schedule = self.schedule,
+        scheduleIn = self.scheduleIn,
+        can_work = self.can_work,
+        on_error = function(reason) self:_indexFailed(reason) end,
         on_complete = function()
             if self.closed or not self.index then return end
             if self.page then self:setPage(self.page) end
@@ -155,6 +161,10 @@ function Session:open()
             end
         end,
     }
+    -- The index answers before it has read a single row: what used to be a
+    -- synchronous listing failure now arrives at `_indexFailed` a tick or more
+    -- later (ADR-42). Only the sheet count is still asked for here, so this
+    -- refusal is only ever that one query failing.
     local indexed, index_err
     if empty_read_only then indexed = self.index:openEmpty()
     else indexed, index_err = self.index:open() end
@@ -167,6 +177,23 @@ function Session:open()
     self.available = true
     logger.dbg("JustDraw: canvas session open for book", book_id)
     return true
+end
+
+--[[--
+The index gave up part-way through.
+
+Exactly what the synchronous listing failure used to do, and it has to stay
+exactly that: the index is the only thing that knows which paragraph already
+has a sheet, so a book whose sheets could not all be listed gets no sheets at
+all rather than a `createHere` answering from a fraction of them.
+]]
+function Session:_indexFailed(reason)
+    if self.closed or not self.index then return end
+    logger.warn("JustDraw: canvas page index failed:", reason)
+    self.index = nil
+    self.available = false
+    self:_closeOwnedRepository()
+    self.notify(MESSAGES.list_failed)
 end
 
 function Session:_unavailable(reason)
@@ -204,6 +231,13 @@ end
 
 function Session:isIndexing()
     return self.index ~= nil and not self.index:isComplete()
+end
+
+--- How far the index has got, for the menu entry that is refusing because of
+--- it. Nil when there is no index to ask.
+function Session:indexProgress()
+    if not self.index then return nil end
+    return self.index:progress()
 end
 
 --- Close everything, innermost first: the canvas and its queue, then the

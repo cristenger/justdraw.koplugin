@@ -26,6 +26,7 @@ local Version = require("version")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local logger = require("logger")
 local _ = require("gettext")
+local T = require("ffi/util").template
 
 local CanvasSession = require("ink_canvas_session")
 local Capture = require("ink_capture")
@@ -422,6 +423,10 @@ function JustDraw:onReaderReady(config)
         schedule = function(fn) UIManager:nextTick(fn) end,
         scheduleIn = function(delay, fn) UIManager:scheduleIn(delay, fn) end,
         unschedule = function(fn) UIManager:unschedule(fn) end,
+        -- Every batch of the sheet index asks this first: a blocking query
+        -- while the pen reports overflows evdev and costs the next pen-down
+        -- (ADR-26, ADR-42).
+        can_work = function() return not self:hasActivePhysicalContact() end,
         notify = function(text) self:notify(text) end,
     }
     if not self.session:open() then
@@ -2866,10 +2871,29 @@ function JustDraw:canvasMenu()
             callback = function() self:confirmDeleteCanvas(active) end,
         }
     else
+        local open_here = _("Open sheet here")
         items[#items + 1] = {
             -- Closes the menu on purpose: opening a sheet turns drawing on,
             -- and an open menu is unusable once the pen is inking.
-            text = _("Open sheet here"),
+            text = open_here,
+            --[[--
+            While the index builds, this entry is disabled and this is where
+            the reader is looking, so the count goes here rather than into a
+            modal or a notification: nothing is waiting on their answer, and
+            the wait is measured in ticks stolen from an idle process
+            (ADR-42). A total the count never produced is left out rather
+            than shown as a zero.
+            ]]
+            text_func = function()
+                local progress = self.session:isIndexing()
+                    and self.session:indexProgress()
+                if not progress then return open_here end
+                if progress.total then
+                    return T(_("Indexing sheets %1/%2"),
+                        progress.loaded, progress.total)
+                end
+                return T(_("Indexing sheets %1"), progress.loaded)
+            end,
             enabled_func = function()
                 if self.session:isIndexing() then return false end
                 return self.session:isWritable()

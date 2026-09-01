@@ -135,14 +135,42 @@ return function(ctx)
         local doc = support.newDocument{ pages = pages, visible = opts.visible }
         local store = support.newCanvasStore(canvases)
         local sched = support.newScheduler()
+        -- Every delay the index stood aside for, in order. A yield is only
+        -- observable as "it came back later instead of now", so the delay it
+        -- asked for is the thing worth recording.
+        local yields = {}
         local index = Index.new{
             repository = store,
             document = doc,
             book_id = 12,
             batch = opts.batch or 8,
             schedule = function(fn) sched:schedule(fn) end,
+            scheduleIn = function(delay, fn)
+                yields[#yields + 1] = delay
+                sched:scheduleIn(delay, fn)
+            end,
+            can_work = opts.can_work,
+            on_error = opts.on_error,
         }
-        return index, doc, store, sched
+        return index, doc, store, sched, yields
+    end
+
+    --[[--
+    Open, and let the metadata phase finish -- and only that.
+
+    The tick that loads the last batch is also the one that consults the
+    layout cache, so this returns with the list whole and not one anchor put
+    to the document.
+    ]]
+    local function loadMetadata(index, sched)
+        index:open()
+        local ticks = 0
+        while index:phase() == "metadata" do
+            sched:tick()
+            ticks = ticks + 1
+            if ticks > 100 then error("the metadata phase did not settle", 0) end
+        end
+        return ticks
     end
 
     t:case("a cached layout is used and nothing is resolved", function()
@@ -159,8 +187,8 @@ return function(ctx)
 
     t:case("with no cache, anchors resolve in bounded batches", function()
         local index, doc, _, sched = fixture(20, { batch = 5 })
-        index:open()
-        t:eq(doc.resolutions, 0, "opening resolves nothing by itself")
+        loadMetadata(index, sched)
+        t:eq(doc.resolutions, 0, "loading the list resolves nothing by itself")
         sched:tick()
         t:eq(doc.resolutions, 5, "one batch")
         sched:tick()
@@ -187,7 +215,7 @@ return function(ctx)
 
     t:case("derived pages are persisted in bounded batches", function()
         local index, _, store, sched = fixture(20, { batch = 5 })
-        index:open()
+        loadMetadata(index, sched)
         sched:tick()
         t:eq(store.calls.save, 1, "the first tick writes only its own batch")
         local first_count = 0
@@ -220,12 +248,162 @@ return function(ctx)
             "caching 'nowhere' would make the miss permanent")
     end)
 
-    t:case("a book with no canvases is complete straight away", function()
+    t:case("a book with no canvases is complete after one empty batch", function()
         local index, _, store, sched = fixture(0)
-        index:open()
-        t:eq(index:isComplete(), true, "nothing to do")
+        t:eq(loadMetadata(index, sched), 1, "one tick to find there is nothing")
+        t:eq(index:isComplete(), true, "and nothing to do")
         sched:drain()
-        t:eq(store.calls.save, 0, "and nothing written")
+        t:eq(store.calls.save, 0, "so nothing was written")
+        t:eq(index:progress().total, 0, "the count said so before the listing did")
+    end)
+
+    -- =================================================================
+    t:describe("ink_anchor_index / loading the list")
+
+    t:case("opening queues the first batch and returns", function()
+        local index, _, store, sched = fixture(450)
+        t:eq(index:open(), true, "the caller is not blocked")
+        t:eq(store.calls.list, 0, "not one row has been read")
+        t:eq(index:phase(), "metadata", "it says what it is doing")
+        t:eq(index:isComplete(), false, "and it is not ready")
+        t:eq(sched:pending(), 1, "one batch is waiting for a tick")
+    end)
+
+    t:case("450 sheets arrive in three batches, a tick apart", function()
+        local index, _, store, sched = fixture(450)
+        local whole_book = 0
+        store.listCanvases = function() whole_book = whole_book + 1; return {} end
+
+        index:open()
+        sched:tick()
+        t:eq(index:count(), 200, "one batch")
+        t:eq(index:progress().loaded, 200, "and progress says so")
+        t:eq(index:progress().total, 450, "against the count taken at open")
+        t:eq(index:progress().phase, "metadata", "still loading")
+        sched:tick()
+        t:eq(index:count(), 400, "then another")
+        sched:tick()
+        t:eq(index:count(), 450, "and the short one ends the listing")
+        t:eq(store.calls.list, 3, "three queries, never a whole-book one")
+        t:eq(whole_book, 0, "listCanvases is not what the index reads")
+        t:eq(index:phase(), "resolving", "which is where the anchors start")
+    end)
+
+    t:case("loading the list opens no stroke", function()
+        local index, _, store, sched = fixture(450)
+        index:open()
+        sched:drain()
+        t:eq(store.calls.stroke_list, 0, "no canvas was opened")
+        t:eq(store.calls.stroke_read, 0, "not a stroke read")
+        t:eq(store.calls.stroke_chunk, 0, "and not a point decoded")
+        t:eq(index:isComplete(), true, "while the index finished")
+    end)
+
+    t:case("a count that fails is the one refusal left at the call site", function()
+        local index, _, store = fixture(3)
+        store.fail_count_canvases = "disk read failed"
+        local ok, err = index:open()
+        t:eq(ok, nil, "refused")
+        t:eq(err, "disk read failed", "with the repository's reason")
+        t:eq(store.calls.list, 0, "and nothing was listed")
+    end)
+
+    t:case("a batch that fails stops the index and says so once", function()
+        local reasons = {}
+        local index, doc, store, sched = fixture(450, {
+            on_error = function(reason) reasons[#reasons + 1] = reason end,
+        })
+        index:open()
+        sched:tick()
+        store.fail_list_canvases = "disk read failed"
+        sched:tick()
+        t:eq(#reasons, 1, "the session is told once")
+        t:eq(reasons[1], "list_failed", "in the words it already translates")
+        t:eq(index:phase(), "cancelled", "and the generation is dead")
+        t:eq(index:isComplete(), false, "a half-loaded index is not a ready one")
+        t:eq(sched:pending(), 0, "nothing is left scheduled")
+        sched:drain()
+        t:eq(#reasons, 1, "still once")
+        t:eq(doc.resolutions, 0, "and the partial list was never resolved")
+    end)
+
+    -- =================================================================
+    t:describe("ink_anchor_index / yielding to the pen")
+
+    t:case("a metadata batch asks the database nothing while a contact is live", function()
+        local live = true
+        local index, doc, store, sched, yields = fixture(450, {
+            can_work = function() return not live end,
+        })
+        index:open()
+        sched:drain()
+        t:eq(store.calls.list, 0, "no query")
+        t:eq(doc.resolutions, 0, "and nothing put to the document")
+        t:eq(#yields, 1, "it stood aside once")
+        t:eq(yields[1], 0.1, "and comes back a tenth of a second later")
+
+        live = false
+        sched:advance(0.1)
+        t:eq(index:isComplete(), true, "the same build finishes when the pen lifts")
+        t:eq(index.generation, 1, "without starting a second one")
+        t:eq(index:pageOf(7), 7, "with every anchor placed")
+    end)
+
+    t:case("a resolve batch makes no CREngine call while a contact is live", function()
+        local live = false
+        local index, doc, _, sched, yields = fixture(20, {
+            batch = 5,
+            can_work = function() return not live end,
+        })
+        loadMetadata(index, sched)
+        t:eq(index:phase(), "resolving", "the list is whole")
+        live = true
+        sched:drain()
+        t:eq(doc.resolutions, 0, "the pen owns the process, so nothing is resolved")
+        t:eq(yields[#yields], 0.1, "the batch put itself back on the queue")
+
+        live = false
+        sched:advance(0.1)
+        t:eq(index:isComplete(), true, "and finishes afterwards")
+        t:eq(doc.resolutions, 20, "having resolved each anchor exactly once")
+    end)
+
+    t:case("with no scheduleIn a refused batch simply tries again", function()
+        local live = true
+        local doc, store, sched
+        local canvases, pages = {}, {}
+        for i = 1, 3 do
+            canvases[i] = { id = i, anchor_kind = "xpointer",
+                anchor_raw = "/p" .. i, anchor_normalized = "/p" .. i }
+            pages["/p" .. i] = i
+        end
+        doc = support.newDocument{ pages = pages }
+        store = support.newCanvasStore(canvases)
+        sched = support.newScheduler()
+        local index = Index.new{
+            repository = store, document = doc, book_id = 12, batch = 8,
+            schedule = function(fn) sched:schedule(fn) end,
+            can_work = function() return not live end,
+        }
+        index:open()
+        sched:tick()
+        t:eq(store.calls.list, 0, "refused")
+        t:eq(sched:pending(), 1, "but still queued")
+        live = false
+        sched:drain()
+        t:eq(index:isComplete(), true, "and it gets there on the next tick")
+    end)
+
+    t:case("cancelling a stood-aside batch ends it for good", function()
+        local index, _, store, sched = fixture(450, {
+            can_work = function() return false end,
+        })
+        index:open()
+        sched:drain()
+        index:cancel()
+        sched:advance(1)
+        t:eq(store.calls.list, 0, "the rescheduled batch checks again before working")
+        t:eq(index:phase(), "cancelled", "and says what it is")
     end)
 
     -- =================================================================
@@ -392,11 +570,30 @@ return function(ctx)
             "the new generation still completes independently")
     end)
 
-    t:case("cancelling stops the build", function()
-        local index, doc, _, sched = fixture(50, { batch = 5 })
+    t:case("a rerender while the list is loading waits for the list", function()
+        -- Resolving the half that has arrived would put those anchors to
+        -- CREngine and then put them to it again with the rest.
+        local index, doc, store, sched = fixture(450)
         index:open()
         sched:tick()
+        doc.hash = "layout-b"
+        for i = 1, 450 do doc.pages["/p" .. i] = i + 100 end
+        index:invalidate()
+        t:eq(doc.resolutions, 0, "nothing is resolved from a partial list")
+        t:eq(index:phase(), "metadata", "and loading carries on")
+
+        sched:drain()
+        t:eq(index.generation, 1, "one rebuild, not one per invalidation")
+        t:eq(index:pageOf(3), 103, "against the layout that is current when it runs")
+        t:eq(store.layouts["layout-a"], nil, "and nothing was cached under the old one")
+    end)
+
+    t:case("cancelling stops the build", function()
+        local index, doc, _, sched = fixture(50, { batch = 5 })
+        loadMetadata(index, sched)
+        sched:tick()
         local resolved = doc.resolutions
+        t:eq(resolved, 5, "one batch got through first")
         index:cancel()
         sched:drain()
         t:eq(doc.resolutions, resolved, "no further work after teardown")
@@ -404,7 +601,7 @@ return function(ctx)
 
     t:case("a cancelled index never finalizes its partial layout", function()
         local index, _, store, sched = fixture(50, { batch = 5 })
-        index:open()
+        loadMetadata(index, sched)
         sched:tick()
         index:cancel()
         sched:drain()

@@ -18,6 +18,20 @@ things are therefore true of the read path and are covered as such: turning a
 page resolves no xpointers, painting issues no query, and the document is only
 ever asked to confirm the handful of candidates the map already produced.
 
+*Reading* the list is batched for the same reason the resolution is. A book
+with a thousand sheets used to put the whole result set in memory in one
+synchronous `SELECT` at `ReaderReady`, which is a stall on the one event the
+reader is waiting for; instead the rows arrive `METADATA_BATCH` at a time by
+id, and `open` returns as soon as the first batch is queued (ADR-42). Until
+the list is whole there is nothing worth rebuilding from, so a rerender in the
+middle of it is not a second generation -- it is simply the layout the rebuild
+after the last batch will read.
+
+Every batch, metadata or resolution, first asks `can_work`. While a contact is
+live the answer is no and the batch stands aside for `YIELD_DELAY` without
+touching SQLite or CREngine: a blocking query with the pen reporting overflows
+evdev and costs the next pen-down (ADR-26).
+
 A generation counter is what keeps a rerender from mixing two layouts: an
 in-flight batch belonging to the previous generation returns without touching
 the new in-memory map. Each completed batch may persist its safe derived rows,
@@ -32,13 +46,26 @@ local Anchor = require("ink_anchor")
 local Index = {}
 Index.__index = Index
 
+--- Sheet rows per metadata tick. The repository clamps a batch at 500; 200 is
+--- a query a slow eMMC answers well inside one tick.
+Index.METADATA_BATCH = 200
+--- How long a batch stands aside for when the glass is busy. Long enough that
+--- a stroke is not interrupted by a query, short enough that a reader who has
+--- lifted the pen does not watch the count sit still (ADR-42).
+Index.YIELD_DELAY = 0.1
+
 --[[--
-  opts.repository  canvas store: listCanvases, layoutPages, saveLayoutPages
+  opts.repository  canvas store: countCanvases, listCanvasesBatch,
+                   layoutPages, saveLayoutPages
   opts.document    the CreDocument
   opts.book_id     row id from the repository
   opts.batch       anchors resolved per tick (default 8)
   opts.schedule    function(fn) -- UIManager:nextTick
+  opts.scheduleIn  function(seconds, fn) -- UIManager:scheduleIn; without one a
+                   refused batch simply comes back on the next tick
+  opts.can_work    function() -> boolean, false while a contact is live
   opts.on_complete function(), after the current generation is fully indexed
+  opts.on_error    function(reason), once, when a batch could not be completed
 ]]
 function Index.new(opts)
     return setmetatable({
@@ -47,7 +74,10 @@ function Index.new(opts)
         book_id = opts.book_id,
         batch = opts.batch or 8,
         schedule = opts.schedule,
+        scheduleIn = opts.scheduleIn,
+        can_work = opts.can_work,
         on_complete = opts.on_complete,
+        on_error = opts.on_error,
 
         canvases = {},
         by_id = {},
@@ -58,30 +88,60 @@ function Index.new(opts)
         derived = {},
 
         hash = nil,
-        complete = true,
+        --- "metadata" | "resolving" | "ready" | "cancelled". A fresh index
+        --- holds an empty book it has finished with, which is what makes
+        --- `isComplete` true before anything opened it.
+        state = "ready",
+        --- What `countCanvases` answered at open, for progress only. The end
+        --- of the listing is an empty or short batch, never this number.
+        total = nil,
+        --- Cursor into the listing: the last id already loaded.
+        after_id = nil,
+        --- Canvases placed in this generation, for progress.
+        placed = 0,
         cancelled = false,
         --- Bumped by every rebuild. A batch from an older generation is stale
         --- and does nothing.
         generation = 0,
+        --- The same idea for the metadata phase, which has no layout of its
+        --- own: a second `open` supersedes the batches of the first.
+        load_generation = 0,
     }, Index)
 end
 
---- Read the book's canvas metadata -- no points -- and start placing it.
+--[[--
+Start reading the book's canvas metadata -- no points -- and return.
+
+The count is the one query that stays synchronous: it is a single aggregate,
+it is what progress is reported against, and a book whose sheets cannot even
+be counted has nothing to index. Everything after it is a batch on a tick, so
+`ReaderReady` costs the same on a book with a thousand sheets as on one with
+a single sheet (ADR-42).
+]]
 function Index:open()
-    local canvases, err = self.repository:listCanvases(self.book_id)
-    if not canvases then
-        logger.err("JustDraw: cannot list canvases:", err)
+    local total, err = self.repository:countCanvases(self.book_id)
+    if not total then
+        logger.err("JustDraw: cannot count canvases:", err)
         return nil, err
     end
     -- Copied, not aliased: `add` and `forget` mutate this list, and doing that
     -- to a table the repository still owns would be a change at a distance.
+    -- The map goes with it: until the rebuild that follows the last batch,
+    -- this index knows where nothing is, and answering from a previous open's
+    -- placements would be answering about a book it is no longer holding.
     self.canvases = {}
     self.by_id = {}
-    for i = 1, #canvases do
-        self.canvases[i] = canvases[i]
-        self.by_id[canvases[i].id] = canvases[i]
-    end
-    self:_rebuild()
+    self.page_of = {}
+    self.ids_by_page = {}
+    self.orphans = {}
+    self.pending = {}
+    self.derived = {}
+    self.total = total
+    self.after_id = nil
+    self.placed = 0
+    self.state = "metadata"
+    self.load_generation = self.load_generation + 1
+    self:_scheduleLoad(self.load_generation, false)
     return true
 end
 
@@ -93,7 +153,10 @@ function Index:openEmpty()
     self.orphans = {}
     self.pending = {}
     self.derived = {}
-    self.complete = true
+    self.total = 0
+    self.after_id = nil
+    self.placed = 0
+    self.state = "ready"
     return true
 end
 
@@ -102,19 +165,50 @@ The layout changed: rebuild the page map.
 
 Only the map. `strokes` is not read, not written and not consulted -- reflow
 moves the sheet, never the ink on it.
+
+While the list is still loading there is nothing to rebuild *from*. Resolving
+the half of the book that has arrived would put those anchors to CREngine and
+then put them to it again as soon as the rest lands, so this is deliberately
+not a second generation: the rebuild that always follows the last metadata
+batch reads the rendering hash when it runs, which is by then the new layout's
+(ADR-42).
 ]]
 function Index:invalidate()
     if self.cancelled then return end
+    if self.state == "metadata" then return end
     self:_rebuild()
 end
 
 function Index:cancel()
     self.cancelled = true
+    self.state = "cancelled"
     self.pending = {}
 end
 
 function Index:isComplete()
-    return self.complete
+    return self.state == "ready"
+end
+
+--- "metadata" | "resolving" | "ready" | "cancelled".
+function Index:phase()
+    return self.state
+end
+
+--[[--
+How far along this build is, for the menu entry the reader is looking at.
+
+A table per call, deliberately: this is read when a menu is opened and never
+from paint, from the draw path or from a hit test, and five accessors would be
+five things to keep in step.
+]]
+function Index:progress()
+    return {
+        phase = self.state,
+        loaded = #self.canvases,
+        total = self.total,
+        resolved = self.placed,
+        pending = #self.pending,
+    }
 end
 
 function Index:get(canvas_id)
@@ -218,6 +312,104 @@ end
 
 -- ------------------------------------------------------------------ private
 
+--[[--
+Next tick, or `YIELD_DELAY` later when the batch stood aside.
+
+The fallback is what keeps an index built without a `scheduleIn` working: it
+retries on the next tick instead, which is busier but never wrong. A refused
+batch must not run the work and must not drop it either -- an index that gave
+up because a finger was on the glass would leave `createHere` refusing for the
+rest of the session.
+]]
+function Index:_defer(run, yielded)
+    if yielded and self.scheduleIn then
+        self.scheduleIn(Index.YIELD_DELAY, run)
+    else
+        self.schedule(run)
+    end
+end
+
+--- False while a contact is live. Asked before the query, not after it: the
+--- point is that nothing blocks the process while the pen reports (ADR-26).
+function Index:_canWork()
+    if not self.can_work then return true end
+    return self.can_work() and true or false
+end
+
+--[[--
+A batch could not be completed.
+
+The index is derived data, and a half-built one is worse than none: the
+session turns sheets off for this book rather than let `createHere` answer
+from a fraction of them. Said exactly once -- the generation is dead
+afterwards, so no later batch can say it again.
+]]
+function Index:_fail(reason)
+    if self.cancelled then return end
+    self.cancelled = true
+    self.state = "cancelled"
+    self.pending = {}
+    if not self.on_error then
+        logger.err("JustDraw: canvas page index gave up:", reason)
+        return
+    end
+    local ok, err = pcall(self.on_error, reason)
+    if not ok then
+        logger.warn("JustDraw: canvas index error callback failed:", err)
+    end
+end
+
+function Index:_scheduleLoad(load_generation, yielded)
+    local run
+    run = function()
+        if self.cancelled or load_generation ~= self.load_generation then return end
+        if not self:_canWork() then
+            self:_defer(run, true)
+            return
+        end
+        self:_loadBatch(load_generation)
+    end
+    self:_defer(run, yielded)
+end
+
+--[[--
+One page of sheet metadata, by id.
+
+Loading ends on a batch shorter than the limit -- which covers the empty one,
+and is the only thing an empty batch means. A full batch that did not move the
+cursor is a repository answering the same rows forever, and is refused rather
+than paged over: the same bargain `ink_export_source` makes with `listPages`.
+]]
+function Index:_loadBatch(load_generation)
+    local rows, err = self.repository:listCanvasesBatch(self.book_id, {
+        limit = Index.METADATA_BATCH,
+        after_id = self.after_id,
+    })
+    if not rows then
+        logger.err("JustDraw: cannot list canvases:", err)
+        return self:_fail("list_failed")
+    end
+    for i = 1, #rows do
+        local canvas = rows[i]
+        if not self.by_id[canvas.id] then
+            self.canvases[#self.canvases + 1] = canvas
+            self.by_id[canvas.id] = canvas
+        end
+    end
+
+    if #rows >= Index.METADATA_BATCH then
+        local last = rows[#rows].id
+        if self.after_id ~= nil and last <= self.after_id then
+            logger.err("JustDraw: canvas listing did not advance past", last)
+            return self:_fail("list_failed")
+        end
+        self.after_id = last
+        self:_scheduleLoad(load_generation, false)
+        return
+    end
+    self:_rebuild()
+end
+
 function Index:_rebuild()
     self.generation = self.generation + 1
     local generation = self.generation
@@ -227,6 +419,7 @@ function Index:_rebuild()
     self.orphans = {}
     self.derived = {}
     self.pending = {}
+    self.placed = 0
     self.hash = tostring(self.document:getDocumentRenderingHash(true))
 
     local cached = self.repository:layoutPages(self.book_id, self.hash) or {}
@@ -241,16 +434,17 @@ function Index:_rebuild()
     end
 
     if #self.pending == 0 then
-        self.complete = true
+        self.state = "ready"
         self:_notifyComplete()
         return
     end
-    self.complete = false
+    self.state = "resolving"
     self:_scheduleBatch(generation)
 end
 
 function Index:_place(canvas_id, page)
     self.page_of[canvas_id] = page
+    self.placed = self.placed + 1
     local ids = self.ids_by_page[page]
     if not ids then
         ids = {}
@@ -260,10 +454,16 @@ function Index:_place(canvas_id, page)
 end
 
 function Index:_scheduleBatch(generation)
-    self.schedule(function()
+    local run
+    run = function()
         if self.cancelled or generation ~= self.generation then return end
+        if not self:_canWork() then
+            self:_defer(run, true)
+            return
+        end
         self:_resolveBatch(generation)
-    end)
+    end
+    self:_defer(run, false)
 end
 
 function Index:_resolveBatch(generation)
@@ -306,7 +506,7 @@ function Index:_resolveBatch(generation)
         return
     end
 
-    self.complete = true
+    self.state = "ready"
     logger.info("JustDraw: canvas page index ready,", #self.canvases, "canvases,",
         #self.orphans, "orphaned")
     self:_notifyComplete()

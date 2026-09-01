@@ -160,12 +160,58 @@ return function(ctx)
     end)
 
     t:case("a canvas listing failure is unavailable, not an empty book", function()
-        local session, store, _, _, notes = fixture()
+        -- The failure now arrives a tick later, through the index's on_error,
+        -- and has to end in exactly the state the synchronous one did.
+        local session, store, sched, _, notes = fixture{
+            canvases = { canvasAt(1, "/p1") }, pages = { ["/p1"] = 3 },
+        }
+        session.owns_repository = true
+        t:eq(session:open(), true, "opening returns before a row has been read")
         store.fail_list_canvases = "disk read failed"
+        sched:drain()
+        t:eq(session:isAvailable(), false, "the feature did not claim an empty index")
+        t:eq(session:isIndexing(), false, "and it is not still pretending to build")
+        t:eq(#notes, 1, "the reader was told, once")
+        t:check(notes[1]:find("Could not list", 1, true), "which sheets are missing")
+        t:eq(store.closed, true, "the connection this session opened is closed")
+        sched:drain()
+        t:eq(#notes, 1, "and nothing says it again")
+    end)
+
+    t:case("a count that fails is refused at the call site", function()
+        -- The one query the index still makes synchronously.
+        local session, store, _, _, notes = fixture()
+        store.fail_count_canvases = "disk read failed"
         local ok = session:open()
         t:eq(ok, nil, "opening failed")
-        t:eq(session:isAvailable(), false, "the feature did not claim an empty index")
-        t:check(#notes > 0, "the reader was told")
+        t:eq(session:isAvailable(), false, "with the feature off for this book")
+        t:check(#notes > 0, "and the reader told")
+    end)
+
+    t:case("opening returns before the index has read anything", function()
+        local session, store, sched = fixture{
+            canvases = { canvasAt(1, "/p1") }, pages = { ["/p1"] = 3 },
+        }
+        t:eq(session:open(), true, "ReaderReady is not blocked on the listing")
+        t:eq(store.calls.list, 0, "not one row read yet")
+        t:eq(session:isIndexing(), true, "the work is still ahead")
+        sched:drain()
+        t:eq(session:isIndexing(), false, "and behind, a few ticks later")
+    end)
+
+    t:case("the session reports what the index has got through", function()
+        local session, _, sched = fixture{
+            canvases = { canvasAt(1, "/p1") }, pages = { ["/p1"] = 3 }, batch = 1,
+        }
+        t:eq(session:indexProgress(), nil, "nothing to report before opening")
+        session:open()
+        local progress = session:indexProgress()
+        t:eq(progress.phase, "metadata", "the phase")
+        t:eq(progress.loaded, 0, "what is loaded")
+        t:eq(progress.total, 1, "what there is to load")
+        sched:drain()
+        t:eq(session:indexProgress().phase, "ready", "and when it is done")
+        t:eq(session:indexProgress().loaded, 1, "with everything loaded")
     end)
 
     t:case("a future schema can be browsed without creating a write queue", function()
