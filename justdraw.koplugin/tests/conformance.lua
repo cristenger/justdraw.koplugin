@@ -269,10 +269,13 @@ end
 -- =====================================================================
 do
     local Blitbuffer = require("ffi/blitbuffer")
+    -- rawequal, never ~= nil: a real colour is cdata whose __eq indexes its
+    -- argument, so comparing one to nil raises — the exact trap this file
+    -- states against BB.COLOR_GRAY further down.
     claim("Blitbuffer exposes COLOR_LIGHT_GRAY for the marker",
-        true, Blitbuffer.COLOR_LIGHT_GRAY ~= nil, "COLOR_LIGHT_GRAY")
+        true, not rawequal(Blitbuffer.COLOR_LIGHT_GRAY, nil), "COLOR_LIGHT_GRAY")
     claim("Blitbuffer exposes COLOR_GRAY_6 for graphite",
-        true, Blitbuffer.COLOR_GRAY_6 ~= nil, "COLOR_GRAY_6")
+        true, not rawequal(Blitbuffer.COLOR_GRAY_6, nil), "COLOR_GRAY_6")
 end
 
 -- =====================================================================
