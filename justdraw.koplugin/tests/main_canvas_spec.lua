@@ -300,6 +300,27 @@ return function(ctx)
             "and told the sheet is unavailable, not that something failed")
     end)
 
+    t:case("More on the embedded bar offers the sheet actions", function()
+        local p = canvasPlugin()
+        p:openCanvasHere()
+        local function row(dialog, text)
+            for _, r in ipairs(dialog and dialog.buttons or {}) do
+                for _, btn in ipairs(r) do
+                    if btn.text == text then return btn end
+                end
+            end
+            return nil
+        end
+        p.bar.more_btn.callback()
+        local dialog = env.dialogs[#env.dialogs]
+        t:check(row(dialog, "Close sheet") ~= nil, "the sheet can be closed from the bar")
+        t:check(row(dialog, "Delete sheet") ~= nil, "and deleted")
+        t:eq(row(dialog, "Export…").enabled, true,
+            "an open sheet is something to export")
+        row(dialog, "Close sheet").callback()
+        t:eq(p.canvas_open, false, "Close sheet puts the sheet away")
+    end)
+
     t:case("a failed Hide keeps the sheet and its retry controls alive", function()
         local p, store = canvasPlugin()
         openForPen(p)

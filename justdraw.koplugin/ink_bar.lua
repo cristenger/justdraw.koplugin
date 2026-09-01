@@ -65,11 +65,17 @@ function InkBar:init()
             p:setDrawing(not p.drawing)
         end
     end)
-    self.tool_btn = self:mkButton(_("Pen"), w, function()
-        p:setEraser(not p.eraser)
+    self.pen_btn = self:mkButton(_("Pen"), w, function()
+        p:setEraser(false)
+    end)
+    self.eraser_btn = self:mkButton(_("Eraser"), w, function()
+        p:setEraser(true)
     end)
     self.undo_btn = self:mkButton(_("Undo"), w, function()
         p:onJustDrawUndo()
+    end)
+    self.more_btn = self:mkButton(_("More"), w, function()
+        p:showBarMenu()
     end)
     self.hide_btn = self:mkButton(_("Hide"), w, function()
         p:setBarShown(false)
@@ -84,8 +90,10 @@ function InkBar:init()
         VerticalGroup:new{
             align = "center",
             self.draw_btn,
-            self.tool_btn,
+            self.pen_btn,
+            self.eraser_btn,
             self.undo_btn,
+            self.more_btn,
             self.hide_btn,
         },
     }
@@ -111,7 +119,7 @@ function InkBar:paintTo(bb, x, y)
     self[1]:paintTo(bb, self.dimen.x, self.dimen.y)
 end
 
---- Relabel the two stateful buttons. Pass true to also repaint.
+--- Relabel the stateful buttons. Pass true to also repaint.
 function InkBar:update(refresh)
     local p = self.plugin
     local draw_text = p.drawing and _("Stop") or _("Draw")
@@ -124,7 +132,15 @@ function InkBar:update(refresh)
         elseif not session:isWritable() then draw_text = _("View") end
     end
     self.draw_btn:setText(draw_text, self.draw_btn.width)
-    self.tool_btn:setText(p.eraser and _("Eraser") or _("Pen"), self.tool_btn.width)
+    -- The active-tool check rides in the label, not in `checked_func`: a
+    -- Button refreshes that checkmark only after its own tap, and the tool
+    -- also flips from outside the bar -- the menu, or a bound eraser gesture.
+    -- setText is the relabel path every other state change here already uses.
+    local mark = Button.checkmark
+    self.pen_btn:setText(p.eraser and _("Pen") or _("Pen") .. mark,
+        self.pen_btn.width)
+    self.eraser_btn:setText(p.eraser and _("Eraser") .. mark or _("Eraser"),
+        self.eraser_btn.width)
     if refresh then
         -- Embedded, the bar is not a window, and UIManager finds nothing to
         -- mark dirty when handed one that is not on the stack. The overlay is.

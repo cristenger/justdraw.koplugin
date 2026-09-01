@@ -2493,23 +2493,25 @@ function JustDraw:penItem(text, w)
     }
 end
 
+function JustDraw:setBarSide(side)
+    if self.bar_side == side then return end
+    self.bar_side = side
+    Compat.saveSetting(G_reader_settings, "bar_side", side)
+    local overlay = self.session and self.session:overlay()
+    if overlay then
+        overlay:setBarSide(side)
+        self.bar = overlay.bar
+    else
+        self:rebuildBar()
+    end
+end
+
 function JustDraw:sideItem(text, side)
     return {
         text = text,
         checked_func = function() return self.bar_side == side end,
         radio = true,
-        callback = function()
-            if self.bar_side == side then return end
-            self.bar_side = side
-            Compat.saveSetting(G_reader_settings, "bar_side", side)
-            local overlay = self.session and self.session:overlay()
-            if overlay then
-                overlay:setBarSide(side)
-                self.bar = overlay.bar
-            else
-                self:rebuildBar()
-            end
-        end,
+        callback = function() self:setBarSide(side) end,
     }
 end
 
@@ -2523,6 +2525,111 @@ function JustDraw:inputModeItem(text, value)
         enabled_func = function() return not self.drawing end,
         callback = function() self:setInputMode(value) end,
     }
+end
+
+--- One choice sub-dialog off the toolbar's More: checked options, then Close.
+--- A pick applies and closes; the More dialog it came from is already gone.
+function JustDraw:showBarChoices(title, options)
+    local dialog
+    local rows = {}
+    for i = 1, #options do
+        local opt = options[i]
+        rows[#rows + 1] = { {
+            text = opt.text,
+            enabled = opt.enabled ~= false,
+            checked_func = opt.checked_func,
+            callback = function()
+                opt.callback()
+                self:closeReaderModal(dialog)
+            end,
+        } }
+    end
+    rows[#rows + 1] = { {
+        text = _("Close"),
+        callback = function() self:closeReaderModal(dialog) end,
+    } }
+    dialog = ButtonDialog:new{ title = title, buttons = rows }
+    return self:showReaderModal(dialog)
+end
+
+function JustDraw:showPenWidthDialog()
+    local function width(text, w)
+        return {
+            text = text,
+            checked_func = function() return self.pen_width == w end,
+            callback = function() self:setPenWidth(w) end,
+        }
+    end
+    return self:showBarChoices(_("Pen width"), {
+        width(_("Thin"), PEN_THIN),
+        width(_("Medium"), PEN_MEDIUM),
+        width(_("Thick"), PEN_THICK),
+    })
+end
+
+--- Locked while drawing for the same reason the menu locks it: swapping
+--- backends mid-sequence would tear down capture inside a live contact.
+function JustDraw:showInputModeDialog()
+    local function mode(text, value)
+        return {
+            text = text,
+            enabled = not self.drawing,
+            checked_func = function() return self.input_mode == value end,
+            callback = function() self:setInputMode(value) end,
+        }
+    end
+    return self:showBarChoices(_("Input mode"), {
+        mode(_("Automatic"), "auto"),
+        mode(_("Stylus"), "stylus"),
+        mode(_("Finger"), "finger"),
+    })
+end
+
+--[[--
+The toolbar's More: the reader's JustDraw settings without the menu trip.
+
+The same state the main menu edits, presented the way the notebook rail
+presents its More -- because with drawing on, the menu is the thing that
+cannot be reached. Refused while a contact is live: a modal rising under a
+moving pen orphans the stroke, which is why every reader modal makes the
+same check before it goes up.
+]]
+function JustDraw:showBarMenu()
+    local lease = self.input_lease
+    if lease and lease:hasActiveContact() then return nil, "contact_active" end
+    local dialog
+    --- Close the More dialog before what was picked goes up: two stacked
+    --- modals leave two window stacks competing for the same taps.
+    local function pick(fn)
+        return function()
+            self:closeReaderModal(dialog)
+            fn()
+        end
+    end
+    local rows = {
+        { { text = _("Pen width"),
+            callback = pick(function() self:showPenWidthDialog() end) } },
+        { { text = _("Input mode"),
+            callback = pick(function() self:showInputModeDialog() end) } },
+        { { text = _("Export…"), enabled = self:canExport(),
+            callback = pick(function() self:showExportDialog() end) } },
+    }
+    if self.canvas_open then
+        local active = self.session:activeCanvas()
+        rows[#rows + 1] = { { text = _("Close sheet"),
+            callback = pick(function() self:closeCanvas() end) } }
+        rows[#rows + 1] = { { text = _("Delete sheet"),
+            enabled = self.session:isWritable(),
+            callback = pick(function() self:confirmDeleteCanvas(active) end) } }
+    end
+    rows[#rows + 1] = { { text = _("Toolbar side"),
+        callback = function()
+            self:setBarSide(self.bar_side == "left" and "right" or "left")
+        end } }
+    rows[#rows + 1] = { { text = _("Close"),
+        callback = function() self:closeReaderModal(dialog) end } }
+    dialog = ButtonDialog:new{ title = _("JustDraw"), buttons = rows }
+    return self:showReaderModal(dialog)
 end
 
 --[[--
@@ -2724,7 +2831,7 @@ Quick access is the Dispatcher's job: see `onDispatcherRegisterActions`.
 -- ------------------------------------------------------------------ export
 
 --[[--
-Modals this plugin owns while an export is being arranged.
+Modals this plugin owns over the reader: the export flow, the toolbar's More.
 
 The notebook windows have an owner that tracks what is open; in the reader
 there is none, so the plugin keeps the record itself. `UIManager:close` fires
@@ -2733,13 +2840,13 @@ underneath to repaint when it actually found the widget there, so a second
 close refreshes with nothing repainting behind it and pushes stale pixels back
 at the panel. The record is what makes that second close a no-op (ADR-28).
 ]]
-function JustDraw:showExportModal(widget)
-    self.export_modals = self.export_modals or {}
-    self.export_modals[widget] = true
+function JustDraw:showReaderModal(widget)
+    self.reader_modals = self.reader_modals or {}
+    self.reader_modals[widget] = true
     local previous = widget.onCloseWidget
     widget.onCloseWidget = function(dialog, ...)
         if previous then previous(dialog, ...) end
-        self.export_modals[dialog] = nil
+        self.reader_modals[dialog] = nil
         -- The second half of ADR-28: the dialogs' own close refreshes are
         -- regional (`flashui` over `movable.dimen`, or `ui`), and on MTK only
         -- a full-screen flashing update is fenced against the DU highlight
@@ -2752,8 +2859,8 @@ function JustDraw:showExportModal(widget)
     return widget
 end
 
-function JustDraw:closeExportModal(widget)
-    if not widget or not self.export_modals or not self.export_modals[widget] then
+function JustDraw:closeReaderModal(widget)
+    if not widget or not self.reader_modals or not self.reader_modals[widget] then
         return false
     end
     UIManager:close(widget)
@@ -2948,8 +3055,8 @@ function JustDraw:showExportDialog()
         scopes = scopes,
         build = function(scope) return self:buildExport(scope) end,
         settings = G_reader_settings,
-        show_modal = function(widget) return self:showExportModal(widget) end,
-        close_modal = function(widget) return self:closeExportModal(widget) end,
+        show_modal = function(widget) return self:showReaderModal(widget) end,
+        close_modal = function(widget) return self:closeReaderModal(widget) end,
         notify = function(text) self:notify(text) end,
     }
 end

@@ -250,6 +250,14 @@ do
     claim("buttonLabelHeight makes a Button occupy the budget it was given",
         true, fitted:getSize().h == box,
         fitted:getSize().h .. " for a budget of " .. box)
+
+    -- ink_bar borrows Button's checkmark glyph for its label-carried tool
+    -- check, and tests/support.lua's stub hardcodes the same constant. If the
+    -- widget ever stops exposing it, the stub is lying and the toolbar would
+    -- concatenate nil on a device.
+    claim("Button exposes the checkmark constant the toolbar labels borrow",
+        true, type(Button.checkmark) == "string",
+        tostring(Button.checkmark))
 end
 
 -- =====================================================================

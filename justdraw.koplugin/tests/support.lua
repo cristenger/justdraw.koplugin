@@ -1769,6 +1769,10 @@ function support.install()
 
     local Button = {}
     Button.__index = Button
+    -- The class constant the real Button appends for `checked_func` labels
+    -- (button.lua `checkmark`). ink_bar borrows the glyph for its own
+    -- label-carried tool check; conformance.lua states the constant exists.
+    Button.checkmark = "  \u{2713}"
     function Button:new(o)
         o = setmetatable(o or {}, Button)
         o.texts = { o.text }

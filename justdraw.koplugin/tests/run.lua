@@ -771,8 +771,10 @@ t:case("an over-budget direct stroke is repaired and owns through lift", functio
 
     p:onStylusEvent(bus:set(4, { id = -1 }))
     t:eq(p:hasActivePhysicalContact(), false, "lift releases ownership")
-    p:onStylusEvent(bus:set(4, { id = 5, x = 500, y = 300, tool = 1 }))
-    p:onStylusEvent(bus:set(4, { x = 600, y = 400 }))
+    -- Left of the toolbar: the six-button bar spans the screen's vertical
+    -- middle, and a contact starting on it is passthrough, not ink.
+    p:onStylusEvent(bus:set(4, { id = 5, x = 300, y = 300, tool = 1 }))
+    p:onStylusEvent(bus:set(4, { x = 400, y = 400 }))
     p:onStylusEvent(bus:set(4, { id = -1 }))
     t:eq(#p.store:get(1), 1, "the next physical contact works")
 end)
@@ -1808,14 +1810,21 @@ end)
 
 t:describe("ink_bar (real widget)")
 
-t:case("builds four buttons and a screen-relative geometry", function()
+t:case("builds six buttons and a screen-relative geometry", function()
     reset()
     local p = newPlugin()
     local bar = newRealBar(p)
-    t:check(bar.draw_btn ~= nil and bar.tool_btn ~= nil, "stateful buttons exist")
+    t:check(bar.draw_btn ~= nil, "the capture toggle exists")
+    t:check(bar.pen_btn ~= nil and bar.eraser_btn ~= nil,
+        "each tool has a button of its own, like the notebook rail")
     t:check(bar.undo_btn ~= nil and bar.hide_btn ~= nil, "action buttons exist")
+    t:check(bar.more_btn ~= nil, "the settings dialog is reachable from the bar")
+    t:eq(bar.tool_btn, nil, "the combined tool toggle is gone")
     t:check(bar.dimen.w > 0 and bar.dimen.h > 0, "the bar has a size")
     t:check(bar.dimen.x + bar.dimen.w <= Device.screen:getWidth(), "it fits on screen")
+    t:check(bar.dimen.y >= 0
+        and bar.dimen.y + bar.dimen.h <= Device.screen:getHeight(),
+        "six buttons still fit the screen's height")
 
     local left = newRealBar(p, "left")
     t:check(left.dimen.x < bar.dimen.x, "the left side really is further left")
@@ -2000,18 +2009,121 @@ t:case("passthrough releases gestures without turning drawing off", function()
         "a passthrough sequence reaches the reader")
 end)
 
-t:case("relabels Draw/Stop and Pen/Eraser from plugin state", function()
+t:case("relabels Draw/Stop and marks the active tool", function()
+    -- The check lives in the label, through the same setText relabel the
+    -- Draw button already uses, because a Button refreshes a `checked_func`
+    -- checkmark only after its own tap -- a bound eraser gesture or the menu
+    -- flipping the tool from outside would leave a stale check.
+    local checked = function(btn) return btn.text:find("\u{2713}", 1, true) ~= nil end
     reset()
     local p = newPlugin()
     local bar = newRealBar(p)
     p.drawing, p.eraser = false, false
     bar:update(false)
     t:eq(bar.draw_btn.text, "Draw", "idle label")
-    t:eq(bar.tool_btn.text, "Pen", "pen label")
+    t:eq(checked(bar.pen_btn), true, "the pen is marked as the active tool")
+    t:eq(checked(bar.eraser_btn), false, "the eraser is not")
     p.drawing, p.eraser = true, true
     bar:update(false)
     t:eq(bar.draw_btn.text, "Stop", "drawing label")
-    t:eq(bar.tool_btn.text, "Eraser", "eraser label")
+    t:eq(checked(bar.pen_btn), false, "the pen mark moved")
+    t:eq(checked(bar.eraser_btn), true, "to the eraser")
+end)
+
+t:case("each tool button sets its own tool, never toggles", function()
+    local p, bar = realBarPlugin()
+    bar.eraser_btn.callback()
+    t:eq(p.eraser, true, "the eraser button picks the eraser")
+    t:eq(p.drawing, true, "and arms capture, as the old toggle did")
+    bar.eraser_btn.callback()
+    t:eq(p.eraser, true, "a second tap holds the tool rather than toggling")
+    bar.pen_btn.callback()
+    t:eq(p.eraser, false, "the pen button returns to inking")
+end)
+
+--- The one button spec with this text anywhere in a ButtonDialog's rows.
+local function dialogButton(dialog, text)
+    for _, row in ipairs(dialog and dialog.buttons or {}) do
+        for _, btn in ipairs(row) do
+            if btn.text == text then return btn end
+        end
+    end
+    return nil
+end
+
+t:case("More opens the settings dialog for the reader", function()
+    local p, bar = realBarPlugin()
+    local before = #env.dialogs
+    bar.more_btn.callback()
+    t:eq(#env.dialogs, before + 1, "one dialog opened")
+    local dialog = env.dialogs[#env.dialogs]
+    t:check(dialogButton(dialog, "Pen width") ~= nil, "pen width is reachable")
+    t:check(dialogButton(dialog, "Input mode") ~= nil, "input mode is reachable")
+    t:check(dialogButton(dialog, "Export…") ~= nil, "export is reachable")
+    t:eq(dialogButton(dialog, "Export…").enabled, false,
+        "and disabled while there is nothing to export")
+    t:check(dialogButton(dialog, "Toolbar side") ~= nil, "the side can move")
+    t:eq(dialogButton(dialog, "Close sheet"), nil, "no sheet rows without a sheet")
+    t:check(dialogButton(dialog, "Close") ~= nil, "and it can be dismissed")
+end)
+
+t:case("the settings dialog refuses while a contact is live", function()
+    local p = realBarPlugin()
+    p.input_lease = { hasActiveContact = function() return true end }
+    local before = #env.dialogs
+    local got, err = p:showBarMenu()
+    t:eq(got, nil, "refused")
+    t:eq(err, "contact_active", "and says why")
+    t:eq(#env.dialogs, before, "no window went up under the pen")
+end)
+
+t:case("pen width is set from the dialog and remembered", function()
+    local p, bar = realBarPlugin()
+    bar.more_btn.callback()
+    dialogButton(env.dialogs[#env.dialogs], "Pen width").callback()
+    local widths = env.dialogs[#env.dialogs]
+    t:eq(dialogButton(widths, "Medium").checked_func(), true,
+        "the current width is the marked one")
+    dialogButton(widths, "Thick").callback()
+    t:eq(p.pen_width, 7, "the plugin took the width")
+    t:eq(_G.G_reader_settings.data.justdraw_pen_width, 7, "and it is saved")
+end)
+
+t:case("input mode stays locked while drawing, from the dialog too", function()
+    local p, bar = realBarPlugin()
+    p:setDrawing(true)
+    bar.more_btn.callback()
+    dialogButton(env.dialogs[#env.dialogs], "Input mode").callback()
+    t:eq(dialogButton(env.dialogs[#env.dialogs], "Finger").enabled, false,
+        "swapping backends mid-capture is refused, as in the menu")
+    p:setDrawing(false)
+    bar.more_btn.callback()
+    dialogButton(env.dialogs[#env.dialogs], "Input mode").callback()
+    local modes = env.dialogs[#env.dialogs]
+    t:eq(dialogButton(modes, "Finger").enabled, true,
+        "and allowed once capture is off")
+    dialogButton(modes, "Finger").callback()
+    t:eq(p.input_mode, "finger", "the mode reached the plugin")
+end)
+
+t:case("the dialog swaps the toolbar side", function()
+    local p, bar = realBarPlugin()
+    local before_x = p.bar.dimen.x
+    bar.more_btn.callback()
+    dialogButton(env.dialogs[#env.dialogs], "Toolbar side").callback()
+    t:eq(p.bar_side, "left", "the side flipped")
+    t:eq(_G.G_reader_settings.data.justdraw_bar_side, "left", "and was saved")
+    env.UIManager:flush()   -- rebuildBar re-shows the bar on the next tick
+    t:check(p.bar.dimen.x < before_x, "the bar really moved")
+end)
+
+t:case("closing the settings dialog twice is a no-op (ADR-28)", function()
+    local p = realBarPlugin()
+    local dialog = p:showBarMenu()
+    t:check(dialog ~= nil, "the dialog opened")
+    t:eq(p:closeReaderModal(dialog), true, "the first close finds it")
+    t:eq(p:closeReaderModal(dialog), false,
+        "the second is refused rather than repainted")
 end)
 
 -- =====================================================================

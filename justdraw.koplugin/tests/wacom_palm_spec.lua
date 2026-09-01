@@ -1048,6 +1048,12 @@ return function(ctx)
 
     t:case("the physical eraser still reaches the page", function()
         local p, input = penPlugin()
+        -- The recorded path crosses where the six-button bar sits on the small
+        -- fake screen; on a Scribe it is nowhere near the bar. Keep the
+        -- toolbar out of the recorded coordinates, never the reverse.
+        ctx.env.UIManager:close(p.bar)
+        p.bar = ctx.newRealBar(p, "left")
+        ctx.env.UIManager:show(p.bar)
         -- The contact-down pair is a baseline, so the erase happens at the
         -- second, coherent sample.
         p.store:add(1, { n = 1, w = 4, 520, 530 })
