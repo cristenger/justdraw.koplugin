@@ -2153,6 +2153,7 @@ local ctx = {
 }
 
 for _, spec in ipairs({
+    "style_spec",
     "compat_spec",
     "conformance_policy_spec",
     "stylus_sequence_spec",

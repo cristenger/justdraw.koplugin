@@ -1698,6 +1698,9 @@ function support.install()
     env.Blitbuffer = support.newBlitbufferModule()
     env.Blitbuffer.COLOR_LIGHT_GRAY = "light_gray"
     env.Blitbuffer.COLOR_DARK_GRAY = "dark_gray"
+    -- ink_style's graphite gray. A string, like every fake color; the
+    -- constant's existence on the real module is stated in conformance.lua.
+    env.Blitbuffer.COLOR_GRAY_6 = "gray_6"
     -- The raster cache's default ruling colour. Without it every paper
     -- assertion would pass against a nil colour, which paints nothing.
     env.Blitbuffer.COLOR_GRAY = "gray"

@@ -261,6 +261,21 @@ do
 end
 
 -- =====================================================================
+-- Blitbuffer color constants the style table names
+--
+-- ink_style.lua maps marker and graphite onto named grays, and the fakes
+-- stand in for them as strings. If the real module ever drops one, the
+-- fake is lying and every styled stroke would paint nil on a device.
+-- =====================================================================
+do
+    local Blitbuffer = require("ffi/blitbuffer")
+    claim("Blitbuffer exposes COLOR_LIGHT_GRAY for the marker",
+        true, Blitbuffer.COLOR_LIGHT_GRAY ~= nil, "COLOR_LIGHT_GRAY")
+    claim("Blitbuffer exposes COLOR_GRAY_6 for graphite",
+        true, Blitbuffer.COLOR_GRAY_6 ~= nil, "COLOR_GRAY_6")
+end
+
+-- =====================================================================
 -- Viewport clipping, against a real BlitBuffer
 --
 -- The canvas paints live ink and repairs erased regions through
