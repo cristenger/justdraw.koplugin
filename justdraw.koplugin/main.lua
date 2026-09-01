@@ -360,11 +360,11 @@ function JustDraw:onDispatcherRegisterActions()
         title = _("JustDraw: open/close drawing sheet"),
     })
     -- Also post-rename, no legacy identity. `general`, not `reader`, because
-    -- toggling the pen style is meaningful in any context: reader, notebooks,
-    -- or file browser (when a reader is open underneath).
+    -- pen_style is a global setting read at init, so binding the toggle in the
+    -- file browser configures the next reading session.
     Dispatcher:registerAction("justdraw_marker", {
         category = "none", event = "JustDrawMarker", general = true,
-        title = _("JustDraw: toggle marker"),
+        title = _("JustDraw: toggle marker/pen"),
     })
 end
 
@@ -2123,6 +2123,11 @@ function JustDraw:closeCanvas()
     return true
 end
 
+--[[--
+Toggle between marker and pen. Any non-marker style toggles TO the marker; the
+previous style is not remembered — the gesture always lands on marker or pen,
+and graphite is re-picked from the Pen style dialog.
+]]
 function JustDraw:onJustDrawMarker()
     self:setPenStyle(self.pen_style == Style.MARKER and Style.PEN or Style.MARKER)
     return true

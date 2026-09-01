@@ -2209,6 +2209,21 @@ t:case("the marker toggle dispatcher action flips pen_style 1<->3", function()
     t:eq(p.pen_style, 3, "style flipped to marker")
     t:eq(p:onJustDrawMarker(), true, "a second press is harmless")
     t:eq(p.pen_style, 1, "and returns to pen")
+    t:eq(_G.G_reader_settings.data.justdraw_pen_style, 1,
+        "the pen choice persists via setPenStyle")
+end)
+
+t:case("the marker toggle from graphite goes to marker, not back to graphite", function()
+    reset()
+    _G.G_reader_settings.data.justdraw_pen_style = 65  -- graphite
+    local p = newPlugin()
+    t:eq(p.pen_style, 65, "graphite is the starting style")
+    t:eq(p:onJustDrawMarker(), true, "the event is consumed")
+    t:eq(p.pen_style, 3, "any non-marker style toggles TO marker")
+    t:eq(_G.G_reader_settings.data.justdraw_pen_style, 3,
+        "marker choice persists via setPenStyle")
+    t:eq(p:onJustDrawMarker(), true, "a second press")
+    t:eq(p.pen_style, 1, "returns to pen, not back to graphite")
 end)
 
 -- =====================================================================
