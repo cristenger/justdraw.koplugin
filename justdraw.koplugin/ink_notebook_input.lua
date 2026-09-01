@@ -24,6 +24,7 @@ local time = require("ui/time")
 local Limits = require("ink_limits")
 local PalmGate = require("ink_wacom_palm")
 local Sequence = require("ink_stylus_sequence")
+local Style = require("ink_style")
 local StylusGeometry = require("ink_stylus_geometry")
 
 local Adapter = {}
@@ -82,6 +83,7 @@ function Adapter.new(opts)
         stroke = nil,
         erase_ctx = nil,
         erase_radius = nil,
+        get_pen_style = nil,
         edit_pending = false,
         contacts = {},
         contact_count = 0,
@@ -239,7 +241,7 @@ function Adapter:_beginInk(sx, sy, tool)
         / self.transform.scale
     self.stroke = {
         points = { cx, cy }, n = 1, width = width,
-        tool = tonumber(tool) or Capture.TOOL_PEN,
+        tool = Style.normalize(tonumber(self.get_pen_style and self.get_pen_style()) or nil),
         min_x = cx, min_y = cy, max_x = cx, max_y = cy,
     }
     local box, raster_cache, raster_generation =

@@ -115,6 +115,30 @@ return function(ctx)
         t:eq(adapter:hasActiveContact(session), false, "lift clears gate")
     end)
 
+    t:case("the notebook stores the chosen style, not the hardware tool", function()
+        -- Until now the row recorded which physical tool was held; the column
+        -- now means style, and phase-1 default style is pen even under a pen
+        -- reporting tool=1. Injection of non-pen styles arrives with Task 4.
+        -- Same build as "stylus points become one queued logical stroke",
+        -- with the style-resolution seam asserted on the built stroke.
+        local session, _, adapter, spec, dirties, _, _, edits, edit_contacts = fixture("stylus")
+        t:eq(spec.backend, "stylus", "modern route selected")
+        t:eq(spec.stylus_handler{
+            slot = 4, id = 9, x = 10, y = 10, tool = 1,
+        }, true, "pen dominated")
+        spec.stylus_handler{ slot = 4, id = 9, x = 20, y = 30, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 9, x = 40, y = 60, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 40, y = 60, tool = 0 }
+        t:eq(session:surface():pendingWrites(), 1, "one durable operation queued")
+        t:eq(#session:surface():cache():strokes(), 1, "one raster stroke")
+        t:check(dirties() >= 2, "live ink requested repaint")
+        t:eq(edits(), 1, "one lightweight capability update follows the stroke")
+        t:eq(edit_contacts[1], false, "capabilities update only after lift bookkeeping")
+        t:eq(adapter:hasActiveContact(session), false, "lift clears gate")
+        local strokes = session:surface():cache():strokes()
+        t:eq(strokes[1].tool, 1, "a plain pen contact resolves to Style.PEN")
+    end)
+
     t:case("a valid live-raster token prevents repaint on stylus lift", function()
         local session, _, _, spec = fixture("stylus")
         local cache = session:surface():cache()

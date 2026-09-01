@@ -39,6 +39,7 @@ local InkBar = require("ink_bar")
 local NotebookController = require("ink_notebook_controller")
 local NotebookInput = require("ink_notebook_input")
 local PalmGate = require("ink_wacom_palm")
+local Style = require("ink_style")
 local StylusGeometry = require("ink_stylus_geometry")
 local StylusSequence = require("ink_stylus_sequence")
 local Limits = require("ink_limits")
@@ -1240,7 +1241,7 @@ function JustDraw:applyPoint(x, y, tool)
     elseif self.stroke then
         self:addPoint(x, y)
     else
-        self:startStroke(x, y)
+        self:startStroke(x, y, Style.PEN)
     end
 end
 
@@ -1764,8 +1765,11 @@ end
 
 -- ------------------------------------------------------------------ stroke
 
-function JustDraw:startStroke(x, y)
-    self.stroke = { n = 1, w = self.pen_width, x, y }
+function JustDraw:startStroke(x, y, style)
+    style = Style.normalize(style)
+    self.stroke = {
+        n = 1, w = self.pen_width * Style.widthScale(style), t = style, x, y,
+    }
 end
 
 function JustDraw:addPoint(x, y)
@@ -2122,7 +2126,7 @@ function JustDraw:applyCanvasPoint(x, y, tool)
         if self.canvas_stroke then
             if not self:addCanvasPoint(cx, cy, tr) then return false end
         else
-            self:startCanvasStroke(cx, cy, tr)
+            self:startCanvasStroke(cx, cy, tr, Style.PEN)
         end
     end
     return true
@@ -2130,9 +2134,11 @@ end
 
 --- Widths are stored in canvas units, so a stroke keeps its weight relative to
 --- the page when the sheet is shown at another size or on another screen.
-function JustDraw:startCanvasStroke(cx, cy, tr)
+function JustDraw:startCanvasStroke(cx, cy, tr, style)
+    style = Style.normalize(style)
     self.canvas_stroke = {
-        n = 1, w = self.pen_width / tr.scale,
+        n = 1, w = self.pen_width * Style.widthScale(style) / tr.scale,
+        t = style,
         min_x = cx, min_y = cy, max_x = cx, max_y = cy,
         cx, cy,
     }
@@ -2305,7 +2311,7 @@ function JustDraw:endCanvasStroke()
     end
 
     local ok, err, painted, left, top, right, bottom =
-        self.session:addStroke(s, s.n, s.w, Capture.TOOL_PEN, {
+        self.session:addStroke(s, s.n, s.w, s.t or Style.PEN, {
             raster_cache = s.raster_cache,
             raster_generation = s.raster_generation,
             live_raster_complete = s.live_raster_complete == true,

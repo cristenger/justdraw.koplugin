@@ -895,6 +895,23 @@ t:case("the physical eraser erases even with the manual tool set to pen", functi
     t:eq(p.store:get(1), nil, "the stroke under the eraser was removed")
 end)
 
+t:case("a stroke record carries its style into the sidecar and back", function()
+    local p = drawingPlugin()
+    p:startStroke(100, 100, 65)          -- graphite, injected directly
+    p:endStroke()
+    local s = p.store:get(1)[1]
+    t:eq(s.t, 65, "the sidecar stroke keeps the style field")
+    t:eq(s.w, p.pen_width, "graphite does not widen the nib")
+end)
+
+t:case("a marker stroke stores a three-nib width", function()
+    local p = drawingPlugin()
+    p:startStroke(100, 100, 3)
+    p:endStroke()
+    local s = p.store:get(1)[1]
+    t:eq(s.w, p.pen_width * 3, "marker width is baked into the stored stroke")
+end)
+
 t:describe("main / stylus latching")
 
 t:case("a sequence starting on the toolbar stays passthrough to the lift", function()
