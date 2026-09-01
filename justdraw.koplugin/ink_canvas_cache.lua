@@ -860,16 +860,34 @@ function Cache:_readChunk(m, chunk_no, ctx, stats)
     end
 
     local row, err = self.repository:readStrokeChunk(m.id, chunk_no)
-    if not row then return nil, err end
+    if not row then
+        logger.warn("JustDraw: chunk read refused, stroke", m.id,
+            "chunk", chunk_no, "err", err)
+        return nil, err
+    end
     if tonumber(row.chunk_no) ~= chunk_no then return nil, "chunk_order" end
     local points, n = Codec.decode(row.points,
         self.canvas.logical_w, self.canvas.logical_h)
     if not points then
+        -- Name the decode's own reason: "chunk_count" used to swallow
+        -- "count" and "bad_geometry" alike, which is not enough to
+        -- diagnose a failure that only a device's data reproduces.
+        logger.warn("JustDraw: chunk decode failed, stroke", m.id,
+            "chunk", chunk_no, "reason", n,
+            "blob_len", type(row.points) == "string" and #row.points or type(row.points),
+            "row_count", tostring(row.point_count),
+            "logical", tostring(self.canvas.logical_w),
+            tostring(self.canvas.logical_h))
         if n == "version" then return nil, "unsupported_codec" end
         if n == "short" or n == "length" then return nil, "chunk_length" end
-        return nil, "chunk_count"
+        return nil, "chunk_decode_" .. tostring(n)
     end
-    if tonumber(row.point_count) ~= n then return nil, "chunk_count" end
+    if tonumber(row.point_count) ~= n then
+        logger.warn("JustDraw: chunk row count mismatch, stroke", m.id,
+            "chunk", chunk_no, "row_count", tostring(row.point_count),
+            "decoded", n, "meta_count", tostring(m.point_count))
+        return nil, "chunk_count_row"
+    end
     if stats then stats.chunks_decoded = stats.chunks_decoded + 1 end
     if ctx and ctx.stats then
         ctx.stats.chunks_decoded = ctx.stats.chunks_decoded + 1
@@ -897,7 +915,11 @@ function Cache:_readAllPoints(m, ctx)
     if chunk_count == 1 then
         local points, n = self:_readChunk(m, 0, ctx)
         if not points then return nil, n end
-        if n ~= total then return nil, "chunk_count" end
+        if n ~= total then
+            logger.warn("JustDraw: single-chunk stroke disagrees with its meta,",
+                "stroke", m.id, "decoded", n, "meta_count", tostring(total))
+            return nil, "chunk_count_meta"
+        end
         return points, n
     end
     local points, n = {}, 0
@@ -907,6 +929,8 @@ function Cache:_readAllPoints(m, ctx)
         local from = 1
         if chunk_no > 0 then
             if part[1] ~= points[n * 2 - 1] or part[2] ~= points[n * 2] then
+                logger.warn("JustDraw: chunk seam disagrees, stroke", m.id,
+                    "chunk", chunk_no, "joined", n)
                 return nil, "chunk_joint"
             end
             from = 2
@@ -917,7 +941,12 @@ function Cache:_readAllPoints(m, ctx)
             points[n * 2] = part[i * 2]
         end
     end
-    if n ~= total then return nil, "chunk_count" end
+    if n ~= total then
+        logger.warn("JustDraw: joined chunks disagree with their meta,",
+            "stroke", m.id, "joined", n, "meta_count", tostring(total),
+            "chunks", chunk_count)
+        return nil, "chunk_count_join"
+    end
     return points, n
 end
 
