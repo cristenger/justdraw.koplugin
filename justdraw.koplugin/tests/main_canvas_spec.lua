@@ -271,6 +271,35 @@ return function(ctx)
         t:eq(p.drawing, false, "and drawing stopped")
     end)
 
+    t:case("the sheet gesture opens a sheet here", function()
+        -- The same call the menu makes, bindable to a gesture: without it the
+        -- only way back to a closed sheet is four taps into the menu.
+        local p = canvasPlugin()
+        t:eq(p:onJustDrawSheet(), true, "the event is consumed")
+        t:eq(p.canvas_open, true, "and the sheet is up")
+    end)
+
+    t:case("the sheet gesture puts an open sheet away", function()
+        local p = canvasPlugin()
+        p:openCanvasHere()
+        t:eq(p:onJustDrawSheet(), true, "the event is consumed")
+        t:eq(p.canvas_open, false, "and the sheet is gone")
+    end)
+
+    t:case("the sheet gesture on a fixed layout says why, once", function()
+        -- A bound gesture that silently does nothing looks broken. The menu
+        -- greys its entry out; a gesture has no grey, so it says why instead.
+        ctx.reset()
+        local p = support.newPlugin(ctx.JustDraw, env, {})
+        env.UIManager:flush()
+        p:onReaderReady()
+        t:eq(p:onJustDrawSheet(), true, "the event is still consumed")
+        t:eq(p.canvas_open, false, "nothing opened")
+        t:eq(#env.notifications, 1, "the user was told")
+        t:check(env.notifications[1]:find("not available", 1, true) ~= nil,
+            "and told the sheet is unavailable, not that something failed")
+    end)
+
     t:case("a failed Hide keeps the sheet and its retry controls alive", function()
         local p, store = canvasPlugin()
         openForPen(p)

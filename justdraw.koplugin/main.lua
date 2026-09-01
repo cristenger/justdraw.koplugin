@@ -344,6 +344,12 @@ function JustDraw:onDispatcherRegisterActions()
         category = "none", event = "JustDrawNotebooks", general = true,
         title = _("JustDraw: open notebooks"),
     })
+    -- Also post-rename, so no legacy identity -- but `reader`, not `general`:
+    -- a sheet exists only over a document.
+    Dispatcher:registerAction("justdraw_sheet", {
+        category = "none", event = "JustDrawSheet", reader = true,
+        title = _("JustDraw: open/close drawing sheet"),
+    })
 end
 
 --[[--
@@ -2049,6 +2055,26 @@ function JustDraw:openCanvasHere()
         return
     end
     return self:openCanvas(canvas)
+end
+
+--[[--
+The Dispatcher route to the sheet: the same calls the menu makes.
+
+A gesture has no `enabled_func`, so the refusal the menu greys out has to be
+said out loud here -- a bound swipe that silently does nothing looks broken.
+`openCanvasHere` voices its own anchor failure; what is left to say is that
+this document cannot hold a sheet at all. The one refusal that stays quiet is
+indexing, transient by construction, which the menu handles the same way.
+]]
+function JustDraw:onJustDrawSheet()
+    if self.canvas_open then
+        self:closeCanvas()
+    elseif self.session and self.session:isAvailable() then
+        self:openCanvasHere()
+    else
+        self:notify(_("Drawing sheets are not available in this document"))
+    end
+    return true
 end
 
 function JustDraw:closeCanvas()

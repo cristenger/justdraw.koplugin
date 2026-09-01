@@ -94,6 +94,15 @@ return function(ctx)
         t:eq(actions.fingerink_toggle.reader, true, "toggle stays reader-only")
         t:eq(actions.fingerink_toggle.general, nil, "and is not promoted")
         t:eq(actions.fingerink_bar.reader, true, "toolbar stays reader-only")
+
+        -- The sheet action postdates the rename, so like the notebook action
+        -- it carries no legacy FingerInk identity -- but a sheet needs a
+        -- reflowable document, so unlike it the action stays reader-only.
+        local sheet = actions.justdraw_sheet
+        t:check(sheet ~= nil, "the sheet action is registered")
+        t:eq(sheet.event, "JustDrawSheet", "and names its event")
+        t:eq(sheet.reader, true, "a sheet needs a document: reader-only")
+        t:eq(sheet.general, nil, "and is not promoted to the file browser")
         plugin:teardown()
     end)
 
