@@ -1640,7 +1640,10 @@ end
 --
 -- Needs a book, so pass one:
 --
---     ./luajit .../conformance.lua /path/to/some.epub
+--     ./luajit .../conformance.lua /path/to/some.epub [/path/to/some.pdf]
+--
+-- The second argument is the fixed-layout half, checked further down; this
+-- block only wants the first.
 --
 -- Without it these come back UNCHECKABLE and the anchor code is covered only
 -- by a fake document -- which is exactly the situation this file exists to
@@ -1726,6 +1729,191 @@ else
         end
 
         document:close()
+    end
+end
+
+-- =====================================================================
+-- Page ink on a fixed-layout page, against a real PDF
+--
+-- Needs one, and it is the *second* argument:
+--
+--     ./luajit .../conformance.lua /path/to/some.epub /path/to/some.pdf
+--
+-- What is being checked is that `ink_document_transform` composes KOReader's
+-- own single-page formula and not a second one. The suite can only state that
+-- against tests/support.lua's plain-table view; here it is stated against
+-- `ReaderView`'s real methods and a real MuPDF page, which is the only place
+-- the two can be caught disagreeing.
+-- =====================================================================
+
+local fixed_book = arg and arg[2]
+
+if not fixed_book then
+    claim("page ink: a real PDF was supplied", false, false,
+        "pass a PDF path as the second argument to check the page transform")
+else
+    local DocumentRegistry = require("document/documentregistry")
+    local Geom = require("ui/geometry")
+    local ReaderView = require("apps/reader/modules/readerview")
+    local KoptInterface = require("document/koptinterface")
+    local DocumentTransform = require("ink_document_transform")
+
+    local opened, fixed = pcall(function()
+        return DocumentRegistry:openDocument(fixed_book)
+    end)
+
+    if not opened or not fixed then
+        claim("page ink: the PDF opens through DocumentRegistry", true, false,
+            tostring(fixed))
+    else
+        claim("page ink: a PDF's provider is mupdf",
+            true, fixed.provider == "mupdf", tostring(fixed.provider))
+
+        local native = fixed:getNativePageDimensions(1)
+        claim("page ink: getNativePageDimensions answers a w and an h",
+            true, type(native) == "table"
+              and type(native.w) == "number" and type(native.h) == "number",
+            native and (tostring(native.w) .. " x " .. tostring(native.h)) or "nil")
+
+        -- Whether *this* page's points happen to be whole is not the claim:
+        -- MuPDF does not round, so the surface geometry has to, and rounding
+        -- down would put the last column of the page outside the surface.
+        local spec = native and DocumentTransform.surfaceSpec(fixed, 1) or nil
+        local whole = spec ~= nil
+            and spec.logical_w == math.floor(spec.logical_w)
+            and spec.logical_h == math.floor(spec.logical_h)
+            and spec.logical_w >= native.w and spec.logical_h >= native.h
+            and spec.units == "pt"
+        claim("page ink: a surface is whole units, never smaller than the page",
+            native ~= nil, whole,
+            string.format("%s x %s (%s) -> %s x %s %s",
+                tostring(native and native.w), tostring(native and native.h),
+                (native and native.w == math.floor(native.w)
+                    and native.h == math.floor(native.h))
+                    and "integers here" or "not integers",
+                tostring(spec and spec.logical_w), tostring(spec and spec.logical_h),
+                tostring(spec and spec.units)))
+
+        -- Why there is a `no_view` refusal at all. `ReaderView:init` leaves
+        -- `state.offset` nil and only `recalculate` fills it in, so a view
+        -- event can reach the plugin before the reader has one. The init
+        -- raises further down, in a footer that wants a session; it has set
+        -- `state` by then, which is the field this is about.
+        local fresh = setmetatable({}, { __index = ReaderView })
+        pcall(ReaderView.init, fresh)
+        claim("page ink: a fresh ReaderView has no state.offset yet",
+            type(fresh.state) == "table", fresh.state.offset == nil,
+            "recalculate is what fills it in")
+
+        -- A whole ReaderView needs a session. These two methods do not: they
+        -- are plain functions over `visible_area`, `state.offset` and
+        -- `state.zoom`, and the metatable is here only so
+        -- `screenToPageTransform` can reach its own single-page branch.
+        local view_self = setmetatable({
+            ui = { paging = true },
+            page_scroll = false,
+            visible_area = Geom:new{ x = 37, y = 61, w = 500, h = 700 },
+            state = {
+                offset = Geom:new{ x = 12, y = 24 },
+                zoom = 2, page = 1, rotation = 0,
+            },
+        }, { __index = ReaderView })
+        local view = {
+            document = fixed,
+            page_scroll = false,
+            state = view_self.state,
+            visible_area = view_self.visible_area,
+            dimen = Geom:new{ x = 0, y = 0, w = 500, h = 700 },
+        }
+
+        local transform, refused
+        if spec then
+            transform, refused = DocumentTransform.fromView(
+                { paging = true, document = fixed }, view, spec,
+                { screen = { w = Device.screen:getWidth(),
+                             h = Device.screen:getHeight() } })
+            if not transform and refused == "zoom_too_large" then
+                -- A page larger than two screens is refused by design, and
+                -- the budget is not what this claim is about.
+                transform, refused = DocumentTransform.fromView(
+                    { paging = true, document = fixed }, view, spec,
+                    { max_cache_pixels = spec.logical_w * spec.logical_h * 4 })
+            end
+        end
+        claim("page ink: the live view yields a transform whose scale is the zoom",
+            spec ~= nil, transform ~= nil and transform.scale == view.state.zoom,
+            transform and ("scale = " .. tostring(transform.scale))
+                or tostring(refused))
+
+        if transform then
+            -- The corners and the centre of what is on screen.
+            local x0, y0 = view.state.offset.x, view.state.offset.y
+            local w, h = view.visible_area.w, view.visible_area.h
+            local points = {
+                { x0, y0 }, { x0 + w, y0 }, { x0, y0 + h }, { x0 + w, y0 + h },
+                { x0 + w / 2, y0 + h / 2 },
+            }
+            local worst_in, worst_out = 0, 0
+            for i = 1, #points do
+                local sx, sy = points[i][1], points[i][2]
+                local pos = ReaderView.screenToPageTransform(view_self,
+                    { x = sx, y = sy })
+                local cx, cy = transform:toCanvas(sx, sy)
+                local dx = math.abs(cx - pos.x)
+                local dy = math.abs(cy - pos.y)
+                if dx > worst_in then worst_in = dx end
+                if dy > worst_in then worst_in = dy end
+
+                -- And back, against the method KOReader maps highlights with.
+                -- It floors and ceils on the way out, so a pixel is the
+                -- tolerance it can hold.
+                local back = ReaderView.pageToScreenTransform(view_self, 1,
+                    Geom:new{ x = pos.x, y = pos.y, w = 1, h = 1 })
+                if back then
+                    local bx, by = transform:toScreen(pos.x, pos.y)
+                    local ox = math.abs(bx - back.x)
+                    local oy = math.abs(by - back.y)
+                    if ox > worst_out then worst_out = ox end
+                    if oy > worst_out then worst_out = oy end
+                end
+            end
+            claim("page ink: toCanvas is ReaderView:screenToPageTransform",
+                true, worst_in <= 1,
+                string.format("worst disagreement %.6f page units", worst_in))
+            claim("page ink: toScreen is ReaderView:pageToScreenTransform",
+                true, worst_out <= 1,
+                string.format("worst disagreement %.6f px", worst_out))
+        end
+
+        -- The other half of that method's contract, and the reason a page-ink
+        -- overlay cannot simply ask KOReader where the page is: off the
+        -- visible area it answers nothing at all.
+        local off_page = ReaderView.pageToScreenTransform(view_self, 1,
+            Geom:new{ x = 1e6, y = 1e6, w = 10, h = 10 })
+        claim("page ink: pageToScreenTransform answers nil off the visible area",
+            true, off_page == nil, tostring(off_page))
+
+        -- Why `state.rotation ~= 0` is refused rather than mapped: a rotation
+        -- swaps the page's axes, which the stored surface geometry cannot
+        -- describe (ADR-38). Nothing emits `RotationUpdate` -- the module that
+        -- used to is gone -- so the refusal is a guard, not a mode.
+        local turned = native and fixed:transformRect(
+            Geom:new{ x = 0, y = 0, w = native.w, h = native.h }, 1, 90) or nil
+        claim("page ink: a 90 degree rotation swaps the page's axes",
+            native ~= nil,
+            turned ~= nil and math.abs(turned.w - native.h) <= 1
+              and math.abs(turned.h - native.w) <= 1,
+            turned and (tostring(turned.w) .. " x " .. tostring(turned.h)) or "nil")
+
+        local has_rotation_module = pcall(require, "apps/reader/modules/readerrotation")
+        claim("page ink: ReaderRotation is gone from this runtime",
+            true, has_rotation_module == false,
+            "nothing left to emit RotationUpdate")
+
+        claim("page ink: KoptInterface:is_optimizing_page is the optimisation gate",
+            true, type(KoptInterface.is_optimizing_page) == "function")
+
+        fixed:close()
     end
 end
 

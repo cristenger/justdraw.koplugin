@@ -812,6 +812,93 @@ function support.newDocument(opts)
     return doc
 end
 
+-- ------------------------------------------------------- fake reader view
+
+--[[--
+The live fixed-layout reader, as `ink_document_transform` reads it.
+
+Only the fields the page-ink transform touches are modelled, and they are the
+fields KOReader's own `getSinglePagePosition` reads: `state.offset`,
+`state.zoom`, `visible_area` and the view's own `dimen`. A ReaderView carries
+another forty; putting them here would make this look like something it can be
+trusted to be.
+
+Two defaults model KOReader rather than convenience, and `tests/conformance.lua`
+states both against the real thing: the native page size is a non-integer pair
+of points, because MuPDF measures in 1/72 in and does not round, so a surface
+geometry has to be rounded up somewhere; and `state.offset` is a table only
+after a `recalculate` has run -- `ReaderView:init` leaves it nil, which is the
+state a view event can find the reader in.
+
+Anywhere inside `state`, `visible_area` or `dimen`, a `false` means "this field
+is not there": `state = { offset = false }` is the view before its first
+recalculate. The same goes for `configurable`, `koptinterface`, `native` and
+`document` themselves.
+
+opts.paging         ui.paging (default true)
+opts.rolling        ui.rolling (default false)
+opts.page_scroll    view.page_scroll (default false)
+opts.state          over { page = 1, zoom = 2, rotation = 0,
+                    offset = { x = 0, y = 0 } }
+opts.visible_area   over { x = 0, y = 0, w = 1000, h = 1400 }
+opts.dimen          over { x = 0, y = 0, w = 1000, h = 1400 }
+opts.provider       document.provider (default "mupdf")
+opts.configurable   document.configurable (default {})
+opts.koptinterface  document.koptinterface (default absent)
+opts.native         what getNativePageDimensions answers
+                    (default { w = 595.276, h = 841.89 }; false answers nil)
+opts.document       the whole document, or false for a view without one
+]]
+local function viewField(defaults, over)
+    if over == false then return nil end
+    local out = {}
+    for k, v in pairs(defaults) do out[k] = v end
+    if type(over) == "table" then
+        for k, v in pairs(over) do
+            if v == false then out[k] = nil else out[k] = v end
+        end
+    end
+    return out
+end
+
+function support.newReaderView(opts)
+    opts = opts or {}
+    local document = opts.document
+    if document == nil then
+        local native = opts.native
+        if native == nil then native = { w = 595.276, h = 841.89 } end
+        document = {
+            provider = opts.provider or "mupdf",
+            configurable = opts.configurable == nil and {}
+                or (opts.configurable or nil),
+            koptinterface = opts.koptinterface or nil,
+            getNativePageDimensions = function(_, page)
+                if not native or not page then return nil end
+                return { w = native.w, h = native.h }
+            end,
+        }
+    elseif document == false then
+        document = nil
+    end
+
+    local view = {
+        document = document,
+        page_scroll = opts.page_scroll == true,
+        state = viewField(
+            { page = 1, zoom = 2, rotation = 0, offset = { x = 0, y = 0 } },
+            opts.state),
+        visible_area = viewField({ x = 0, y = 0, w = 1000, h = 1400 },
+            opts.visible_area),
+        dimen = viewField({ x = 0, y = 0, w = 1000, h = 1400 }, opts.dimen),
+    }
+    local ui = {
+        paging = opts.paging ~= false,
+        rolling = opts.rolling == true,
+        document = document,
+    }
+    return { ui = ui, view = view }
+end
+
 -- ------------------------------------------------------- fake canvas store
 
 --[[--

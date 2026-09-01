@@ -2297,6 +2297,7 @@ for _, spec in ipairs({
     "canvas_repository_spec",
     "canvas_anchor_spec",
     "canvas_geometry_spec",
+    "document_transform_spec",
     "canvas_cache_spec",
     "canvas_overlay_spec",
     "canvas_router_spec",
