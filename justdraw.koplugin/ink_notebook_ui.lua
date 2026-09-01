@@ -179,6 +179,8 @@ function NotebookUI:openNotebook(item)
         get_pen_style = function()
             return Style.resolve(self.plugin.pen_style, nil, true)
         end,
+        set_pen_style = function(v) return self.plugin:setPenStyle(v) end,
+        get_raw_pen_style = function() return self.plugin.pen_style end,
         get_live_fast = function() return self.plugin.live_fast end,
         get_rail_side = function() return self.plugin.notebook_rail_side end,
         show_stylus_diagnostics = function()

@@ -2532,6 +2532,15 @@ function JustDraw:penItem(text, w)
     }
 end
 
+function JustDraw:styleItem(text, value)
+    return {
+        text = text,
+        checked_func = function() return self.pen_style == value end,
+        radio = true,
+        callback = function() self:setPenStyle(value) end,
+    }
+end
+
 function JustDraw:setBarSide(side)
     if self.bar_side == side then return end
     self.bar_side = side
@@ -2591,6 +2600,23 @@ function JustDraw:showBarChoices(title, options)
     return self:showReaderModal(dialog)
 end
 
+function JustDraw:showPenStyleDialog()
+    local function style(text, value, enabled)
+        return {
+            text = text,
+            enabled = enabled ~= false,
+            checked_func = function() return self.pen_style == value end,
+            callback = function() self:setPenStyle(value) end,
+        }
+    end
+    return self:showBarChoices(_("Pen style"), {
+        style(_("Ink pen"), Style.PEN),
+        style(_("Graphite"), Style.GRAPHITE),
+        -- The book's page is not ours to fill; the marker needs a sheet.
+        style(_("Marker"), Style.MARKER, self:markerAvailable()),
+    })
+end
+
 function JustDraw:showPenWidthDialog()
     local function width(text, w)
         return {
@@ -2646,6 +2672,8 @@ function JustDraw:showBarMenu()
         end
     end
     local rows = {
+        { { text = _("Pen style"),
+            callback = pick(function() self:showPenStyleDialog() end) } },
         { { text = _("Pen width"),
             callback = pick(function() self:showPenWidthDialog() end) } },
         { { text = _("Input mode"),
@@ -3109,6 +3137,9 @@ function JustDraw:addToMainMenu(menu_items)
         }
         return
     end
+    -- The book's page is not ours to fill; the marker needs a sheet.
+    local marker_style_item = self:styleItem(_("Marker"), Style.MARKER)
+    marker_style_item.enabled_func = function() return self:markerAvailable() end
     menu_items.justdraw = {
         text = _("JustDraw"),
         sorting_hint = "tools",
@@ -3150,6 +3181,14 @@ function JustDraw:addToMainMenu(menu_items)
                     self:inputModeItem(_("Automatic"), "auto"),
                     self:inputModeItem(_("Stylus"), "stylus"),
                     self:inputModeItem(_("Finger"), "finger"),
+                },
+            },
+            {
+                text = _("Pen style"),
+                sub_item_table = {
+                    self:styleItem(_("Ink pen"), Style.PEN),
+                    self:styleItem(_("Graphite"), Style.GRAPHITE),
+                    marker_style_item,
                 },
             },
             {

@@ -26,6 +26,7 @@ local ExportDialog = require("ink_export_dialog")
 local ExportSource = require("ink_export_source")
 local NotebookLayout = require("ink_notebook_layout")
 local Stack = require("ink_stack")
+local Style = require("ink_style")
 
 local Screen = Device.screen
 
@@ -62,6 +63,8 @@ function Editor:init()
     self.set_input_mode = self.set_input_mode or function() return true end
     self.get_pen_width = self.get_pen_width or function() return 4 end
     self.set_pen_width = self.set_pen_width or function() return true end
+    self.get_raw_pen_style = self.get_raw_pen_style or function() return Style.PEN end
+    self.set_pen_style = self.set_pen_style or function() return true end
     self.get_rail_side = self.get_rail_side or function() return "right" end
     self.get_live_fast = self.get_live_fast or function() return true end
     self.has_active_contact = self.has_active_contact or function() return false end
@@ -1527,6 +1530,9 @@ function Editor:showMore()
             {{ text = _("Input mode"), callback = function()
                 self:_closeModal(dialog); self:showInputMode()
             end }},
+            {{ text = _("Pen style"), enabled = writable, callback = function()
+                self:_closeModal(dialog); self:_showPenStyleDialog()
+            end }},
             {{ text = _("Pen width"), callback = function()
                 self:_closeModal(dialog); self:showPenWidth()
             end }},
@@ -1637,6 +1643,30 @@ function Editor:showInputMode()
                 callback = function() choose("stylus") end }},
             {{ text = _("Finger"), checked_func = function() return current == "finger" end,
                 callback = function() choose("finger") end }},
+            {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }},
+        },
+    }
+    return self:showModalSafely(dialog)
+end
+
+-- Marker is always enabled here: unlike the reader bar, this surface is
+-- always the notebook's own page, so it is always the plugin's to fill.
+function Editor:_showPenStyleDialog()
+    local dialog
+    local function choose(value)
+        self.set_pen_style(value)
+        self:_closeModal(dialog)
+    end
+    local current = self.get_raw_pen_style()
+    dialog = ButtonDialog:new{
+        title = _("Pen style"),
+        buttons = {
+            {{ text = _("Ink pen"), checked_func = function() return current == Style.PEN end,
+                callback = function() choose(Style.PEN) end }},
+            {{ text = _("Graphite"), checked_func = function() return current == Style.GRAPHITE end,
+                callback = function() choose(Style.GRAPHITE) end }},
+            {{ text = _("Marker"), checked_func = function() return current == Style.MARKER end,
+                callback = function() choose(Style.MARKER) end }},
             {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }},
         },
     }

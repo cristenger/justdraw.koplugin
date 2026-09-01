@@ -2188,6 +2188,18 @@ t:case("closing the settings dialog twice is a no-op (ADR-28)", function()
         "the second is refused rather than repainted")
 end)
 
+t:case("the More dialog offers Pen style with the marker gated on a sheet", function()
+    local p, bar = realBarPlugin()
+    bar.more_btn.callback()
+    dialogButton(env.dialogs[#env.dialogs], "Pen style").callback()
+    local styles = env.dialogs[#env.dialogs]
+    t:eq(dialogButton(styles, "Ink pen").checked_func(), true, "pen is current")
+    t:eq(dialogButton(styles, "Marker").enabled, false,
+        "no sheet under the reader: marker has nowhere honest to draw")
+    dialogButton(styles, "Graphite").callback()
+    t:eq(p.pen_style, 65, "the choice reached the plugin")
+end)
+
 -- =====================================================================
 -- Canvas suites
 --

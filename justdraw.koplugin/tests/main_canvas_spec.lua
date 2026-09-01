@@ -321,6 +321,26 @@ return function(ctx)
         t:eq(p.canvas_open, false, "Close sheet puts the sheet away")
     end)
 
+    t:case("Pen style's Marker is available with a sheet open", function()
+        local p = canvasPlugin()
+        p:openCanvasHere()
+        local function row(dialog, text)
+            for _, r in ipairs(dialog and dialog.buttons or {}) do
+                for _, btn in ipairs(r) do
+                    if btn.text == text then return btn end
+                end
+            end
+            return nil
+        end
+        p.bar.more_btn.callback()
+        row(env.dialogs[#env.dialogs], "Pen style").callback()
+        local styles = env.dialogs[#env.dialogs]
+        t:eq(row(styles, "Marker").enabled, true,
+            "a sheet is ours to fill, so the marker has somewhere honest to draw")
+        row(styles, "Marker").callback()
+        t:eq(p.pen_style, 3, "the choice reached the plugin")
+    end)
+
     t:case("a failed Hide keeps the sheet and its retry controls alive", function()
         local p, store = canvasPlugin()
         openForPen(p)

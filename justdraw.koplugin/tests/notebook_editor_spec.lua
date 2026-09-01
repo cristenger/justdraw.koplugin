@@ -56,6 +56,8 @@ return function(ctx)
             set_rail_side = function() end,
             get_eraser = function() return false end,
             set_eraser = function() end,
+            get_raw_pen_style = overrides.get_raw_pen_style,
+            set_pen_style = overrides.set_pen_style,
             get_live_fast = function() return runtime.live_fast end,
             has_active_contact = function() return runtime.active_contact end,
             quality_schedule_in = function(delay, action)
@@ -141,6 +143,42 @@ return function(ctx)
         diagnostic.callback()
         t:eq(calls, 1, "shared diagnostics callback invoked once")
         t:eq(uncovered, true, "More closed before the privacy flow begins")
+    end)
+
+    t:case("More offers Pen style, and picks reach the injected seam", function()
+        ctx.reset()
+        local picked
+        local editor = newEditor{
+            get_raw_pen_style = function() return 1 end,
+            set_pen_style = function(value) picked = value end,
+        }
+        editor:onStateChanged()
+        local more = editor:showMore()
+        local entry
+        for i = 1, #more.buttons do
+            local button = more.buttons[i][1]
+            if button.text == "Pen style" then entry = button end
+        end
+        t:check(entry ~= nil, "Pen style is reachable from More")
+        t:eq(entry.enabled, true, "and enabled on a writable notebook")
+        entry.callback()
+        local chooser = editor.modal_widget
+        t:check(chooser ~= nil and chooser ~= more, "More closed before it opened")
+
+        local labels = {}
+        for i = 1, #chooser.buttons do
+            labels[#labels + 1] = chooser.buttons[i][1].text
+        end
+        t:eq(table.concat(labels, "|"), "Ink pen|Graphite|Marker|Close",
+            "every style, in English")
+
+        for i = 1, #chooser.buttons do
+            if chooser.buttons[i][1].text == "Marker" then
+                chooser.buttons[i][1].callback()
+            end
+        end
+        t:eq(picked, 3, "the choice reaches the injected seam")
+        t:eq(editor.modal_widget, nil, "and the chooser closed")
     end)
 
     --[[--
