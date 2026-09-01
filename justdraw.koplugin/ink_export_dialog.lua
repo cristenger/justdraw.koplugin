@@ -335,7 +335,7 @@ function Dialog.run(opts)
     end
 
     --[[--
-    The one question asked before anything is read.
+    The question about room on the card, asked before anything is read.
 
     It goes in front of the progress modal, because two stacked modals leave
     the reader unable to tell which buttons belong to which; and in front of
@@ -346,35 +346,66 @@ function Dialog.run(opts)
     be wrong about an unusual mount, and being locked out of an export that
     would in fact have fitted is a worse failure than being asked.
     ]]
-    local available = Export.availableSpace(opts.dir, opts.disk)
-    local needed
-    if built.pixels then
-        needed = Export.forecast{
-            format = opts.format, pixels = built.pixels,
-            files = (opts.format == "pdf") and 1 or #built.items,
-        }
-    end
-    local tight = available ~= nil
-        and ((needed ~= nil and available < needed) or available < Export.LOW_WATER)
-    if not tight then return proceed() end
+    local function askSpace()
+        local available = Export.availableSpace(opts.dir, opts.disk)
+        local needed
+        if built.pixels then
+            needed = Export.forecast{
+                format = opts.format, pixels = built.pixels,
+                files = (opts.format == "pdf") and 1 or #built.items,
+            }
+        end
+        local tight = available ~= nil
+            and ((needed ~= nil and available < needed) or available < Export.LOW_WATER)
+        if not tight then return proceed() end
 
-    local friendly = require("util").getFriendlySize
+        local friendly = require("util").getFriendlySize
+        local box = ConfirmBox:new{
+            text = needed
+                and T(_("This export may need about %1, and only %2 is free in that folder.\n\nExport anyway?"),
+                    friendly(needed), friendly(available))
+                or T(_("Only %1 is free in that folder.\n\nExport anyway?"),
+                    friendly(available)),
+            ok_text = _("Export"),
+            -- The ConfirmBox closes itself (ADR-28); this only releases what
+            -- the source opened, since no job exists yet to release it.
+            ok_callback = function() proceed() end,
+            cancel_callback = function() abandon() end,
+        }
+        if not opts.show_modal(box) then abandon("contact_active") end
+        -- Not a failure: the run continues from the reader's answer. Callers
+        -- use the return only to record the job, and there is no job yet.
+        return nil, "space_question"
+    end
+
+    --[[--
+    What the surface wants said before the export reads anything.
+
+    Only `build` knows that a run will come out incomplete -- ink it cannot
+    reach, a page it cannot place -- and a reader who finds that out from the
+    file afterwards has been given a worse answer than one who was asked. So
+    the warning is the surface's own sentence, shown here rather than composed
+    here.
+
+    It is asked *before* the space question and never beside it: the space
+    box is only built from inside this one's `ok_callback`, so the two are
+    never on the stack together. Declining costs nothing -- nothing has been
+    read, no job exists, and there is no file to take back -- so it says
+    nothing either, beyond releasing what the source opened.
+    ]]
+    local warning = built.confirm_warning
+    if type(warning) ~= "string" or warning == "" then return askSpace() end
     local box = ConfirmBox:new{
-        text = needed
-            and T(_("This export may need about %1, and only %2 is free in that folder.\n\nExport anyway?"),
-                friendly(needed), friendly(available))
-            or T(_("Only %1 is free in that folder.\n\nExport anyway?"),
-                friendly(available)),
+        text = warning,
         ok_text = _("Export"),
-        -- The ConfirmBox closes itself (ADR-28); this only releases what the
-        -- source opened, since no job exists yet to release it.
-        ok_callback = function() proceed() end,
+        -- The ConfirmBox closes itself (ADR-28): neither answer may close it
+        -- again, and neither one needs to.
+        ok_callback = function() askSpace() end,
         cancel_callback = function() abandon() end,
     }
     if not opts.show_modal(box) then abandon("contact_active") end
-    -- Not a failure: the run continues from the reader's answer. Callers use
-    -- the return only to record the job, and there is no job yet.
-    return nil, "space_question"
+    -- A question, not a failure, exactly as for the space question above.
+    return nil, "confirm_warning"
 end
 
 -- ------------------------------------------------------------- the widget
@@ -383,7 +414,8 @@ end
   opts.title        what is being exported, for the dialog's heading
   opts.stem         proposed file name; a string, or function(scope) -> string
   opts.scopes       { { value, label } } -- omitted or single means no choice
-  opts.build        function(scope) -> { items, render, flush, title, finish }
+  opts.build        function(scope) -> { items, render, flush, title, finish,
+                                        confirm_warning }
   opts.settings     where the format and folder are remembered
   opts.show_modal / opts.close_modal / opts.notify   host seams
 ]]

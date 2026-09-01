@@ -491,6 +491,11 @@ return function(ctx)
     --- One run with a controllable amount of free space.
     local function runWithSpace(space, extra)
         extra = extra or {}
+        -- One export at a time is a production guarantee, and a case above
+        -- deliberately leaves its job running to prove Cancel reaches it. End
+        -- it here, exactly as closing a document does, or the next run is
+        -- refused with `export_busy` and proves nothing about the question.
+        if Export.isRunning() then Export.cancelRunning() end
         local fs = support.newExportFs{ dirs = { [DIR] = true } }
         local sched = support.newScheduler()
         local modals, closed, said = {}, {}, nil
@@ -498,6 +503,7 @@ return function(ctx)
         local built = {
             items = extra.items or { {} },
             pixels = extra.pixels,
+            confirm_warning = extra.confirm_warning,
             render = function(item, index, done)
                 rendered = rendered + 1
                 local bb = support.newBlitbuffer(2, 2)
@@ -506,7 +512,7 @@ return function(ctx)
             end,
             finish = function(result) finished[#finished + 1] = result or false end,
         }
-        Dialog.run{
+        local job, err = Dialog.run{
             build = function() return built end,
             notify = function(text) said = text end,
             show_modal = function(w)
@@ -522,7 +528,8 @@ return function(ctx)
         }
         return { fs = fs, sched = sched, modals = modals, closed = closed,
             finished = finished, said = function() return said end,
-            rendered = function() return rendered end }
+            rendered = function() return rendered end,
+            job = job, err = err }
     end
 
     t:case("plenty of room asks nothing and exports", function()
@@ -607,6 +614,98 @@ return function(ctx)
             { pixels = 200 * 1000000, refuse_modal = true })
         t:eq(r.rendered(), 0, "nothing rendered")
         t:eq(r.said(), Dialog.reason("contact_active"), "and it says why")
+    end)
+
+    -- =================================================================
+    t:describe("export / dialog / a warning before the read")
+
+    --[[--
+    A surface that knows its export will be incomplete says so first.
+
+    The question exists because the answer changes what the reader gets, not
+    because it is polite: a run that will silently leave something out is worse
+    than one that never started. So the same three properties hold as for the
+    space question -- nothing is read while it stands, declining releases what
+    the source opened and writes nothing, and a host that refuses to show it
+    must not turn the silence into an export.
+
+    The fourth property is the one that only exists once there are two
+    questions: they are asked one after the other. Two stacked ConfirmBoxes
+    leave the reader unable to tell which buttons belong to which.
+    ]]
+
+    local WARNING = "Some ink on this page cannot be exported."
+
+    local PLENTY = { available = 500 * 1024 * 1024 }
+    local TIGHT = { available = 200 * 1024 }
+
+    t:case("the warning is shown, and nothing is read while it stands", function()
+        local r = runWithSpace(PLENTY, { confirm_warning = WARNING })
+        t:eq(#r.modals, 1, "one question")
+        t:eq(r.modals[1].text, WARNING, "in the surface's own words")
+        t:check(r.modals[1].ok_callback ~= nil, "with a way to go ahead")
+        t:eq(r.err, "confirm_warning", "and the run says a question is standing")
+        t:eq(r.rendered(), 0, "nothing was rendered")
+        t:eq(r.fs.files[DIR .. "/Notebook.pdf"], nil, "nor written")
+        t:eq(#r.finished, 0, "and the source has not been let go of")
+    end)
+
+    t:case("saying yes exports, warning and all", function()
+        local r = runWithSpace(PLENTY, { confirm_warning = WARNING })
+        r.modals[1].ok_callback()
+        r.sched:drain()
+        t:check(r.fs.files[DIR .. "/Notebook.pdf"] ~= nil,
+            "the reader was warned and went ahead")
+    end)
+
+    t:case("saying no writes nothing and releases what the source opened", function()
+        local r = runWithSpace(PLENTY, { confirm_warning = WARNING })
+        r.modals[1].cancel_callback()
+        r.sched:drain()
+        t:eq(r.rendered(), 0, "nothing rendered")
+        t:eq(r.fs.files[DIR .. "/Notebook.pdf"], nil, "nothing written")
+        t:eq(#r.fs.temporaries(Export.TEMP_PREFIX), 0, "nothing left behind")
+        t:eq(#r.finished, 1, "the source was told to let go")
+        t:eq(r.finished[1], false, "with no result, because there was no job")
+        t:check(r.said() == nil, "and the reader is not told off for declining")
+        -- ADR-28: a ConfirmBox closes itself, and a second close pushes stale
+        -- pixels back at the panel. There is no progress modal here, so this
+        -- says the callback closed nothing at all.
+        t:eq(#r.closed, 0, "and nothing was closed on its behalf")
+    end)
+
+    t:case("a host that refuses the warning exports nothing and says why", function()
+        -- The editor's `show_modal` refuses while the pen is down. A warning
+        -- that never reached the screen must not become a silent export.
+        local r = runWithSpace(PLENTY,
+            { confirm_warning = WARNING, refuse_modal = true })
+        t:eq(r.rendered(), 0, "nothing rendered")
+        t:eq(r.fs.files[DIR .. "/Notebook.pdf"], nil, "nothing written")
+        t:eq(r.said(), Dialog.reason("contact_active"), "and it says why")
+        t:eq(#r.finished, 1, "the source was released")
+    end)
+
+    t:case("the warning and the space question are asked one at a time", function()
+        local r = runWithSpace(TIGHT,
+            { confirm_warning = WARNING, pixels = 200 * 1000000 })
+        t:eq(#r.modals, 1, "only the warning is up")
+        t:eq(r.modals[1].text, WARNING, "and it is the warning, not the space")
+        r.modals[1].ok_callback()
+        t:eq(#r.modals, 2, "the space question follows the answer")
+        t:check(r.modals[2].text ~= WARNING, "and it is the other question")
+        t:eq(r.rendered(), 0, "still nothing read")
+        r.modals[2].ok_callback()
+        r.sched:drain()
+        t:check(r.fs.files[DIR .. "/Notebook.pdf"] ~= nil,
+            "and both answers together produce the export")
+    end)
+
+    t:case("no warning, or an empty one, changes nothing", function()
+        local r = runWithSpace(PLENTY, { confirm_warning = "" })
+        t:eq(#r.modals, 0, "an empty string is not something to say")
+        t:check(r.err == nil, "and the run took the old path")
+        r.sched:drain()
+        t:check(r.fs.files[DIR .. "/Notebook.pdf"] ~= nil, "straight to the export")
     end)
 
     -- =================================================================
