@@ -109,7 +109,7 @@ function Store:sweep(page, x0, y0, x1, y1, r)
             table.remove(list, i)
             for f = #fragments, 1, -1 do
                 local range = fragments[f]
-                local frag = { n = range.last - range.first + 1, w = s.w }
+                local frag = { n = range.last - range.first + 1, w = s.w, t = s.t }
                 local at = 0
                 for p = range.first, range.last do
                     at = at + 1
