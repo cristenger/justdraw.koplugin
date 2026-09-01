@@ -245,6 +245,40 @@ return function(ctx)
             "the reason the reader can act on")
     end)
 
+    t:case("a picked chooser row never repaints after closing its dialog", function()
+        -- The same trap the reader bar's dialogs guard against: a checked
+        -- Button refreshes its label after the callback, and these callbacks
+        -- close the dialog, so without the opt-out the dead row is stamped
+        -- over the page (ADR-35).
+        ctx.reset()
+        local editor = newEditor{
+            get_raw_pen_style = function() return 1 end,
+            set_pen_style = function() end,
+        }
+        editor:onStateChanged()
+        for _, open in ipairs({
+            { "Input mode", function() return editor:showInputMode() end },
+            { "Pen style", function() return editor:_showPenStyleDialog() end },
+            { "Pen width", function() return editor:showPenWidth() end },
+            { "Paper style", function() return editor:showPaperStyle() end },
+        }) do
+            local dlg = open[2]()
+            local checked = 0
+            for _, r in ipairs(dlg.buttons) do
+                for _, btn in ipairs(r) do
+                    if btn.checked_func then
+                        checked = checked + 1
+                        t:eq(btn.no_refresh_checkmark, true, open[1] .. " / "
+                            .. tostring(btn.text)
+                            .. " must not repaint after its dialog closes")
+                    end
+                end
+            end
+            t:check(checked >= 3, open[1] .. " offers checked rows")
+            editor:_closeModal(dlg)
+        end
+    end)
+
     t:case("a read-only notebook cannot be re-ruled", function()
         ctx.reset()
         local editor = newEditor{

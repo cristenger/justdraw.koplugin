@@ -2612,6 +2612,11 @@ function JustDraw:showBarChoices(title, options)
             text = opt.text,
             enabled = opt.enabled ~= false,
             checked_func = opt.checked_func,
+            -- The pick closes this dialog inside the button's own callback.
+            -- Without this flag Button:onTapSelectButton refreshes the checked
+            -- label after the callback and repaints the dead row over whatever
+            -- the close exposed (ADR-35).
+            no_refresh_checkmark = true,
             callback = function()
                 opt.callback()
                 self:closeReaderModal(dialog)

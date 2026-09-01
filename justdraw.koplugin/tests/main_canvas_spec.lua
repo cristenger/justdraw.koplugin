@@ -342,6 +342,36 @@ return function(ctx)
         t:eq(p.pen_style, 3, "the choice reached the plugin")
     end)
 
+    t:case("a picked choice row never repaints after closing its dialog", function()
+        -- Button:onTapSelectButton refreshes a checked button's label AFTER
+        -- the callback ran; when the callback closed the dialog, that repaint
+        -- stamps the dead row over the panel (the device photo of 2026-09-01:
+        -- "Graphite ✓" stuck mid-sheet, clipping the toolbar). Rows that close
+        -- on pick must carry the upstream opt-out.
+        local p = canvasPlugin()
+        p:openCanvasHere()
+        for _, open in ipairs({
+            { "Pen style", function() return p:showPenStyleDialog() end },
+            { "Pen width", function() return p:showPenWidthDialog() end },
+            { "Input mode", function() return p:showInputModeDialog() end },
+        }) do
+            open[2]()
+            local dlg = env.dialogs[#env.dialogs]
+            local checked = 0
+            for _, r in ipairs(dlg.buttons) do
+                for _, btn in ipairs(r) do
+                    if btn.checked_func then
+                        checked = checked + 1
+                        t:eq(btn.no_refresh_checkmark, true, open[1] .. " / "
+                            .. tostring(btn.text)
+                            .. " must not repaint after its dialog closes")
+                    end
+                end
+            end
+            t:check(checked >= 3, open[1] .. " offers checked rows")
+        end
+    end)
+
     t:case("a failed Hide keeps the sheet and its retry controls alive", function()
         local p, store = canvasPlugin()
         openForPen(p)

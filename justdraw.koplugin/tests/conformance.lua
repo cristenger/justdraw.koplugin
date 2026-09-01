@@ -258,6 +258,39 @@ do
     claim("Button exposes the checkmark constant the toolbar labels borrow",
         true, type(Button.checkmark) == "string",
         tostring(Button.checkmark))
+
+    -- Button:onTapSelectButton refreshes a checked button's label AFTER the
+    -- callback ran, so a row whose callback closes its dialog repaints the
+    -- dead row over whatever the close exposed. Every close-on-pick chooser
+    -- row therefore sets `no_refresh_checkmark` (ADR-35) -- which only works
+    -- while ButtonDialog and ButtonTable still hand the field through to the
+    -- Button they build. That relay is what is pinned here.
+    local ok_dialog, dialog = pcall(function()
+        local ButtonDialog = require("ui/widget/buttondialog")
+        return ButtonDialog:new{
+            buttons = { { {
+                id = "jd_conformance_probe", text = "probe",
+                checked_func = function() return true end,
+                no_refresh_checkmark = true,
+                callback = function() end,
+            } } },
+        }
+    end)
+    if not ok_dialog then
+        claim("ButtonDialog relays no_refresh_checkmark to its Buttons",
+            false, false, "ButtonDialog cannot be built here: "
+                .. tostring(dialog))
+    else
+        local probe = dialog.buttontable
+            and dialog.buttontable.getButtonById
+            and dialog.buttontable:getButtonById("jd_conformance_probe")
+        claim("ButtonDialog relays no_refresh_checkmark to its Buttons",
+            true, probe ~= nil and probe.no_refresh_checkmark == true
+                and type(probe.onTapSelectButton) == "function",
+            probe and ("no_refresh_checkmark=" ..
+                tostring(probe.no_refresh_checkmark))
+                or "probe button not found in buttontable")
+    end
 end
 
 -- =====================================================================

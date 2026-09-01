@@ -1634,14 +1634,17 @@ function Editor:showInputMode()
         self:onStateChanged()
     end
     local current = self.get_input_mode()
+    -- Every checked row here (and in the three choosers below) closes the
+    -- dialog inside its own callback; no_refresh_checkmark keeps Button from
+    -- repainting the dead row over the page afterwards (ADR-35).
     dialog = ButtonDialog:new{
         title = _("Input mode"),
         buttons = {
-            {{ text = _("Automatic"), checked_func = function() return current == "auto" end,
+            {{ text = _("Automatic"), no_refresh_checkmark = true, checked_func = function() return current == "auto" end,
                 callback = function() choose("auto") end }},
-            {{ text = _("Stylus"), checked_func = function() return current == "stylus" end,
+            {{ text = _("Stylus"), no_refresh_checkmark = true, checked_func = function() return current == "stylus" end,
                 callback = function() choose("stylus") end }},
-            {{ text = _("Finger"), checked_func = function() return current == "finger" end,
+            {{ text = _("Finger"), no_refresh_checkmark = true, checked_func = function() return current == "finger" end,
                 callback = function() choose("finger") end }},
             {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }},
         },
@@ -1661,11 +1664,11 @@ function Editor:_showPenStyleDialog()
     dialog = ButtonDialog:new{
         title = _("Pen style"),
         buttons = {
-            {{ text = _("Ink pen"), checked_func = function() return current == Style.PEN end,
+            {{ text = _("Ink pen"), no_refresh_checkmark = true, checked_func = function() return current == Style.PEN end,
                 callback = function() choose(Style.PEN) end }},
-            {{ text = _("Graphite"), checked_func = function() return current == Style.GRAPHITE end,
+            {{ text = _("Graphite"), no_refresh_checkmark = true, checked_func = function() return current == Style.GRAPHITE end,
                 callback = function() choose(Style.GRAPHITE) end }},
-            {{ text = _("Marker"), checked_func = function() return current == Style.MARKER end,
+            {{ text = _("Marker"), no_refresh_checkmark = true, checked_func = function() return current == Style.MARKER end,
                 callback = function() choose(Style.MARKER) end }},
             {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }},
         },
@@ -1683,11 +1686,11 @@ function Editor:showPenWidth()
     dialog = ButtonDialog:new{
         title = _("Pen width"),
         buttons = {
-            {{ text = _("Thin"), checked_func = function() return current == 2 end,
+            {{ text = _("Thin"), no_refresh_checkmark = true, checked_func = function() return current == 2 end,
                 callback = function() choose(2) end }},
-            {{ text = _("Medium"), checked_func = function() return current == 4 end,
+            {{ text = _("Medium"), no_refresh_checkmark = true, checked_func = function() return current == 4 end,
                 callback = function() choose(4) end }},
-            {{ text = _("Thick"), checked_func = function() return current == 7 end,
+            {{ text = _("Thick"), no_refresh_checkmark = true, checked_func = function() return current == 7 end,
                 callback = function() choose(7) end }},
             {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }},
         },
@@ -1722,13 +1725,13 @@ function Editor:showPaperStyle()
     dialog = ButtonDialog:new{
         title = _("Paper style"),
         buttons = {
-            {{ text = _("Blank"), checked_func = function() return current == "blank" end,
+            {{ text = _("Blank"), no_refresh_checkmark = true, checked_func = function() return current == "blank" end,
                 callback = function() choose("blank") end }},
-            {{ text = _("Ruled"), checked_func = function() return current == "ruled" end,
+            {{ text = _("Ruled"), no_refresh_checkmark = true, checked_func = function() return current == "ruled" end,
                 callback = function() choose("ruled") end }},
-            {{ text = _("Squared"), checked_func = function() return current == "grid" end,
+            {{ text = _("Squared"), no_refresh_checkmark = true, checked_func = function() return current == "grid" end,
                 callback = function() choose("grid") end }},
-            {{ text = _("Dotted"), checked_func = function() return current == "dots" end,
+            {{ text = _("Dotted"), no_refresh_checkmark = true, checked_func = function() return current == "dots" end,
                 callback = function() choose("dots") end }},
             {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }},
         },
