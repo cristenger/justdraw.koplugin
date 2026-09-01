@@ -1107,6 +1107,14 @@ function Editor:onDirty(screen_box, kind, session, transform, source_box)
         end
         return
     end
+    if live_kind and live_fast then
+        -- Gray live ink: ui renders gray and does not fence while the pen
+        -- reports, unlike partial (REAGL), whose per-segment completion wait
+        -- overflowed evdev on device (ADR-26/36). No DU debt, so no quality
+        -- bookkeeping either.
+        UIManager:setDirty(nil, "ui", exact_box)
+        return
+    end
 
     local refresh_box = exact_box
     if not live_kind and self:_qualityHasUnion()

@@ -458,6 +458,11 @@ function support.newScreen(opts)
     function screen:refreshPartial(x, y, w, h)
         self.refreshes[#self.refreshes + 1] = { "partial", x, y, w, h }
     end
+    -- The non-fenced grayscale mode live gray ink rides (ADR-36); the real
+    -- method's existence is stated in conformance.lua.
+    function screen:refreshUI(x, y, w, h)
+        self.refreshes[#self.refreshes + 1] = { "ui", x, y, w, h }
+    end
     if opts.no_touch_rotation ~= true then
         function screen:getTouchRotation()
             return self.touch_rotation or self.rotation

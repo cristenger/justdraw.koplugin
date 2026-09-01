@@ -65,6 +65,15 @@ claim("GestureDetector exposes getContact and dropContact",
 claim("Screen:getTouchRotation exists",
     true, type(Device.screen.getTouchRotation) == "function")
 
+-- tests/support.lua's screen fakes all three refresh entry points the ink
+-- paths choose between: fast (DU) for black live ink, ui for gray live ink
+-- (grayscale with no completion fence under the pen -- ADR-26/36), partial
+-- for the quality passes. If one disappears upstream the fake is lying.
+claim("Screen exposes refreshFast, refreshUI and refreshPartial",
+    true, type(Device.screen.refreshFast) == "function"
+      and type(Device.screen.refreshUI) == "function"
+      and type(Device.screen.refreshPartial) == "function")
+
 claim("Input exports the TOOL_TYPE_* constants",
     Input.TOOL_TYPE_PEN ~= nil,
     Input.TOOL_TYPE_FINGER == 0 and Input.TOOL_TYPE_PEN == 1

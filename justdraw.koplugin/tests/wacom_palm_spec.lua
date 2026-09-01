@@ -848,11 +848,12 @@ return function(ctx)
         t:eq(p.n_contacts, 0, "and so is the touch bookkeeping")
     end)
 
-    t:case("gray direct ink refreshes ride a grayscale pass, never DU", function()
-        -- Same rule as the sheet (ADR-36): the fast refresh is forced
-        -- monochrome on device and drops gray, so a graphite stroke's own
-        -- boxes go partial. Direct ink has no raster to remember gray
-        -- content, so the decision is per stroke, by its style.
+    t:case("gray direct ink refreshes ride ui, never DU nor a fenced partial", function()
+        -- Same rule as the sheet (ADR-36): DU drops gray, and partial is
+        -- REAGL whose completion fence with the pen reporting overflows
+        -- evdev (crash (7).log, SYN_DROPPED) -- so gray live boxes use ui.
+        -- Direct ink has no raster to remember gray content, so the
+        -- decision is per stroke, by its style.
         local p = penPlugin()
         local function kindsAfter(mark)
             local kinds = {}
@@ -868,22 +869,24 @@ return function(ctx)
         p:endStroke()
         t:check(kindsAfter(mark):find("fast", 1, true) ~= nil,
             "pen ink refreshes fast")
-        t:check(kindsAfter(mark):find("partial", 1, true) == nil,
+        t:check(kindsAfter(mark):find("ui", 1, true) == nil,
             "and needs no grayscale pass")
 
         mark = #Device.screen.refreshes
         p:startStroke(100, 350, 65)
         p:addPoint(140, 350)
         p:endStroke()
-        t:check(kindsAfter(mark):find("partial", 1, true) ~= nil,
-            "a graphite segment refreshes through a grayscale pass")
+        t:check(kindsAfter(mark):find("ui", 1, true) ~= nil,
+            "a graphite segment refreshes through ui")
         t:check(kindsAfter(mark):find("fast", 1, true) == nil,
-            "and never through DU, which would drop it")
+            "never through DU, which would drop it")
+        t:check(kindsAfter(mark):find("partial", 1, true) == nil,
+            "and never through partial, whose fence drops input under the pen")
 
         mark = #Device.screen.refreshes
         p:startStroke(200, 300, 65)
         p:endStroke()
-        t:check(kindsAfter(mark):find("partial", 1, true) ~= nil,
+        t:check(kindsAfter(mark):find("ui", 1, true) ~= nil,
             "a graphite dot painted at the lift rides the same pass")
     end)
 

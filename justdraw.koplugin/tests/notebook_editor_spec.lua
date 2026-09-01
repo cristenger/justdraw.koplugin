@@ -748,11 +748,12 @@ return function(ctx)
         t:eq(cleanup[3].h, 50, "union spans both segments vertically")
     end)
 
-    t:case("gray ink on the page leaves the fast path", function()
-        -- The fast refresh is forced monochrome on device and drops gray, so
-        -- a page holding graphite/marker refreshes live ink through the
-        -- grayscale pass instead (ADR-36). That pass leaves no DU debt, so
-        -- no quality cleanup is armed for it.
+    t:case("gray ink on the page leaves the fast path for ui", function()
+        -- The fast refresh is forced monochrome on device and drops gray
+        -- (ADR-36) -- and partial is REAGL, whose completion fence with the
+        -- pen reporting overflows evdev (crash (7).log, SYN_DROPPED). Gray
+        -- live ink therefore rides ui: grayscale, no fence, and no DU debt,
+        -- so no quality cleanup is armed for it.
         ctx.reset()
         local Geom = require("ui/geometry")
         local transform = {}
@@ -770,7 +771,7 @@ return function(ctx)
         local refresh = ctx.env.UIManager.dirty[#ctx.env.UIManager.dirty]
         t:eq(#ctx.env.UIManager.dirty, before + 1, "the segment still refreshes")
         t:eq(refresh[1], nil, "editor is not marked for repaint")
-        t:eq(refresh[2], "partial", "through the grayscale pass, not DU")
+        t:eq(refresh[2], "ui", "through ui: grayscale with no fence under the pen")
         editor:onEditChanged(session)
         t:eq(scheduler:pending(), 0, "no quality cleanup is armed: no DU debt")
     end)

@@ -664,11 +664,13 @@ return function(ctx)
             "fallback coverage is copied and refreshed")
     end)
 
-    t:case("gray ink refreshes ride a grayscale pass, never DU", function()
-        -- On device the fast refresh is forced monochrome and drops gray, so
-        -- graphite/marker ink stayed invisible until an unrelated repaint
-        -- (ADR-36). Once the sheet holds gray ink, every box may cross it,
-        -- so everything downgrades to partial -- eraser repaints included.
+    t:case("gray ink refreshes ride ui: grayscale, and no fence under the pen", function()
+        -- On device the fast refresh is forced monochrome and drops gray
+        -- (ADR-36) -- but partial is REAGL, whose completion fence with the
+        -- pen reporting overflowed evdev and dropped input (crash (7).log,
+        -- SYN_DROPPED). Live boxes over gray ink must use ui: it renders
+        -- gray AND does not block while the pen reports (ADR-26). Once the
+        -- sheet holds gray ink every box may cross it, eraser included.
         local p = canvasPlugin()
         openForPen(p)
         local cache = p.session:cache()
@@ -686,7 +688,7 @@ return function(ctx)
         penLift(p, SHEET.x + 40, SHEET.y)
         t:check(kindsAfter(mark):find("fast", 1, true) ~= nil,
             "pen ink on a clean sheet refreshes fast")
-        t:check(kindsAfter(mark):find("partial", 1, true) == nil,
+        t:check(kindsAfter(mark):find("ui", 1, true) == nil,
             "and needs no grayscale pass")
 
         p:setPenStyle(65)
@@ -694,10 +696,12 @@ return function(ctx)
         penDown(p, SHEET.x, SHEET.y + 40)
         penFrame(p, SHEET.x + 40, SHEET.y + 40)
         penLift(p, SHEET.x + 40, SHEET.y + 40)
-        t:check(kindsAfter(mark):find("partial", 1, true) ~= nil,
-            "graphite refreshes through a grayscale pass")
+        t:check(kindsAfter(mark):find("ui", 1, true) ~= nil,
+            "graphite refreshes through ui")
         t:check(kindsAfter(mark):find("fast", 1, true) == nil,
-            "and never through DU, which would drop it")
+            "never through DU, which would drop it")
+        t:check(kindsAfter(mark):find("partial", 1, true) == nil,
+            "and never through partial, whose fence drops input under the pen")
         t:eq(cache:hasGrayInk(), true, "the sheet now holds gray ink")
 
         p:setPenStyle(1)
@@ -705,8 +709,9 @@ return function(ctx)
         penDown(p, SHEET.x, SHEET.y)
         penFrame(p, SHEET.x + 40, SHEET.y)
         penLift(p, SHEET.x + 40, SHEET.y)
-        t:check(kindsAfter(mark):find("fast", 1, true) == nil,
-            "a sheet holding gray ink refreshes even pen boxes partial")
+        t:check(kindsAfter(mark):find("fast", 1, true) == nil
+            and kindsAfter(mark):find("partial", 1, true) == nil,
+            "a sheet holding gray ink refreshes even pen boxes through ui")
 
         p:setEraser(true)
         mark = #Device.screen.refreshes
@@ -714,8 +719,9 @@ return function(ctx)
         penFrame(p, SHEET.x + 20, SHEET.y + 40)
         penLift(p, SHEET.x + 20, SHEET.y + 40)
         t:check(#Device.screen.refreshes > mark, "the eraser repainted")
-        t:check(kindsAfter(mark):find("fast", 1, true) == nil,
-            "eraser repaints over gray ink ride the grayscale pass too")
+        t:check(kindsAfter(mark):find("fast", 1, true) == nil
+            and kindsAfter(mark):find("partial", 1, true) == nil,
+            "eraser repaints over gray ink ride ui too")
     end)
 
     t:case("canvas fallback repaint waits until a modal uncovers the overlay", function()

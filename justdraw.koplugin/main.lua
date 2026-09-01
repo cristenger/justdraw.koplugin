@@ -2478,8 +2478,9 @@ end
 
 --- Refresh the half-open coverage returned by InkRender, clamped to screen.
 --- `grayscale` overrides the fast path: the device's fast refresh is forced
---- monochrome and drops gray ink, so any box that may hold gray content must
---- ride a grayscale pass instead (ADR-36).
+--- monochrome and drops gray ink. The grayscale pass is `ui`, never
+--- `partial` -- partial is REAGL, and its completion fence with the pen
+--- reporting overflows evdev and drops input (ADR-26/36, crash (7).log).
 function JustDraw:refreshBox(left, top, right, bottom, grayscale)
     left, top, right, bottom = tonumber(left), tonumber(top),
         tonumber(right), tonumber(bottom)
@@ -2501,7 +2502,9 @@ function JustDraw:refreshBox(left, top, right, bottom, grayscale)
     local w, h = edge_x - x, edge_y - y
     if w <= 0 or h <= 0 then return end
 
-    if self.live_fast and not grayscale then
+    if grayscale then
+        Screen:refreshUI(x, y, w, h)
+    elseif self.live_fast then
         Screen:refreshFast(x, y, w, h)
     else
         Screen:refreshPartial(x, y, w, h)
