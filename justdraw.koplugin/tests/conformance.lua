@@ -261,6 +261,34 @@ do
 end
 
 -- =====================================================================
+-- SQLite rowid reuse, against the real driver
+--
+-- `id INTEGER PRIMARY KEY` without AUTOINCREMENT assigns max(rowid)+1 over
+-- the rows that exist NOW, so deleting the newest stroke frees its id for
+-- the very next insert. tests/support.lua's canvas store models exactly
+-- that, and the erase LRU keys on session meta tokens because of it; if the
+-- driver ever stopped reusing ids, the fake would be stricter than reality,
+-- and if this claim is absent the fake could drift back to a monotonic
+-- counter -- which is how the reuse bug stayed invisible to the suite.
+-- =====================================================================
+do
+    local ok, sql = pcall(require, "lua-ljsqlite3/init")
+    if not ok then
+        claim("SQLite reuses the deleted maximum rowid", false, false,
+            "lua-ljsqlite3 absent in this runtime")
+    else
+        local conn = sql.open("")
+        conn:exec([[CREATE TABLE t (id INTEGER PRIMARY KEY, v);
+            INSERT INTO t (v) VALUES (1); INSERT INTO t (v) VALUES (2);
+            DELETE FROM t WHERE id = 2; INSERT INTO t (v) VALUES (3);]])
+        local max_id = tonumber(conn:rowexec("SELECT max(id) FROM t;"))
+        conn:close()
+        claim("SQLite reuses the deleted maximum rowid",
+            true, max_id == 2, "max id after delete+insert: " .. tostring(max_id))
+    end
+end
+
+-- =====================================================================
 -- Blitbuffer color constants the style table names
 --
 -- ink_style.lua maps marker and graphite onto named grays, and the fakes

@@ -2284,6 +2284,7 @@ local ctx = {
 }
 
 for _, spec in ipairs({
+    "erase_repro_spec",
     "style_spec",
     "compat_spec",
     "conformance_policy_spec",

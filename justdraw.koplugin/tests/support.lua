@@ -825,8 +825,20 @@ function support.newCanvasStore(canvases)
             list = {}
             self.strokes[canvas_id] = list
         end
-        stroke.id = stroke.id or self.next_stroke_id
-        self.next_stroke_id = math.max(self.next_stroke_id, stroke.id) + 1
+        -- SQLite semantics, not a monotonic counter: `id INTEGER PRIMARY KEY`
+        -- without AUTOINCREMENT assigns max(rowid)+1 over the rows that exist
+        -- NOW, so deleting the newest stroke frees its id for the next
+        -- insert. A fake that never reused ids hid a real id-reuse bug from
+        -- the whole suite (device log 2026-09-01, chunk_count_meta).
+        if not stroke.id then
+            local max_id = 0
+            for _, rows in pairs(self.strokes) do
+                for _, s in ipairs(rows) do
+                    if s.id > max_id then max_id = s.id end
+                end
+            end
+            stroke.id = max_id + 1
+        end
         stroke.seq = stroke.seq or (#list + 1)
         local min_x, min_y = stroke.points[1], stroke.points[2]
         local max_x, max_y = min_x, min_y

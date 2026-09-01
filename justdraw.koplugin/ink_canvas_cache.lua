@@ -114,6 +114,11 @@ function Cache.new(opts)
         state = "ready",
         load_error = nil,
         closed = false,
+        -- Session-unique meta tokens. A SQLite row id is NOT unique over
+        -- time -- `id INTEGER PRIMARY KEY` without AUTOINCREMENT reassigns
+        -- the deleted maximum -- so anything that outlives a stroke, like
+        -- the erase context's chunk LRU, must key on this instead.
+        meta_tokens = 0,
         --- Bumped by every rebuild and by close, so a batch in flight from an
         --- earlier geometry does nothing.
         generation = 0,
@@ -138,6 +143,8 @@ function Cache:open()
             self:_fail(validation_err or "stroke_metadata")
             return nil, validation_err or "stroke_metadata"
         end
+        self.meta_tokens = self.meta_tokens + 1
+        list[i].token = self.meta_tokens
         self.by_id[list[i].id] = list[i]
         last_seq = list[i].seq
     end
@@ -265,6 +272,8 @@ function Cache:addStroke(meta, points, n, opts)
         meta.points = points
         meta.n = n
     end
+    self.meta_tokens = self.meta_tokens + 1
+    meta.token = self.meta_tokens
     self.meta[#self.meta + 1] = meta
     self.by_id[meta.id] = meta
     if self.grid then self:_indexStroke(meta) end
@@ -848,7 +857,11 @@ function Cache:_boxTouches(box, min_x, min_y, max_x, max_y, pad)
 end
 
 function Cache:_readChunk(m, chunk_no, ctx, stats)
-    local key = tostring(m.id) .. ":" .. tostring(chunk_no)
+    -- Keyed by the meta's session token, never by the row id: erasing the
+    -- newest stroke frees its rowid for the very next insert, and a
+    -- gesture-long LRU keyed by id would answer for the dead stroke --
+    -- which is how a sweep used to blank the whole sheet (chunk_count_meta).
+    local key = tostring(m.token or m.id) .. ":" .. tostring(chunk_no)
     if ctx and ctx.cache[key] then
         for i = #ctx.order, 1, -1 do
             if ctx.order[i] == key then table.remove(ctx.order, i); break end
