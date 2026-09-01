@@ -2,7 +2,11 @@
 Per-page stroke storage.
 
 pages = { [page] = { stroke, stroke, ... } }
-stroke = { n = <points>, w = <width>, x1, y1, x2, y2, ... }
+stroke = { n = <points>, w = <width>, t = <style>, x1, y1, x2, y2, ... }
+
+`t` is optional: absent on a stroke written before styles existed, which
+renders as pen, and copied unchanged onto any fragment a sweep erase leaves
+behind.
 
 This table goes straight into the document sidecar, so it must stay made of
 plain numbers and plain tables.

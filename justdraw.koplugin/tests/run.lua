@@ -2217,10 +2217,26 @@ t:case("the marker toggle dispatcher action flips pen_style 1<->3", function()
     t:eq(p.pen_style, 1, "pen is the initial style")
     t:eq(p:onJustDrawMarker(), true, "the event is consumed")
     t:eq(p.pen_style, 3, "style flipped to marker")
+    t:eq(env.notifications[#env.notifications],
+        "Pen style: marker (needs a sheet here)",
+        "no sheet is open, so the notice says so")
     t:eq(p:onJustDrawMarker(), true, "a second press is harmless")
     t:eq(p.pen_style, 1, "and returns to pen")
+    t:eq(env.notifications[#env.notifications], "Pen style: ink pen",
+        "landing on pen names the pen")
     t:eq(_G.G_reader_settings.data.justdraw_pen_style, 1,
         "the pen choice persists via setPenStyle")
+end)
+
+t:case("the marker toggle names the marker plainly when a sheet is open", function()
+    reset()
+    _G.G_reader_settings.data.justdraw_pen_style = nil  -- reset to default
+    local p = newPlugin()
+    p.canvas_open = true  -- markerAvailable() reads only this flag
+    t:eq(p:onJustDrawMarker(), true, "the event is consumed")
+    t:eq(p.pen_style, 3, "style flipped to marker")
+    t:eq(env.notifications[#env.notifications], "Pen style: marker",
+        "a sheet is open, so the marker needs no caveat")
 end)
 
 t:case("the marker toggle from graphite goes to marker, not back to graphite", function()
@@ -2230,10 +2246,15 @@ t:case("the marker toggle from graphite goes to marker, not back to graphite", f
     t:eq(p.pen_style, 65, "graphite is the starting style")
     t:eq(p:onJustDrawMarker(), true, "the event is consumed")
     t:eq(p.pen_style, 3, "any non-marker style toggles TO marker")
+    t:eq(env.notifications[#env.notifications],
+        "Pen style: marker (needs a sheet here)",
+        "still no sheet open, so the notice says so")
     t:eq(_G.G_reader_settings.data.justdraw_pen_style, 3,
         "marker choice persists via setPenStyle")
     t:eq(p:onJustDrawMarker(), true, "a second press")
     t:eq(p.pen_style, 1, "returns to pen, not back to graphite")
+    t:eq(env.notifications[#env.notifications], "Pen style: ink pen",
+        "landing on pen names the pen")
 end)
 
 -- =====================================================================

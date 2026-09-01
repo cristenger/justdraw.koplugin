@@ -393,6 +393,7 @@ function Adapter:abort(session)
     self.stylus_budget_notified = false
     self.pending_domain_reason = nil
     self.pending_domain_session = nil
+    self.contact_style = nil
     self.contacts = {}
     self.contact_count = 0
     self.finger_slot = nil

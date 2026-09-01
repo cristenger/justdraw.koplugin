@@ -23,6 +23,7 @@ return function(ctx)
     local Device = ctx.Device
     local Capture = require("ink_capture")
     local Replay = require("input_replay")
+    local Style = require("ink_style")
 
     local SW, SH = Device.screen.w, Device.screen.h
 
@@ -583,11 +584,14 @@ return function(ctx)
     t:case("a sheet stroke persists its style in the tool column", function()
         local p, store = canvasPlugin()
         openForPen(p)
-        p:startCanvasStroke(100, 100, p.session:overlay().transform, 3)
+        local tr = p.session:overlay().transform
+        p:startCanvasStroke(100, 100, tr, 3)
         p:endCanvasStroke()
         env.UIManager:flush()
         local rows = store:listStrokes(store.canvases[1].id)
         t:eq(rows[1].tool, 3, "the marker style reached the repository")
+        t:eq(rows[1].width, p.pen_width * Style.widthScale(3) / tr.scale,
+            "the marker's ×3 nib is baked into the stored width")
     end)
 
     t:case("the barrel highlighter draws the marker on a sheet", function()

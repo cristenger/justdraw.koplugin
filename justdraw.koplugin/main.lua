@@ -1006,6 +1006,7 @@ function JustDraw:resetContacts()
     self.n_contacts = 0
     self.passthrough = false
     self.draw_slot = nil
+    self.contact_style = nil
     -- Callers reach this with capture released, made inert, or -- in
     -- abandonBlindContact -- still installed but with KOReader's own contacts
     -- already dropped underneath it by Input:resetState. In all three nothing
@@ -2130,6 +2131,15 @@ and graphite is re-picked from the Pen style dialog.
 ]]
 function JustDraw:onJustDrawMarker()
     self:setPenStyle(self.pen_style == Style.MARKER and Style.PEN or Style.MARKER)
+    if self.pen_style == Style.MARKER then
+        if self:markerAvailable() then
+            self:notify(_("Pen style: marker"))
+        else
+            self:notify(_("Pen style: marker (needs a sheet here)"))
+        end
+    else
+        self:notify(_("Pen style: ink pen"))
+    end
     return true
 end
 
@@ -2527,7 +2537,6 @@ function JustDraw:setPenStyle(style)
     style = Style.normalize(style)
     self.pen_style = style
     Compat.saveSetting(G_reader_settings, "pen_style", style)
-    if self.bar then self.bar:update(true) end
 end
 
 --- Where the marker may draw: a surface this plugin owns end to end. The
