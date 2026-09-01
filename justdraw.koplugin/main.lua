@@ -353,10 +353,15 @@ function JustDraw:onDispatcherRegisterActions()
         category = "none", event = "JustDrawNotebooks", general = true,
         title = _("JustDraw: open notebooks"),
     })
-    -- Also post-rename, so no legacy identity -- but `reader`, not `general`:
-    -- a sheet exists only over a document.
+    -- Also post-rename, so no legacy identity. A sheet exists only over a
+    -- document, and this was `reader` at first for that reason -- but on
+    -- device that buried the action at the bottom of the gesture manager's
+    -- Reader section while the other two JustDraw actions sat together under
+    -- General, and the reader could not find it at all. `general` keeps the
+    -- three discoverable in one place; fired without a document the handler
+    -- says why instead of doing nothing.
     Dispatcher:registerAction("justdraw_sheet", {
-        category = "none", event = "JustDrawSheet", reader = true,
+        category = "none", event = "JustDrawSheet", general = true,
         title = _("JustDraw: open/close drawing sheet"),
     })
     -- Also post-rename, no legacy identity. `general`, not `reader`, because
@@ -2103,6 +2108,10 @@ function JustDraw:onJustDrawSheet()
         self:closeCanvas()
     elseif self.session and self.session:isAvailable() then
         self:openCanvasHere()
+    elseif self.is_docless then
+        -- The action is `general`, so it can fire in the file browser,
+        -- where "this document" would name a document that does not exist.
+        self:notify(_("Drawing sheets need an open book"))
     else
         self:notify(_("Drawing sheets are not available in this document"))
     end

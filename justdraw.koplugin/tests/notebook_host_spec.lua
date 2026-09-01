@@ -96,13 +96,18 @@ return function(ctx)
         t:eq(actions.fingerink_bar.reader, true, "toolbar stays reader-only")
 
         -- The sheet action postdates the rename, so like the notebook action
-        -- it carries no legacy FingerInk identity -- but a sheet needs a
-        -- reflowable document, so unlike it the action stays reader-only.
+        -- it carries no legacy FingerInk identity. It was reader-only at
+        -- first, and on device that buried it at the bottom of the Reader
+        -- section while the other two JustDraw actions sat together under
+        -- General -- the reader could not find it at all. General keeps the
+        -- three JustDraw actions in one place; invoked without a document it
+        -- says why instead of doing nothing.
         local sheet = actions.justdraw_sheet
         t:check(sheet ~= nil, "the sheet action is registered")
         t:eq(sheet.event, "JustDrawSheet", "and names its event")
-        t:eq(sheet.reader, true, "a sheet needs a document: reader-only")
-        t:eq(sheet.general, nil, "and is not promoted to the file browser")
+        t:eq(sheet.general, true,
+            "general: listed beside the other JustDraw actions")
+        t:eq(sheet.reader, nil, "not buried in the Reader section")
 
         -- The marker action postdates the rename and has no legacy identity.
         -- Like the notebook action, it is general: toggling the style is
@@ -112,6 +117,19 @@ return function(ctx)
         t:eq(marker.event, "JustDrawMarker", "and names its event")
         t:eq(marker.general, true, "general: bindable in file browser and reader")
         t:eq(marker.reader, nil, "not confined to the reader section")
+        plugin:teardown()
+    end)
+
+    t:case("the sheet gesture without a book says it needs one", function()
+        -- A general action is bindable and firable from the file browser,
+        -- where there is no document at all -- "not available in this
+        -- document" would name a document that does not exist.
+        ctx.reset()
+        local plugin = support.newFileManagerPlugin(ctx.JustDraw, ctx.env)
+        t:eq(plugin:onJustDrawSheet(), true, "the event is consumed")
+        t:eq(#ctx.env.notifications, 1, "the user was told")
+        t:check(ctx.env.notifications[1]:find("open book", 1, true) ~= nil,
+            "and told a sheet needs an open book, not a failure")
         plugin:teardown()
     end)
 
