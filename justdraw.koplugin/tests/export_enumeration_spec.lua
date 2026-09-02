@@ -248,4 +248,288 @@ return function(ctx)
         render({ id = 1 }, 1, function(_, err) reason = err end)
         t:eq(reason, "bad_geometry", "reported immediately")
     end)
+    -- =================================================================
+    t:describe("export / enumeration / a book's notes")
+
+    local DocumentSource = require("ink_document_export_source")
+    local Legacy = require("ink_legacy_ink")
+    local Store = require("ink_store")
+
+    --- The real frozen sidecar view over a real store: the dossier reads its
+    --- pages and its strokes through exactly the object `main.lua` holds.
+    local function legacyWith(pages)
+        return Legacy.new(Store.new(pages))
+    end
+
+    local function stroke(...)
+        local s = { n = select("#", ...) / 2, w = 4 }
+        for i = 1, select("#", ...) do s[i] = select(i, ...) end
+        return s
+    end
+
+    local function pageInkRow(id, page)
+        return { id = id, fixed_page = page, surface_role = "page_ink",
+            anchor_kind = "page", anchor_key = "page-ink:" .. page,
+            coordinate_space = "native_page",
+            logical_w = 596, logical_h = 842 }
+    end
+
+    local function kinds(items)
+        local out = {}
+        for i = 1, #items do
+            out[i] = items[i].kind .. ":" .. tostring(items[i].page)
+        end
+        return table.concat(out, " ")
+    end
+
+    t:case("an EPUB's notes come out in reading order, legacy first on a page", function()
+        local canvases = {
+            { id = 3, logical_w = 600, logical_h = 800 },
+            { id = 7, logical_w = 600, logical_h = 800 },
+            { id = 9, logical_w = 600, logical_h = 800 },
+        }
+        local items, err = DocumentSource.documentNotes{
+            rolling = true,
+            canvases = canvases,
+            index = newIndex(true, { [3] = 5, [7] = 2 }),
+            repository = support.newCanvasStore(canvases),
+            legacy = legacyWith{ [5] = { stroke(1, 1, 2, 2) },
+                                 [2] = { stroke(3, 3, 4, 4) } },
+            screen = { w = 600, h = 800 },
+        }
+        t:check(items ~= nil, "enumerated: " .. tostring(err))
+        t:eq(kinds(items),
+            "legacy_page:2 sheet:2 legacy_page:5 sheet:5 sheet:nil",
+            "legacy before the sheet on its page, and the orphan last")
+        t:eq(items[2].surface.id, 7, "page 2's sheet")
+        t:eq(items[4].surface.id, 3, "page 5's sheet")
+        t:eq(items[1].location_label, "Stored page 2", "legacy says where it was stored")
+        t:eq(items[2].location_label, "Page 2", "a placed sheet says its page")
+        t:eq(items[5].location_label, "Location unavailable", "an orphan says so")
+        t:eq(items[1].legacy, true, "legacy is marked")
+        t:eq(items[2].legacy, false, "and a sheet is not")
+        t:eq(items[2].units, "px", "a sheet's units are pixels of a lost screen")
+        t:eq(items[1].logical_w, 600, "legacy ink is the size of this screen")
+        t:eq(items[1].logical_h, 800, "in both axes")
+    end)
+
+    t:case("an incomplete index refuses the whole dossier", function()
+        local canvases = { { id = 1, logical_w = 600, logical_h = 800 } }
+        local items, err = DocumentSource.documentNotes{
+            rolling = true, canvases = canvases,
+            index = newIndex(false, {}),
+            repository = support.newCanvasStore(canvases),
+            legacy = legacyWith{ [1] = { stroke(1, 1, 2, 2) } },
+            screen = { w = 600, h = 800 },
+        }
+        t:check(items == nil, "refused")
+        t:eq(err, "index_incomplete", "with the reason the reader already knows")
+    end)
+
+    t:case("a fixed layout's notes come out by page and id, legacy first", function()
+        local rows = { pageInkRow(2, 4), pageInkRow(8, 4), pageInkRow(5, 1) }
+        local store = support.newCanvasStore(rows)
+        local items, err = DocumentSource.documentNotes{
+            repository = store, book_id = 1, units = "pt",
+            legacy = legacyWith{ [4] = { stroke(1, 1, 2, 2) } },
+            screen = { w = 600, h = 800 },
+        }
+        t:check(items ~= nil, "enumerated: " .. tostring(err))
+        t:eq(kinds(items), "page_ink:1 legacy_page:4 page_ink:4 page_ink:4",
+            "page 1, then page 4 with its legacy ink in front")
+        t:eq(items[3].surface.id, 2, "the lower id of page 4 first")
+        t:eq(items[4].surface.id, 8, "then the other")
+        t:eq(items[1].units, "pt", "the document's units travel with the row")
+        t:eq(items[2].units, "px", "legacy ink is screen pixels whatever the page is")
+        t:eq(items[1].location_label, "Page 1", "a page note says its page")
+        t:check(rawequal(items[1].repository, store),
+            "and carries the repository it is read from")
+    end)
+
+    t:case("the page-ink cursor is walked to the end, one batch at a time", function()
+        local rows = { pageInkRow(1, 1), pageInkRow(2, 2), pageInkRow(3, 3) }
+        local store = support.newCanvasStore(rows)
+        local calls = 0
+        local real = store.listPageInkSurfaces
+        store.listPageInkSurfaces = function(self, book, opts)
+            calls = calls + 1
+            return real(self, book, opts)
+        end
+        local items = DocumentSource.documentNotes{
+            repository = store, book_id = 1, units = "px", limit = 1,
+            screen = { w = 600, h = 800 },
+        }
+        t:eq(#items, 3, "every page")
+        t:check(calls >= 4, "three batches and the empty one that ends the walk")
+    end)
+
+    t:case("a page-ink cursor that does not advance is refused, not looped", function()
+        local store = support.newCanvasStore{}
+        store.listPageInkSurfaces = function()
+            return { pageInkRow(1, 1) }
+        end
+        local items, err = DocumentSource.documentNotes{
+            repository = store, book_id = 1, units = "px", limit = 1,
+            screen = { w = 600, h = 800 },
+        }
+        t:check(items == nil, "refused")
+        t:eq(err, "list_failed", "reason")
+    end)
+
+    t:case("a repository that cannot list says so", function()
+        local store = support.newCanvasStore{}
+        store.fail_list_page_ink = "database is locked"
+        t:eq(select(2, DocumentSource.documentNotes{
+            repository = store, book_id = 1, units = "px",
+            screen = { w = 600, h = 800 } }), "database is locked",
+            "the repository's own reason")
+    end)
+
+    t:case("an absurd dossier is refused before a single raster", function()
+        local count = 5001
+        local store = { listPageInkSurfaces = function(_, _, opts)
+            local after = tonumber(opts.after_page) or 0
+            local out = {}
+            for p = after + 1, math.min(after + opts.limit, count) do
+                out[#out + 1] = pageInkRow(p, p)
+            end
+            return out
+        end }
+        local items, err = DocumentSource.documentNotes{
+            repository = store, book_id = 1, units = "pt",
+            screen = { w = 600, h = 800 },
+        }
+        t:check(items == nil, "refused")
+        t:eq(err, "too_many_pages", "reason")
+        count = 5000
+        t:eq(#DocumentSource.documentNotes{
+            repository = store, book_id = 1, units = "pt",
+            screen = { w = 600, h = 800 } }, 5000, "and the limit itself is fine")
+    end)
+
+    t:case("a book with no notes of any kind is empty, not an export", function()
+        local store = support.newCanvasStore{}
+        local items, err = DocumentSource.documentNotes{
+            repository = store, book_id = 1, units = "px",
+            legacy = legacyWith{}, screen = { w = 600, h = 800 },
+        }
+        t:check(items == nil, "refused")
+        t:eq(err, "empty", "reason")
+    end)
+
+    t:case("legacy ink alone is a dossier", function()
+        local store = support.newCanvasStore{}
+        local items = DocumentSource.documentNotes{
+            repository = store, book_id = 1, units = "px",
+            legacy = legacyWith{ [3] = { stroke(1, 1, 2, 2) } },
+            screen = { w = 600, h = 800 },
+        }
+        t:eq(#items, 1, "one page")
+        t:eq(items[1].kind, "legacy_page", "the sidecar's own")
+    end)
+
+    -- =================================================================
+    t:describe("export / enumeration / the notes' geometry")
+
+    t:case("a page in points maps to a true 300 dpi and keeps its page size", function()
+        local scale, w_pt, h_pt = Source.pageInkGeometry{
+            logical_w = 300, logical_h = 400, units = "pt" }
+        t:check(math.abs(scale - 300 / 72) < 1e-9, "300 dots per inch of page")
+        t:check(math.abs(w_pt - 300) < 1e-9, "the MediaBox is the page itself")
+        t:check(math.abs(h_pt - 400) < 1e-9, "in both axes")
+    end)
+
+    t:case("an A4 page loses resolution, never its page size", function()
+        local scale, w_pt, h_pt = Source.pageInkGeometry{
+            logical_w = 596, logical_h = 842, units = "pt" }
+        t:check(scale < 300 / 72, "the raster was reduced to fit the budget")
+        t:check(math.floor(596 * scale + 0.5) * math.floor(842 * scale + 0.5)
+            <= Raster.MAX_PIXELS, "inside it")
+        t:check(math.abs(w_pt - 596) < 1e-9, "and A4 is still A4")
+        t:check(math.abs(h_pt - 842) < 1e-9, "in both axes")
+    end)
+
+    t:case("a page whose units are pixels gets the sheet's policy", function()
+        local item = { logical_w = 1000, logical_h = 1200, units = "px" }
+        local scale, w_pt, h_pt = Source.pageInkGeometry(item)
+        local c_scale, c_w, c_h = Source.canvasGeometry(item)
+        t:eq(scale, c_scale, "the same scale")
+        t:eq(w_pt, c_w, "the same width")
+        t:eq(h_pt, c_h, "the same height")
+        t:eq(scale, 1, "which is one to one")
+    end)
+
+    t:case("legacy ink is this screen, one to one, at a nominal resolution", function()
+        local scale, w_pt, h_pt = Source.legacyGeometry{
+            logical_w = 600, logical_h = 800 }
+        t:eq(scale, 1, "no invented detail")
+        t:check(math.abs(w_pt - 600 * 72 / 300) < 1e-9, "width in points")
+        t:check(math.abs(h_pt - 800 * 72 / 300) < 1e-9, "height in points")
+    end)
+
+    -- =================================================================
+    t:describe("export / enumeration / the notes' renderer")
+
+    t:case("legacy ink is drawn on white and delivered on a later tick", function()
+        local sched = support.newScheduler()
+        local render = DocumentSource.renderer{
+            schedule = function(fn) sched:schedule(fn) end,
+            legacy = legacyWith{ [3] = { stroke(100, 100, 200, 100) } },
+            ink = "black",
+        }
+        local item = { kind = "legacy_page", page = 3, legacy = true,
+            logical_w = 600, logical_h = 800, units = "px",
+            location_label = "Stored page 3" }
+        local delivered, reason
+        render(item, 1, function(result, err) delivered, reason = result, err end)
+        t:check(delivered == nil, "nothing arrives inside the renderer's own frame")
+        sched:drain()
+        t:check(delivered ~= nil, "delivered: " .. tostring(reason))
+        t:eq(delivered.bb:getWidth(), 600, "the screen's width")
+        t:eq(delivered.bb:getHeight(), 800, "and its height")
+        t:eq(delivered.bb.fills[1], "white", "on white")
+        t:check(#delivered.bb.rects > 1, "with the stroke on it")
+        local bb = delivered.bb
+        delivered.release()
+        t:eq(bb.freed, true, "and releasing it frees the buffer")
+        delivered.release()
+        t:eq(bb.freed, true, "twice, harmlessly")
+    end)
+
+    t:case("legacy ink off the screen is clipped, not painted outside", function()
+        local sched = support.newScheduler()
+        local render = DocumentSource.renderer{
+            schedule = function(fn) sched:schedule(fn) end,
+            legacy = legacyWith{ [3] = { stroke(2000, 2000, 2400, 2000) } },
+            ink = "black",
+        }
+        local item = { kind = "legacy_page", page = 3, legacy = true,
+            logical_w = 600, logical_h = 800, units = "px",
+            location_label = "Stored page 3" }
+        local delivered
+        render(item, 1, function(result) delivered = result end)
+        sched:drain()
+        t:eq(delivered.bb:writesOutside(0, 0, 600, 800), 0,
+            "the buffer clipped it, and nothing invented a transform")
+        delivered.release()
+    end)
+
+    t:case("a page with a row but no strokes rasters blank rather than failing", function()
+        local rows = { pageInkRow(1, 1) }
+        local store = support.newCanvasStore(rows)
+        local sched = support.newScheduler()
+        local render = DocumentSource.renderer{
+            repository = store,
+            schedule = function(fn) sched:schedule(fn) end,
+        }
+        local items = DocumentSource.documentNotes{
+            repository = store, book_id = 1, units = "px",
+            screen = { w = 600, h = 800 },
+        }
+        local delivered, reason
+        render(items[1], 1, function(result, err) delivered, reason = result, err end)
+        sched:drain()
+        t:check(delivered ~= nil, "delivered: " .. tostring(reason))
+        delivered.release()
+    end)
 end

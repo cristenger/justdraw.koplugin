@@ -125,6 +125,44 @@ function Source.canvasGeometry(canvas)
         Raster.nominalPoints(canvas.logical_h, Raster.NOMINAL_DPI)
 end
 
+--- Points to the millimetre. A page whose own units are points already carries
+--- its physical size, so this is the constant that turns it into one.
+Source.POINT_UNITS_PER_MM = 72 / 25.4
+
+--[[--
+A page-ink surface, at the resolution its own units can justify.
+
+Two kinds of page reach here and only one of them knows how big it is. MuPDF
+measures in points, so a page note is rendered at a true 300 dpi and the PDF
+page comes out measuring exactly what the original measured -- `width_pt` is
+`logical_w`, which is what a point *is*. DjVu and image documents are pixels
+of a DPI nobody stated (ADR-38), so they get the sheet's policy: 1:1, and a
+nominal DPI only because a PDF page needs a size at all.
+]]
+function Source.pageInkGeometry(item)
+    if item.units ~= "pt" then return Source.canvasGeometry(item) end
+    local units = Source.POINT_UNITS_PER_MM
+    local target = Raster.physicalScale(units, Raster.TARGET_DPI)
+    if not target then return nil, "bad_geometry" end
+    local scale, err = Raster.boundedScale(item.logical_w, item.logical_h, target)
+    if not scale then return nil, err end
+    return scale,
+        Raster.physicalPoints(units, item.logical_w),
+        Raster.physicalPoints(units, item.logical_h)
+end
+
+--[[--
+Legacy sidecar ink, which is screen pixels and nothing else.
+
+Its `logical_w/h` are *this* screen rather than the one it was drawn on: the
+original was never recorded (ADR-40), which is exactly what the reader is
+warned about. So the policy is the sheet's, for the same reason -- 1:1, and a
+nominal DPI only to have a page size.
+]]
+function Source.legacyGeometry(item)
+    return Source.canvasGeometry(item)
+end
+
 --[[--
 How many pixels this batch of surfaces will rasterise, at the scale it will
 rasterise them.
