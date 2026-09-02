@@ -712,6 +712,44 @@ return function(ctx)
             "commit without a visible status change schedules no repaint")
     end)
 
+    --[[--
+    The editor's live boxes go through the same accumulator the reader uses
+    (ADR-43). Its timer is not the quality pass's -- both are `UIManager` in
+    production, and the cases around this one count the quality one.
+    ]]
+    t:case("fifty live dirties inside the interval are one queued refresh", function()
+        ctx.reset()
+        local Geom = require("ui/geometry")
+        local transform = {}
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end,
+            hasGrayInk = function() return false end }
+        local runtime = { live_fast = true, active_contact = true }
+        local scheduler = ctx.support.newScheduler()
+        local editor, _, _, _, session = newEditor{
+            transform = transform, cache = cache, runtime = runtime,
+            scheduler = scheduler,
+            quality_clock = function() return scheduler:now() end,
+        }
+        local before = #ctx.env.UIManager.dirty
+        for i = 1, 50 do
+            editor:onDirty(Geom:new{ x = 100 + i, y = 200, w = 10, h = 10 },
+                "ink", session, transform, { x = i, y = 1, w = 10, h = 10 })
+        end
+        t:eq(#ctx.env.UIManager.dirty, before + 1,
+            "one refresh for the run, the first box of it")
+        t:eq(ctx.env.UIManager.dirty[before + 1][2], "fast", "as fast")
+        t:eq(ctx.env.UIManager.dirty[before + 1][3].w, 10, "its own box, not a union")
+
+        scheduler:advance(0.02)
+        ctx.env.UIManager:flush()                 -- the accumulator's trailing timer
+        t:eq(#ctx.env.UIManager.dirty, before + 2, "the interval sent the rest, once")
+        local union = ctx.env.UIManager.dirty[before + 2]
+        t:eq(union[1], nil, "still without repainting the editor")
+        t:eq(union[2], "fast", "still fast")
+        t:eq(union[3].x, 102, "from the first box that was held")
+        t:eq(union[3].w, 58, "to the last one's far edge")
+    end)
+
     t:case("fast ink cleans one exact union after 350 ms of inactivity", function()
         ctx.reset()
         local Geom = require("ui/geometry")
@@ -725,15 +763,25 @@ return function(ctx)
         local before = #ctx.env.UIManager.dirty
         editor:onDirty(Geom:new{ x = 100, y = 200, w = 20, h = 30 },
             "ink", session, transform, { x = 10, y = 20, w = 20, h = 30 })
+        local first = ctx.env.UIManager.dirty[#ctx.env.UIManager.dirty]
+        t:eq(#ctx.env.UIManager.dirty, before + 1,
+            "the first segment of a run is queued at once")
+        t:eq(first[1], nil, "editor is not marked for repaint")
+        t:eq(first[2], "fast", "live ink keeps the fast waveform")
+        t:eq(first[3].x, 100, "with its own exact region")
+        t:eq(first[3].y, 200, "at its own exact origin")
         editor:onDirty(Geom:new{ x = 130, y = 240, w = 10, h = 10 },
             "ink", session, transform, { x = 40, y = 60, w = 10, h = 10 })
-        local refresh = ctx.env.UIManager.dirty[#ctx.env.UIManager.dirty]
-        t:eq(#ctx.env.UIManager.dirty, before + 2, "one refresh per segment is queued")
-        t:eq(refresh[1], nil, "editor is not marked for repaint")
-        t:eq(refresh[2], "fast", "live ink keeps the fast waveform")
-        t:eq(refresh[3].x, 130, "the exact second region starts at x")
-        t:eq(refresh[3].y, 240, "the exact second region starts at y")
+        t:eq(#ctx.env.UIManager.dirty, before + 1,
+            "the next segment is held for the cadence, not asked for (ADR-43)")
         editor:onEditChanged(session)
+        local flushed = ctx.env.UIManager.dirty[#ctx.env.UIManager.dirty]
+        t:eq(#ctx.env.UIManager.dirty, before + 2, "and the lift sends it")
+        t:eq(flushed[2], "fast", "still the fast waveform")
+        -- What was held, not what already went out: the first segment left
+        -- the accumulator empty, so the union here is the second one alone.
+        t:eq(flushed[3].x, 130, "covering the segment that was held")
+        t:eq(flushed[3].w, 10, "and only it")
         t:eq(editor.quality_strokes, 1, "segments count as one completed contact")
         t:eq(scheduler:pending(), 1, "one delayed cleanup is armed")
         scheduler:advance(0.349)
@@ -868,6 +916,9 @@ return function(ctx)
         editor:onEditChanged(session)
         editor:onDirty(Geom:new{ x = 300, y = 300, w = 10, h = 10 },
             "ink", session, transform, { x = 200, y = 120, w = 10, h = 10 })
+        -- Held by the cadence rather than refused; the mode it carries is
+        -- what this case is about, so send it (ADR-43).
+        editor.live_refresh:flush()
         t:eq(ctx.env.UIManager.dirty[#ctx.env.UIManager.dirty][2], "fast",
             "turning fast on takes effect dynamically")
         t:eq(editor:_qualityBox().x, 300, "the new union does not reuse old pixels")
@@ -909,6 +960,9 @@ return function(ctx)
         runtime.active_contact = true
         local before = #ctx.env.UIManager.dirty
         ink(140, 240)
+        -- On the device the cadence would have sent this within 20 ms; the
+        -- clock here does not move, so send it by hand (ADR-43).
+        editor.live_refresh:flush()
         t:eq(scheduler:pending(), 0, "a new contact cancels the armed cleanup")
         t:eq(editor.quality_waiting_for_contact_end, true,
             "and hands it to the contact latch")

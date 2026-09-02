@@ -24,6 +24,7 @@ local N_ = _.ngettext
 local Errors = require("ink_notebook_errors")
 local ExportDialog = require("ink_export_dialog")
 local ExportSource = require("ink_export_source")
+local LiveRefresh = require("ink_live_refresh")
 local NotebookLayout = require("ink_notebook_layout")
 local Stack = require("ink_stack")
 local Style = require("ink_style")
@@ -211,6 +212,32 @@ function Editor:_initQualityRefresh()
         if time.to_s then return time.to_s(now) end
         return now
     end
+    --[[--
+    Live boxes reach the panel through one accumulator at a bounded cadence
+    (ADR-43): a `Geom` is built per flush, never per pen sample.
+
+    Its timer has a seam of its own rather than borrowing the quality pass's,
+    even though both default to `UIManager` and are the same timer queue in
+    production. The two answer different questions -- when the panel is next
+    asked for the ink, against when the DU debt is repaid -- and a spec that
+    counts one of them must not be counting the other.
+    ]]
+    self.live_schedule_in = self.live_schedule_in or function(delay, action)
+        UIManager:scheduleIn(delay, action)
+    end
+    self.live_unschedule = self.live_unschedule or function(action)
+        UIManager:unschedule(action)
+    end
+    self.live_refresh = self.live_refresh or LiveRefresh.new{
+        -- The editor's monotonic seconds, the same seam the quality pass reads.
+        clock = self.quality_clock,
+        schedule_in = self.live_schedule_in,
+        unschedule = self.live_unschedule,
+        refresh = function(mode, left, top, right, bottom)
+            UIManager:setDirty(nil, mode,
+                Geom:new{ x = left, y = top, w = right - left, h = bottom - top })
+        end,
+    }
     self.quality_last_lift_at = nil
     -- Seconds of the last stylus frame the adapter saw, hover included. The
     -- rest pass reads it when it fires; nothing schedules on it.
@@ -1098,8 +1125,10 @@ function Editor:onDirty(screen_box, kind, session, transform, source_box)
 
     if live_kind and fast_ok then
         -- Passing nil schedules only the panel update; repainting Editor here
-        -- would redraw the full page and controls for every pen segment.
-        UIManager:setDirty(nil, "fast", exact_box)
+        -- would redraw the full page and controls for every pen segment. The
+        -- accumulator decides *when* that update is asked for (ADR-43).
+        self.live_refresh:add("fast", exact_box.x, exact_box.y,
+            exact_box.x + exact_box.w, exact_box.y + exact_box.h)
         self:_holdQualityForContact()
         if self:_accumulateQualityBox(exact_box, session, transform, cache)
             and self:_qualityBudgetReached() then
@@ -1111,8 +1140,10 @@ function Editor:onDirty(screen_box, kind, session, transform, source_box)
         -- Gray live ink: ui renders gray and does not fence while the pen
         -- reports, unlike partial (REAGL), whose per-segment completion wait
         -- overflowed evdev on device (ADR-26/36). No DU debt, so no quality
-        -- bookkeeping either.
-        UIManager:setDirty(nil, "ui", exact_box)
+        -- bookkeeping either -- but it is still one update per sample unless
+        -- the accumulator holds it (ADR-43).
+        self.live_refresh:add("ui", exact_box.x, exact_box.y,
+            exact_box.x + exact_box.w, exact_box.y + exact_box.h)
         return
     end
 
@@ -1127,6 +1158,10 @@ end
 
 function Editor:onEditChanged(session)
     if self.closed or session ~= self:_currentSession() then return end
+    -- A stroke has just ended: its held tail goes out now rather than waiting
+    -- for the accumulator's trailing timer (ADR-43), and before the quality
+    -- pass decides what to do about the same pixels.
+    self.live_refresh:flush()
     self:_syncQualitySetting(session)
     self:_qualityContactBoundary(session)
     local previous_can_undo = self.snapshot and self.snapshot.can_undo
@@ -1792,6 +1827,9 @@ function Editor:shutdown()
     if self.closed then return true end
     self:_clearCoveredRepaint()
     self:_resetQualityRefresh()
+    -- The page this was refreshing is going away; a cadence timer holding a
+    -- box of it must not outlive the editor (ADR-43).
+    self.live_refresh:close()
     self.closed = true
     local modals = self.modal_widgets
     self.modal_widgets = {}
