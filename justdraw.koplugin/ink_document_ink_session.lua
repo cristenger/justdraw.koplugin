@@ -168,6 +168,9 @@ function Session.new(opts)
         notify = opts.notify or function() end,
         cache_opts = cache_opts,
         queue_opts = opts.queue_opts or {},
+        --- function() -> boolean, false while a contact is live; the write
+        --- queue defers under one (ADR-42).
+        can_work = opts.can_work,
         on_state_changed = opts.on_state_changed,
         on_ready = opts.on_ready,
         on_load_error = opts.on_load_error,
@@ -503,6 +506,7 @@ function Session:_openSurfaceSession()
         unschedule = self.unschedule,
         cache_opts = self.cache_opts,
         queue_opts = self.queue_opts,
+        can_work = self.can_work,
         on_state_changed = function()
             if self.surface_session ~= ss then return end
             self:_notifyState()

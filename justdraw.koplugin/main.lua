@@ -907,6 +907,9 @@ function JustDraw:openDocumentSession(settings)
         scheduleIn = function(delay, fn) UIManager:scheduleIn(delay, fn) end,
         unschedule = function(fn) UIManager:unschedule(fn) end,
         notify = function(text) self:notify(text) end,
+        -- The write queue's gate: no transaction opens while a contact is on
+        -- the glass (ADR-42). The sheet session is handed the same closure.
+        can_work = function() return not self:hasActivePhysicalContact() end,
         cache_opts = self.document_cache_opts,
         on_ready = function() self:onDocumentInkReady() end,
         on_load_error = function(reason) self:onDocumentInkLoadFailed(reason) end,

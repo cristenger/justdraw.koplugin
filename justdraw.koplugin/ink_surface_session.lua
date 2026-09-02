@@ -66,6 +66,10 @@ function SurfaceSession.new(opts)
         on_will_rebuild = opts.on_will_rebuild,
         cache_opts = opts.cache_opts or {},
         queue_opts = opts.queue_opts or {},
+        --- function() -> boolean, false while a contact is live. Handed to
+        --- the write queue, which never opens a transaction under one
+        --- (ADR-42).
+        can_work = opts.can_work,
         max_open_points = opts.max_open_points or Limits.MAX_OPEN_POINTS,
         cache_obj = nil,
         queue = nil,
@@ -143,6 +147,8 @@ function SurfaceSession:open()
             hard_ops = self.queue_opts.hard_ops,
             hard_bytes = self.queue_opts.hard_bytes,
             clock = self.queue_opts.clock,
+            can_work = self.can_work,
+            yield_delay = self.queue_opts.yield_delay,
             estimate_insert_bytes = encodedBytes,
             max_single_op_bytes = encodedBytes(self.max_open_points),
             on_error = function(reason)

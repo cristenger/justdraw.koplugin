@@ -1307,4 +1307,24 @@ return function(ctx)
         t:eq(#delivered.bb.blits, 0, "with nothing composed over it")
         delivered.release()
     end)
+
+    t:describe("main / page ink / no commit under a contact (ADR-42)")
+
+    t:case("the write timer stands aside while the pen is on the glass", function()
+        local p, store = documentPlugin()
+        t:eq(startDrawing(p), true, "drawing is on")
+        penDown(p, INK_XY.x, INK_XY.y)
+        penFrame(p, INK_XY.x + 20, INK_XY.y + 20)
+        penLift(p, INK_XY.x + 40, INK_XY.y + 40)   -- queued on the lift
+        t:eq(p.document_session:pendingWrites(), 1, "one operation is waiting")
+        penDown(p, INK_XY.x, INK_XY.y + 80)        -- the next contact starts first
+        local transactions = store.calls.transaction
+        env.UIManager:flush()                      -- the due flush must yield
+        t:eq(store.calls.transaction, transactions, "held under the contact")
+        t:eq(p.document_session:pendingWrites(), 1, "and the operation is still held")
+        penLift(p, INK_XY.x + 40, INK_XY.y + 80)
+        env.UIManager:flush()
+        t:check(store.calls.transaction > transactions, "committed after the lift")
+        t:eq(p.document_session:pendingWrites(), 0, "and the queue drained")
+    end)
 end

@@ -48,6 +48,8 @@ return function(ctx)
             max_ops = opts.max_ops,
             max_bytes = opts.max_bytes,
             hard_ops = opts.hard_ops,
+            can_work = opts.can_work,
+            yield_delay = opts.yield_delay,
             hard_bytes = opts.hard_bytes,
             delay = opts.delay,
             estimate_insert_bytes = estimate,
@@ -474,5 +476,67 @@ return function(ctx)
         queue:close()
         queue:flush()
         t:eq(strokeCount(store), 1, "once")
+    end)
+    --[[--
+    A commit is a few milliseconds of SQLite on the event loop, and the pen
+    fills that loop at up to 360 Hz. A device session recorded 41 of them
+    inside BTN_TOUCH while the kernel was dropping input. The queue now asks
+    the same question the sheet index asks before every batch (ADR-42).
+    ]]
+    t:describe("ink_canvas_queue / yields to the pen (ADR-42)")
+
+    t:case("a due flush with the pen down reschedules instead of committing", function()
+        local pen_down = true
+        local queue, store, sched = fixture{ can_work = function() return not pen_down end }
+        queue:addStroke(CANVAS, stroke(4, 1))
+        local transactions = store.calls.transaction
+        sched:advance(0.25)
+        t:eq(store.calls.transaction, transactions, "no transaction under the pen")
+        t:eq(queue:pendingCount(), 1, "the stroke is still held")
+        t:eq(queue:deferredCount(), 1, "one deferral")
+        t:check(sched:pending() > 0, "and the flush is armed again")
+        sched:advance(0.1)
+        t:eq(queue:deferredCount(), 2, "every tenth of a second while it stays down")
+        t:eq(store.calls.transaction, transactions, "still nothing written")
+        pen_down = false
+        sched:advance(0.1)
+        t:eq(store.calls.transaction, transactions + 1, "committed once the pen left")
+        t:eq(queue:pendingCount(), 0, "and drained")
+        t:eq(sched:pending(), 0, "with no timer left behind")
+    end)
+
+    t:case("an urgent flush is deferred the same way; a lifecycle flush is not", function()
+        local pen_down = true
+        local queue, store, sched = fixture{
+            max_ops = 2, can_work = function() return not pen_down end }
+        queue:addStroke(CANVAS, stroke(4, 1))
+        queue:addStroke(CANVAS, stroke(4, 2))       -- reaches max_ops: "urgent"
+        local transactions = store.calls.transaction
+        sched:advance(0)
+        t:eq(store.calls.transaction, transactions, "urgent yields too")
+        t:eq(queue:flush(), true, "the synchronous gate writes regardless")
+        t:eq(store.calls.transaction, transactions + 1, "one transaction")
+        t:eq(queue:pendingCount(), 0, "everything landed")
+        t:eq(sched:pending(), 0, "and the deferred timer is gone")
+    end)
+
+    t:case("the default ceiling holds a whole contact of erase fragments", function()
+        local queue = fixture{ can_work = function() return false end }
+        for i = 1, 200 do
+            t:check(queue:addStroke(CANVAS, stroke(4, i)) ~= nil,
+                "operation " .. i .. " admitted")
+        end
+        t:eq(queue:pendingCount(), 200, "two hundred held without backpressure")
+    end)
+
+    t:case("closing while parked writes what is held and cancels the timer", function()
+        local queue, store, sched = fixture{ can_work = function() return false end }
+        queue:addStroke(CANVAS, stroke(4, 1))
+        sched:advance(0.25)
+        t:eq(queue:deferredCount() > 0, true, "it had stood aside at least once")
+        t:eq(queue:close(), true, "close is a lifecycle gate")
+        t:eq(strokeCount(store), 1, "so the held stroke is durable")
+        sched:advance(1)
+        t:eq(sched:pending(), 0, "nothing left in the scheduler")
     end)
 end

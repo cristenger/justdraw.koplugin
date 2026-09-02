@@ -343,6 +343,9 @@ function Session:_openPage(page, persist_current, transform)
         schedule = self.schedule,
         scheduleIn = self.scheduleIn,
         unschedule = self.unschedule,
+        -- The notebook route owns its own lease, so it can answer this
+        -- itself: no commit runs under a contact (ADR-42).
+        can_work = function() return not self:_hasActiveContact() end,
         on_ready = function() self:_pageReady(page, surface) end,
         on_load_error = function(reason)
             if self.surface_session == surface then

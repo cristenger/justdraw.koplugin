@@ -370,6 +370,10 @@ function Session:openCanvas(canvas)
         schedule = self.schedule,
         scheduleIn = self.scheduleIn,
         unschedule = self.unschedule,
+        -- The same gate the sheet index runs under, now also over the write
+        -- queue: nothing opens a transaction while a contact is live
+        -- (ADR-42).
+        can_work = self.can_work,
         on_ready = function()
             if self.canvas == canvas and self.overlay_widget
                 and self.plugin and self.plugin.onCanvasReady then

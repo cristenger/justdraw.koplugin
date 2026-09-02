@@ -86,14 +86,19 @@ return function(ctx)
         t:eq(session:goNext(), true, "navigation resumes")
     end)
 
-    t:case("an asynchronous save failure aborts newer live input", function()
+    t:case("a save failure with a contact still down aborts newer live input", function()
         local session, store, sched, input, aborted = fixture()
         session:open(1)
         session:surface():addStroke({ 1, 1, 2, 2 }, 2, 4, 1)
         input.contact = true
         store.fail_transaction = "commit"
-        sched:drain()
-        t:eq(session:stateName(), "save_failed", "timer failure is visible")
+        -- The queue's timer stands aside while a contact is live (ADR-42), so
+        -- it never reaches the store here; a lifecycle gate is what still
+        -- commits under the pen, and what surfaces the failure.
+        sched:tick()
+        t:eq(store.calls.transaction, 0, "the timer stood aside for the contact")
+        t:eq((session:flush()), nil, "the lifecycle flush is what fails")
+        t:eq(session:stateName(), "save_failed", "and the failure is visible")
         t:eq(aborted(), 1, "newer in-flight contact is repaired and retired")
         t:eq(input.contact, false, "no live contact survives inert capture")
         t:eq(input.current, nil, "failed session releases input ownership")

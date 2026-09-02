@@ -6,7 +6,11 @@ Committing only on close loses everything the reader wrote this session. So
 strokes are held in memory and a commit is requested at the first of three
 soft bounds: a quarter of a second, eight operations or sixty-four kilobytes.
 Thresholds schedule the commit on the next UI tick; they never run SQLite from
-the input callback. Lifecycle gates still flush synchronously.
+the input callback, and -- since ADR-42's rule reached the queue -- never
+while a contact is live either: a due flush that finds the pen down puts
+itself back for a tenth of a second and asks again. A device session recorded
+41 commits of 2.5 to 7.2 ms inside `BTN_TOUCH`, on a loop already losing
+input. Lifecycle gates still flush synchronously.
 
 `onSaveSettings` is the mandatory one, and it is not interchangeable with
 `onSuspend`: `Device:_beforeSuspend` calls `UIManager:flushSettings()` and only
@@ -36,6 +40,15 @@ Queue.__index = Queue
 local FLUSH_DELAY = 0.25          -- seconds
 local FLUSH_OPS = 8
 local FLUSH_BYTES = 64 * 1024
+--- A flush that found a contact live asks again this much later: the same
+--- tick the sheet index yields on (ADR-42).
+local YIELD_DELAY = 0.1
+--- The refusal ceiling, sized for a queue that now waits for the lift. One
+--- that drained on the next tick could refuse at nine operations; one that
+--- holds a whole contact has to carry it, and a partial erase is three
+--- operations per hit (ADR-32).
+local HARD_OPS = 256
+local HARD_BYTES = 1024 * 1024
 
 local function monotonicSeconds()
     return time.now() / time.s(1)
@@ -49,6 +62,9 @@ end
   opts.max_single_op_bytes largest valid insert admitted by the input budget
   opts.on_error    function(reason), called once per failed flush
   opts.on_persisted function(local_id, row_id), after the transaction commits
+  opts.can_work    function() -> boolean, false while a contact is live; a
+                   due flush that finds one reschedules itself (ADR-42)
+  opts.yield_delay seconds between those retries; tests only
 ]]
 function Queue.new(opts)
     opts = opts or {}
@@ -59,6 +75,22 @@ function Queue.new(opts)
         "max_single_op_bytes is required")
     local max_ops = opts.max_ops or FLUSH_OPS
     local max_bytes = opts.max_bytes or FLUSH_BYTES
+    --[[--
+    The refusal ceiling. A queue that drained on the next tick could sit one
+    operation above its soft bound; one that waits for the lift (see
+    `flush_action`) has to hold a whole contact, and a partial erase is three
+    operations per hit (ADR-32) -- so the defaults are the larger `HARD_*`.
+    A caller that names its own soft bound is describing a regime of its own
+    and keeps the tight derivation, which is what the specs measure.
+    ]]
+    local hard_ops = opts.hard_ops
+    if hard_ops == nil then
+        hard_ops = opts.max_ops and (max_ops + 1) or HARD_OPS
+    end
+    local hard_bytes = opts.hard_bytes
+    if hard_bytes == nil then
+        hard_bytes = opts.max_bytes and (max_bytes + max_single) or HARD_BYTES
+    end
     local self = setmetatable({
         repository = opts.repository,
         schedule = opts.schedule,
@@ -70,10 +102,13 @@ function Queue.new(opts)
         on_committed = opts.on_committed,
         max_ops = max_ops,
         max_bytes = max_bytes,
-        hard_ops = opts.hard_ops or max_ops + 1,
-        hard_bytes = opts.hard_bytes or max_bytes + max_single,
+        hard_ops = hard_ops,
+        hard_bytes = hard_bytes,
         delay = opts.delay or FLUSH_DELAY,
         clock = opts.clock or monotonicSeconds,
+        can_work = opts.can_work,
+        yield_delay = opts.yield_delay or YIELD_DELAY,
+        deferred = 0,
 
         ops = {},
         bytes = 0,
@@ -93,6 +128,15 @@ function Queue.new(opts)
         -- cancelled or after close. Only the currently armed generation owns
         -- the right to flush.
         if self.scheduled_kind == nil then return end
+        if not self.closed and self.can_work and not self.can_work() then
+            -- A contact is live. No transaction opens under one (ADR-42): a
+            -- 5 ms commit is enough to tip an event loop the pen is already
+            -- filling at 360 Hz. Keep the armed kind and come back.
+            self.deferred = self.deferred + 1
+            self.scheduled_due = self.clock() + self.yield_delay
+            self.schedule(self.yield_delay, self.flush_action)
+            return
+        end
         self.timer = nil
         self.scheduled_kind = nil
         self.scheduled_due = nil
@@ -103,6 +147,12 @@ end
 
 function Queue:pendingCount()
     return #self.ops
+end
+
+--- How many times a due flush stood aside for a live contact. Diagnostic
+--- only; a growing number under the pen is the gate working, not a fault.
+function Queue:deferredCount()
+    return self.deferred
 end
 
 
