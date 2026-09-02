@@ -165,6 +165,10 @@ Job.__index = Job
   opts.on_ready    function(job)
   opts.on_error    function(reason, job)
   opts.paper_kind  ruling; defaults to the surface's own, so a canvas is blank
+  opts.composition "opaque" (default) or "overlay" -- a page-ink surface is a
+                   transparent layer over the book's own page (ADR-38), and
+                   the cache allocates its buffer type from this: an overlay
+                   is BB8A, and there is nothing else to pass.
 ]]
 function Raster.open(opts)
     opts = opts or {}
@@ -221,6 +225,7 @@ function Raster.open(opts)
         transform = transform,
         schedule = opts.schedule,
         paper_kind = opts.paper_kind or surface.template_kind,
+        composition = opts.composition,
         ink = opts.ink,
         background = opts.background,
         on_ready = function() job:_settle(nil) end,
