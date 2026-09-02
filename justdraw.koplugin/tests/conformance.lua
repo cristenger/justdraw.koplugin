@@ -111,10 +111,20 @@ do
         "stylus_api=%s view_transform=%s native_dimensions=%s alpha_blit=%s",
         tostring(caps.stylus_api), tostring(caps.view_transform),
         tostring(caps.native_dimensions), tostring(caps.alpha_blit))
+    -- Two claims, because they are checkable on different runtimes. The gate
+    -- can only be checked where it exists, and strict mode turns that
+    -- "uncheckable" into a failure. The other three exist on v2026.03 as
+    -- well, so nothing may excuse them: they are the three tests/support.lua
+    -- fakes (Color8A, the transform pair, getNativePageDimensions), and a
+    -- probe run on an older build has to keep them honest too.
     claim("Compat.capabilities answers all four true on this runtime",
         caps.stylus_api,
         caps.stylus_api and caps.view_transform and caps.native_dimensions
             and caps.alpha_blit,
+        detail)
+    claim("Compat.capabilities finds the three capabilities both runtimes have",
+        true,
+        caps.view_transform and caps.native_dimensions and caps.alpha_blit,
         detail)
     claim("Compat.fullSupport agrees with Capture:supportsStylus",
         true,

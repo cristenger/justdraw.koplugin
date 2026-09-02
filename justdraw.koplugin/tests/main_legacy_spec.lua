@@ -21,6 +21,7 @@ return function(ctx)
     local t = ctx.t
     local env = ctx.env
     local support = ctx.support
+    local Device = ctx.Device
     local Legacy = require("ink_legacy_ink")
     local Store = require("ink_store")
 
@@ -54,7 +55,14 @@ return function(ctx)
         local p = support.newPlugin(ctx.JustDraw, env, {
             paging = true, page = opts.page, doc_settings = opts.doc_settings,
         })
-        p.canvas_repository = store
+        -- `false` is the way to say "this book has no database": BookDatabase
+        -- answers `no_repository` for it, which is what a session that cannot
+        -- open looks like from here.
+        if opts.repository == false then
+            p.canvas_repository = false
+        else
+            p.canvas_repository = store
+        end
         p.document_cache_opts = { clear = support.recordingClear() }
         env.UIManager:flush()
         p:onReaderReady()
@@ -126,8 +134,13 @@ return function(ctx)
         return env.UIManager.shown[#env.UIManager.shown]
     end
 
+    --- The menu path as a reader walks it, not as a brief described it: the
+    --- entry is "JustDraw", its sheet row is "Drawing sheet" and that row's
+    --- child is "Open sheet here". main.lua builds the sentence out of the
+    --- same three `_()` strings the menu is built from, so this literal is
+    --- also the assertion that the three labels have not moved.
     local FROZEN_EPUB =
-        "Open a drawing sheet here to draw in this book: Draw ▸ Open drawing sheet here."
+        "Open a drawing sheet to draw in this book: JustDraw ▸ Drawing sheet ▸ Open sheet here."
 
     -- =================================================================
     t:describe("main / legacy ink / the read-only view")
@@ -226,6 +239,22 @@ return function(ctx)
         t:eq(p.input_lease, nil, "and no capture was installed")
     end)
 
+    t:case("the sentence walks the menu that is actually there", function()
+        local p = epubPlugin()
+        -- Every label in the sentence is a row a reader can find: the top
+        -- entry, its sheet row, and the child that opens one here.
+        t:check(ctx.menuItem(p, "Drawing sheet") ~= nil, "the sheet row is Drawing sheet")
+        local opens
+        for _, item in ipairs(p:canvasMenu()) do
+            if item.text == "Open sheet here" then opens = item end
+        end
+        t:check(opens ~= nil, "and its child opens a sheet here")
+        for _, label in ipairs({ "JustDraw", "Drawing sheet", "Open sheet here" }) do
+            t:check(FROZEN_EPUB:find(label, 1, true) ~= nil,
+                "the refusal names " .. label)
+        end
+    end)
+
     t:case("a whole contact in a frozen EPUB adds nothing to the sidecar", function()
         local p = epubPlugin()
         p:applyPoint(INK_XY.x, INK_XY.y, nil)
@@ -301,6 +330,17 @@ return function(ctx)
         p:endStroke()
         t:eq(p.stroke, nil, "the stroke was given up")
         t:eq(p.store:countPages(), 0, "and never reached the sidecar")
+
+        -- A one-point stroke is the case that used to paint itself onto the
+        -- screen before the guard was reached: the reader saw a dot that was
+        -- never stored and that the next refresh took away again.
+        local painted = #Device.screen.bb.writes
+        local refreshed = #Device.screen.refreshes
+        p.stroke = { n = 1, w = 4, t = 1, 120, 120 }
+        p:endStroke()
+        t:eq(#Device.screen.bb.writes, painted, "the frozen dot was never drawn")
+        t:eq(#Device.screen.refreshes, refreshed, "nor refreshed onto the panel")
+        t:eq(p.store:countPages(), 0, "and it is not in the sidecar either")
     end)
 
     t:case("the freeze needs a runtime and a reader with somewhere else to draw", function()
@@ -316,6 +356,23 @@ return function(ctx)
         t:eq(p.ui.rolling, nil, "but this host has no sheet route")
         t:eq(p.ui.paging, nil, "and no page-ink route either")
         t:eq(p:legacyInkFrozen(), false, "so direct ink is what it always was")
+    end)
+
+    t:case("a fixed layout whose database will not open refuses Draw and says why", function()
+        -- `openDocumentSession` returns early when `session:open()` fails, so
+        -- `document_session` is nil on a paging host: Draw used to arm, and
+        -- every point was then swallowed by the freeze with nothing on screen.
+        local p = pdfPlugin{ repository = false }
+        t:eq(p.document_session, nil, "the session could not be opened")
+        t:eq(p.ui.paging, true, "but this is still a fixed layout")
+        env.notifications = {}
+        p:setDrawing(true)
+        t:eq(p.drawing, false, "Draw did not arm over nothing")
+        t:eq(env.notifications[#env.notifications],
+            "Page notes need a database this KOReader cannot open.",
+            "and the reader is told the reason the session reported")
+        t:eq(p.input_lease, nil, "no capture was installed")
+        t:eq(p.store:countPages(), 0, "and nothing reached the sidecar")
     end)
 
     t:case("a fixed layout with no session refuses the point rather than storing it", function()
@@ -438,6 +495,31 @@ return function(ctx)
             "so is the native page size")
         t:check(lines:find("alpha overlay: yes", 1, true) ~= nil,
             "and so is the alpha blit")
+    end)
+
+    t:case("the file manager answers the gate without loading the reader", function()
+        -- `Compat.capabilities` resolves its dependencies by `require`, and
+        -- two of them are the reader-view stack. A file-manager host reads
+        -- only the gate, so probing the other two there would drag ReaderView
+        -- and Document into file-manager start-up for an answer nobody asks.
+        ctx.reset{ wacom_protocol = true }
+        package.loaded["apps/reader/modules/readerview"] = nil
+        package.loaded["document/document"] = nil
+        local p = support.newFileManagerPlugin(ctx.JustDraw, env)
+        t:eq(p.is_docless, true, "this is the file-manager host")
+        t:eq(package.loaded["apps/reader/modules/readerview"], nil,
+            "ReaderView was never required")
+        t:eq(package.loaded["document/document"], nil,
+            "and neither was Document")
+        t:eq(p.capabilities.stylus_api, true, "the gate is still answered")
+    end)
+
+    t:case("a reader host does probe all four", function()
+        local p = pdfPlugin()
+        t:eq(p.capabilities.stylus_api, true, "the gate")
+        t:eq(p.capabilities.view_transform, true, "the transform pair")
+        t:eq(p.capabilities.native_dimensions, true, "the native page size")
+        t:eq(p.capabilities.alpha_blit, true, "and the alpha blit")
     end)
 
     t:case("a runtime with no stylus API reports it as a missing capability", function()

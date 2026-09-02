@@ -95,16 +95,31 @@ local INPUT_ERRORS = {
 }
 
 --[[--
+The three menu labels the refusal below has to walk, named once.
+
+A sentence that tells a reader where to go and then names rows that are not
+there is worse than no sentence, and the way that happens is a string written
+from a plan and a menu built from the code. These are the labels the menu
+itself is built from, so the two can no longer disagree: rename a row here and
+the instruction renames with it.
+]]
+local MENU_JUSTDRAW = _("JustDraw")
+local MENU_DRAWING_SHEET = _("Drawing sheet")
+local MENU_OPEN_SHEET_HERE = _("Open sheet here")
+
+--[[--
 What "Start drawing" means in a reflowable book on a runtime that has sheets.
 
 The sidecar is frozen (ADR-39), so there is nowhere for this contact to go and
-the honest answer is not "no" but "here is where the ink lives now". Said by
-`setDrawing` rather than at the first point, because the whole refusal is that
-nothing starts: no capture, no toolbar forced on, no sheet created behind the
-reader's back.
+the honest answer is not "no" but "here is where the ink lives now" -- said as
+the path a reader taps, because the button they just pressed is the one that
+refused. Said by `setDrawing` rather than at the first point, because the whole
+refusal is that nothing starts: no capture, no toolbar forced on, no sheet
+created behind the reader's back.
 ]]
-local LEGACY_FROZEN_EPUB = _(
-    "Open a drawing sheet here to draw in this book: Draw ▸ Open drawing sheet here.")
+local LEGACY_FROZEN_EPUB = T(
+    _("Open a drawing sheet to draw in this book: %1 ▸ %2 ▸ %3."),
+    MENU_JUSTDRAW, MENU_DRAWING_SHEET, MENU_OPEN_SHEET_HERE)
 
 --[[--
 Every reason page ink can refuse, turned into the one sentence for it.
@@ -452,16 +467,18 @@ function JustDraw:init()
 
     `stylus_api` is the whole product gate: it separates v2026.07 from
     v2026.03 and decides whether the new surfaces exist at all. The other
-    three are here so an unusual build says so in the log instead of failing
-    later, in a widget, as something that reads like a plugin bug.
+    three are asserted further down, where they matter.
+
+    The two reader probes are skipped in the file manager, and that is the
+    point of doing it here rather than in one call: `Compat.capabilities`
+    resolves what it is not given by `require`, so asking a docless host about
+    the ReaderView transform would pull the whole reader-view stack into
+    file-manager start-up -- on the v2026.03 floor too -- to answer a question
+    nothing docless reads.
     ]]
-    self.capabilities = Compat.capabilities()
+    self.capabilities = Compat.capabilities(self.is_docless
+        and { ReaderView = false, Document = false } or nil)
     self.legacy_frozen = Compat.fullSupport(self.capabilities)
-    local complete, missing = Compat.assertCapabilities(self.capabilities)
-    if not complete then
-        logger.warn("JustDraw: this KOReader is missing", missing,
-            "- page ink and drawing sheets may not work here")
-    end
 
     self.notebooks = nil
     self.notebook_input = nil
@@ -586,6 +603,15 @@ function JustDraw:init()
     self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)
     if self.is_docless then return end
+
+    -- Only now, with a document open: these three exist on both runtimes
+    -- (ADR-41), so a build without one is a build to complain about loudly
+    -- rather than a route to fall back to. Never a gate.
+    local complete, missing = Compat.assertCapabilities(self.capabilities)
+    if not complete then
+        logger.warn("JustDraw: this KOReader is missing", missing,
+            "- page ink and drawing sheets may not work here")
+    end
 
     local pages
     pages, self.stroke_storage_id, self.stroke_storage_present =
@@ -853,7 +879,15 @@ function JustDraw:openDocumentSession(settings)
         on_will_rebuild = function() self:onDocumentInkWillRebuild() end,
         on_view_refused = function(reason) self:onDocumentInkViewRefused(reason) end,
     }
-    if not session:open() then return end
+    local opened, open_error = session:open()
+    if not opened then
+        -- Kept so Draw can say the same thing later. The session notified
+        -- once, at open; a reader who presses Draw ten minutes afterwards is
+        -- owed the reason again rather than a toolbar that arms over nothing.
+        self.document_open_error = open_error or "unavailable"
+        return
+    end
+    self.document_open_error = nil
     self.document_session = session
     self.document_ink_count = nil
     session:setPage(self:currentPage())
@@ -1629,15 +1663,27 @@ function JustDraw:setDrawing(on)
         end
     end
     if on and not self.canvas_open and not self.document_session
-        and self.ui.rolling and self:legacyInkFrozen() then
-        -- A reflowable book with no sheet open has nowhere to put ink on this
-        -- runtime, and "Start drawing" used to answer that by filling the
-        -- sidecar with screen pixels that the next font change made
-        -- meaningless (ADR-39). Refused here rather than at the first point,
-        -- so nothing at all is created: no sheet, no capture, no toolbar
-        -- forced on. Every way in -- this menu entry, the bar's Draw button,
-        -- the dispatcher toggle -- comes through here.
-        self:notify(LEGACY_FROZEN_EPUB)
+        and self:legacyInkFrozen() then
+        --[[--
+        There is nowhere for this reader's ink to go, and arming Draw anyway
+        would mean a toolbar saying Stop over a page that swallows every
+        point in silence (ADR-39). Refused here rather than at the first
+        point, so nothing at all is created: no sheet, no capture, no toolbar
+        forced on. Every way in -- the menu entry, the bar's Draw button, the
+        dispatcher toggle -- comes through here.
+
+        The two hosts are refused for different reasons and get different
+        sentences. A reflowable book has a sheet to offer and the answer is
+        the path to it. A fixed layout has page ink and would be using it, so
+        the only way here is a session that could not open: the reason it
+        reported is what the reader needs, not an instruction they cannot act
+        on.
+        ]]
+        if self.ui.paging then
+            self:notify(documentMessage(self.document_open_error or "unavailable"))
+        else
+            self:notify(LEGACY_FROZEN_EPUB)
+        end
         return
     end
     if on and self.document_session then
@@ -2701,6 +2747,12 @@ function JustDraw:endStroke()
     self.stroke = nil
     self.draw_slot = nil
     if not s then return end
+    -- The second half of the freeze, and the one that matters: `applyPoint`
+    -- decides, but below this line is the only thing in the file that grows
+    -- the sidecar, and a stroke that somehow started must not be persisted
+    -- (ADR-39). Before the dot, not after: painting a point that is then
+    -- refused puts ink on the panel that the next refresh takes away again.
+    if self:legacyInkFrozen() then return self:refuseLegacyPoint() end
 
     if s.n == 1 then -- a dot: never painted live, paint it now
         local painted, left, top, right, bottom =
@@ -2709,10 +2761,6 @@ function JustDraw:endStroke()
             self:refreshBox(left, top, right, bottom, Style.isGray(s.t))
         end
     end
-    -- The second half of the freeze, and the one that matters: `applyPoint`
-    -- decides, but this is the single line in the file that grows the sidecar,
-    -- and a stroke that somehow started must still not be persisted (ADR-39).
-    if self:legacyInkFrozen() then return self:refuseLegacyPoint() end
     self.store:add(self:currentPage(), s)
 end
 
@@ -3807,7 +3855,7 @@ function JustDraw:canvasMenu()
             callback = function() self:confirmDeleteCanvas(active) end,
         }
     else
-        local open_here = _("Open sheet here")
+        local open_here = MENU_OPEN_SHEET_HERE
         items[#items + 1] = {
             -- Closes the menu on purpose: opening a sheet turns drawing on,
             -- and an open menu is unusable once the pen is inking.
@@ -4136,7 +4184,7 @@ function JustDraw:addToMainMenu(menu_items)
     local marker_style_item = self:styleItem(_("Marker"), Style.MARKER)
     marker_style_item.enabled_func = function() return self:markerAvailable() end
     local sheet_item = {
-        text = _("Drawing sheet"),
+        text = MENU_DRAWING_SHEET,
         separator = true,
         enabled_func = function()
             return self.session ~= nil and self.session:isAvailable()
@@ -4145,7 +4193,7 @@ function JustDraw:addToMainMenu(menu_items)
         sub_item_table_func = function() return self:canvasMenu() end,
     }
     menu_items.justdraw = {
-        text = _("JustDraw"),
+        text = MENU_JUSTDRAW,
         sorting_hint = "tools",
         sub_item_table = {
             {
