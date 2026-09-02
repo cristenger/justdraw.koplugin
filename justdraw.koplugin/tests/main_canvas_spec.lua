@@ -1705,4 +1705,27 @@ return function(ctx)
         t:eq(p.evdev_desyncs, 1, "the plugin counted the desync")
         t:eq(p.evdev_desync_cuts, 1, "and that it cost a stroke")
     end)
+
+    t:describe("main / a sheet is on the panel the moment it opens")
+
+    --[[--
+    A sheet with no strokes rasterises synchronously, inside the session's
+    open, before the overlay widget exists -- so the `on_ready` that would
+    have refreshed it is dropped, and `UIManager:show` without a refresh type
+    only repaints. On the device the reader saw the page, unchanged, until
+    some later modal flashed the screen (crash.log 2026-09-02, 11909-11930).
+    ]]
+    t:case("opening a sheet with no strokes enqueues a ui refresh for the overlay itself", function()
+        local p = canvasPlugin()
+        local before = #env.UIManager.dirty
+        local overlay = p:openCanvasHere()
+        t:check(overlay ~= nil, "the sheet opened")
+        local found = false
+        for i = before + 1, #env.UIManager.dirty do
+            local d = env.UIManager.dirty[i]
+            if d[1] == overlay and d[2] == "ui" and d[3] == nil then found = true end
+        end
+        t:eq(found, true,
+            "the overlay's own full ui refresh, not only the toolbar's region")
+    end)
 end

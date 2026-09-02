@@ -411,7 +411,20 @@ function Session:openCanvas(canvas)
         canvas = canvas,
         bar_side = self.plugin and self.plugin.bar_side or "right",
     }
-    UIManager:show(self.overlay_widget)
+    --[[--
+    With a refresh, always.
+
+    A sheet with no strokes finishes its raster inside `SurfaceSession:open()`
+    above, before this widget exists -- so its `on_ready`, the only other
+    place that asks for the overlay's refresh, was dropped by the guard that
+    tests `self.overlay_widget`. And a `show` with no refresh type only
+    schedules a repaint (uimanager.lua:156-186), so the panel kept showing the
+    page under a sheet the framebuffer already held: the reader saw it only
+    when some later modal happened to flash the screen (crash.log 2026-09-02,
+    11909-11930). Whole-widget rather than regional, because the union with
+    the toolbar's own refresh is the whole overlay anyway.
+    ]]
+    UIManager:show(self.overlay_widget, "ui")
     -- Synchronous list/metadata failures are represented by the same visible
     -- load_failed sheet as asynchronous chunk failures. Closing the objects
     -- here would remove the only Retry control and contradict fail-closed

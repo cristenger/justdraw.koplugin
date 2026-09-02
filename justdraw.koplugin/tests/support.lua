@@ -1882,9 +1882,16 @@ function support.install()
     function UIManager:nextTick(fn) self._queue[#self._queue + 1] = fn end
     function UIManager:scheduleIn(_, fn) self._queue[#self._queue + 1] = fn end
     function UIManager:unschedule() end
-    function UIManager:show(w)
+    --- uimanager.lua:156-186: a refresh type handed to `show` goes straight
+    --- to setDirty, and without one the widget is only *repainted* -- which
+    --- is how a sheet reached the framebuffer and never the panel
+    --- (crash.log 2026-09-02, 11909-11930).
+    function UIManager:show(w, refreshtype, refreshregion, _x, _y, refreshdither)
         self.shown[#self.shown + 1] = w
         self._window_stack[#self._window_stack + 1] = { widget = w }
+        if refreshtype then
+            self:setDirty(w, refreshtype, refreshregion, refreshdither)
+        end
     end
     --- Mirrors UIManager:sendEvent @ v2026.07: toasts are offered the event but
     --- never consume it, the topmost non-toast widget gets first refusal, and a
