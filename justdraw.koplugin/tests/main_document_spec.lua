@@ -1117,4 +1117,194 @@ return function(ctx)
         t:check(pageNotesItem(p, "Retry saving ink") ~= nil, "now it is there")
         t:eq(p.drawing, false, "and a failed save stopped drawing")
     end)
+    -- =================================================================
+    t:describe("main / page ink / the dossier")
+
+    --[[--
+    "Document notes" is the whole book on white (ADR-40), and everything about
+    it that only appears once the plugin is wired: which scopes a fixed-layout
+    reader is offered, what the file is called, and -- the part with two
+    surfaces in it -- that "This page" now carries the page's own notes as a
+    composed layer over the book's page rather than a rectangle across it.
+    ]]
+
+    local function scopeValues(p)
+        local out = {}
+        for _, entry in ipairs(p:exportScopes()) do out[#out + 1] = entry.value end
+        return table.concat(out, " ")
+    end
+
+    local function scopeNamed(p, value)
+        for _, entry in ipairs(p:exportScopes()) do
+            if entry.value == value then return entry end
+        end
+        return nil
+    end
+
+    --- Make this page's document renderable: the suite's fake view has the
+    --- fields the transform reads and not the one `drawPage` is.
+    local function drawablePage(p)
+        local drawn = { count = 0 }
+        p.view.document.drawPage = function(_, bb)
+            drawn.count = drawn.count + 1
+            bb:paintRect(0, 0, 2, 2, "page")
+        end
+        return drawn
+    end
+
+    t:case("a book with page notes offers to export them", function()
+        local p = documentPlugin{
+            canvases = { pageRow(1, 3) },
+            strokes = { [1] = { bar_stroke() } },
+        }
+        local notes = scopeNamed(p, "notes")
+        t:check(notes ~= nil, "the scope is offered: " .. scopeValues(p))
+        t:eq(notes.label, "Document notes", "under its own name")
+        t:check(notes.enabled ~= false, "and it is live")
+    end)
+
+    t:case("a book with nothing in it offers no dossier", function()
+        local p = documentPlugin()
+        t:eq(scopeNamed(p, "notes"), nil, "nothing to gather")
+    end)
+
+    t:case("legacy ink alone is enough to have a dossier", function()
+        local p = documentPlugin()
+        p.store:add(3, { n = 2, w = 4, 10, 10, 30, 10 })
+        t:check(scopeNamed(p, "notes") ~= nil, "the sidecar is a note too")
+        t:check(p:canExport(), "and the entry that opens the dialog is live")
+    end)
+
+    t:case("the dossier's name says the book and nothing about a page", function()
+        local p = documentPlugin{ canvases = { pageRow(1, 3) },
+            strokes = { [1] = { bar_stroke() } } }
+        t:eq(p:exportStem("notes", "S"), "test Notes S",
+            "the book, the word, the stamp")
+        t:eq(p:exportScopePage("notes"), nil,
+            "one page number in the name of a file holding twenty would be a lie")
+    end)
+
+    t:case("the dossier is every note of the book, in order, under a band", function()
+        local p = documentPlugin{
+            canvases = { pageRow(1, 3), pageRow(2, 1) },
+            strokes = { [1] = { bar_stroke() }, [2] = { bar_stroke() } },
+        }
+        p.store:add(3, { n = 2, w = 4, 10, 10, 30, 10 })
+        local built, err = p:buildExport("notes")
+        t:check(built ~= nil, "built: " .. tostring(err))
+        t:eq(#built.items, 3, "two page notes and one legacy page")
+        t:eq(built.items[1].kind .. tostring(built.items[1].page), "page_ink1",
+            "page 1 first")
+        t:eq(built.items[2].kind, "legacy_page", "then page 3's legacy ink")
+        t:eq(built.items[3].kind, "page_ink", "and then page 3's own notes")
+        t:check(type(built.flush) == "function", "the ink is made durable first")
+        t:check(type(built.finish) == "function", "and released at the end")
+        t:check(type(built.cancel) == "function", "and when the reader cancels")
+        t:eq(built.flush(), true, "the flush answers for both surfaces")
+        t:check(built.pixels > 0, "and it can say how much this will weigh")
+    end)
+
+    t:case("a dossier with legacy ink asks before it reads anything", function()
+        local p = documentPlugin{ canvases = { pageRow(1, 1) },
+            strokes = { [1] = { bar_stroke() } } }
+        t:eq(p:buildExport("notes").confirm_warning, nil,
+            "page notes alone need no caveat")
+        p.store:add(3, { n = 2, w = 4, 10, 10, 30, 10 })
+        local warning = p:buildExport("notes").confirm_warning
+        t:check(type(warning) == "string", "legacy ink comes with a sentence")
+        t:check(warning:find("zoom", 1, true) ~= nil
+            and warning:find("cannot be guaranteed", 1, true) ~= nil,
+            "which says what was not stored: " .. tostring(warning))
+    end)
+
+    t:case("this page carries its own notes, composed over the book's page", function()
+        local p, store = documentPlugin{
+            canvases = { pageRow(1, 1) },
+            strokes = { [1] = { bar_stroke() } },
+        }
+        local drawn = drawablePage(p)
+        p.store:add(1, { n = 2, w = 4, 10, 10, 30, 10 })
+        local built, err = p:buildExport("page")
+        t:check(built ~= nil, "built: " .. tostring(err))
+        t:check(type(built.flush) == "function",
+            "the page's notes have to be durable before they are read back")
+        t:check(type(built.finish) == "function", "and the raster released")
+        t:check(type(built.cancel) == "function", "cancel included")
+        local delivered, reason
+        built.render(built.items[1], 1, function(r, e) delivered, reason = r, e end)
+        t:check(delivered == nil,
+            "the overlay is read from the store, so it arrives on a later tick")
+        for _ = 1, 20 do
+            if delivered then break end
+            env.UIManager:flush()
+        end
+        t:check(delivered ~= nil, "delivered: " .. tostring(reason))
+        t:eq(drawn.count, 1, "the document was drawn once")
+        t:eq(#delivered.bb.blits, 1, "one layer went over it")
+        local layer = delivered.bb.blits[1]
+        t:eq(layer.alpha, true,
+            "composed, so alpha 0 leaves the book's text alone (ADR-38)")
+        t:eq(layer.dest_x, 0, "at the page's own left edge")
+        t:eq(layer.dest_y, 0, "and its top")
+        t:eq(layer.w, math.floor(PAGE_W * SCALE), "the width of the page at zoom")
+        t:eq(layer.h, math.floor(PAGE_H * SCALE), "and its height")
+        delivered.release()
+        built.finish()
+        t:eq(store.calls.stroke_list > 0, true,
+            "and the layer was read from the store, not from the live cache")
+    end)
+
+    t:case("a page whose notes cannot be reached refuses, and says why", function()
+        local p, store = documentPlugin{
+            canvases = { pageRow(1, 1) },
+            strokes = { [1] = { bar_stroke() } },
+        }
+        drawablePage(p)
+        store.findPageInkSurface = function() return nil, "database is locked" end
+        local built = p:buildExport("page")
+        local delivered, reason
+        built.render(built.items[1], 1, function(r, e) delivered, reason = r, e end)
+        for _ = 1, 20 do
+            if reason then break end
+            env.UIManager:flush()
+        end
+        t:check(delivered == nil,
+            "a file that quietly left the notes out is worse than none")
+        t:eq(reason, "database is locked", "and the reason is the store's")
+    end)
+
+    t:case("a view that cannot place the notes refuses too", function()
+        local p = documentPlugin{
+            canvases = { pageRow(1, 1) },
+            strokes = { [1] = { bar_stroke() } },
+        }
+        drawablePage(p)
+        -- A rotated page state is one of the views the transform cannot map
+        -- (ADR-38); the page renders, but the layer over it would be a guess.
+        p.view.state.rotation = 90
+        local built = p:buildExport("page")
+        local delivered, reason
+        built.render(built.items[1], 1, function(r, e) delivered, reason = r, e end)
+        for _ = 1, 20 do
+            if reason then break end
+            env.UIManager:flush()
+        end
+        t:check(delivered == nil, "refused")
+        t:eq(reason, "unsupported_rotation", "with the transform's own reason")
+    end)
+
+    t:case("a page with no notes exports the way it always did", function()
+        local p = documentPlugin()
+        drawablePage(p)
+        local built = p:buildExport("page")
+        local delivered
+        built.render(built.items[1], 1, function(r) delivered = r end)
+        for _ = 1, 20 do
+            if delivered then break end
+            env.UIManager:flush()
+        end
+        t:check(delivered ~= nil, "the page came back")
+        t:eq(#delivered.bb.blits, 0, "with nothing composed over it")
+        delivered.release()
+    end)
 end

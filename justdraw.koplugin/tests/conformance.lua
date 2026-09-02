@@ -2279,6 +2279,95 @@ do
 
 end
 
+-- =====================================================================
+-- The exported header band's text, against the real widget
+--
+-- The band over every page of a "Document notes" export (ADR-40) is 118
+-- pixels of a *raster*, while `Font:getFace` sizes its faces in units the
+-- screen scales -- so the face is chosen by measuring rather than by
+-- arithmetic, and the suite injects a recorder because TextWidget cannot be
+-- built there at all. These are the three things that recorder cannot say.
+-- =====================================================================
+do
+    local Blitbuffer = require("ffi/blitbuffer")
+    local Font = require("ui/font")
+    local Header = require("ink_export_header")
+    local Screen = Device.screen
+    local widget_ok, TextWidget = pcall(require, "ui/widget/textwidget")
+
+    --- One measured line. `keep` hands the widget back so a caller can paint
+    --- it; otherwise it is freed here, because a probe that leaked a widget
+    --- per claim would be measuring its own mess.
+    local function lineHeight(face, text, max_width, keep)
+        local made, widget = pcall(TextWidget.new, TextWidget, {
+            text = text or "Hg", face = face, max_width = max_width,
+            truncate_with_ellipsis = max_width ~= nil,
+        })
+        if not made or not widget then return nil end
+        local size = widget:getSize()
+        if keep then return size, widget end
+        pcall(widget.free, widget)
+        return size
+    end
+
+    -- A title is as long as the book's file name, and the band is one line.
+    -- The cut has to happen where the glyphs stop fitting, which is why the
+    -- caller hands the whole string over and never trims it itself.
+    local max_width = 400
+    local long = string.rep("Bartleby the Scrivener ", 20)
+    local size, widget
+    if widget_ok then
+        size, widget = lineHeight(Font:getFace("cfont", 20), long, max_width,
+            true)
+    end
+    local painted = false
+    if size then
+        local bb = Blitbuffer.new(max_width + 20, size.h + 20,
+            Blitbuffer.TYPE_BB8)
+        bb:fill(Blitbuffer.COLOR_WHITE)
+        painted = pcall(widget.paintTo, widget, bb, 10, 10)
+        bb:free()
+        pcall(widget.free, widget)
+    end
+    claim("TextWidget truncates a long line inside max_width on a BB8",
+        widget_ok and size ~= nil,
+        size ~= nil and size.w <= max_width and painted,
+        size and ("w=" .. tostring(size.w) .. " for max_width=" .. max_width
+            .. ", painted=" .. tostring(painted)) or "widget not built")
+
+    -- The reason the face is measured: the number handed to `getFace` is not
+    -- pixels, it is a size the device scales.
+    local scaled = Font:getFace("cfont", 20)
+    claim("Font:getFace scales its size by Screen:scaleBySize",
+        type(scaled) == "table" and scaled.size ~= nil,
+        scaled ~= nil and scaled.size == Screen:scaleBySize(20),
+        "face.size = " .. tostring(scaled and scaled.size)
+            .. ", scaleBySize(20) = " .. tostring(Screen:scaleBySize(20)))
+
+    local small = widget_ok and lineHeight(Font:getFace("cfont", 12)) or nil
+    local large = widget_ok and lineHeight(Font:getFace("cfont", 40)) or nil
+
+    claim("a larger face is a taller line",
+        small ~= nil and large ~= nil,
+        small ~= nil and large ~= nil and large.h > small.h,
+        small and (small.h .. " then " .. large.h) or "widgets not built")
+
+    -- And the whole of it, end to end: the painter this export builds, on
+    -- this device's screen, inside the band it was measured against.
+    local band_ok, band_height
+    if widget_ok then
+        local bb = Blitbuffer.new(1000, Header.BAND_PX, Blitbuffer.TYPE_BB8)
+        bb:fill(Blitbuffer.COLOR_WHITE)
+        band_ok, band_height = pcall(Header.textPainter(), bb, Header.PAD_PX, 0,
+            "Moby Dick · Page note · Page 12", 1000 - 2 * Header.PAD_PX)
+        bb:free()
+    end
+    claim("the header's measured face fits its band on this runtime",
+        widget_ok and band_ok == true,
+        type(band_height) == "number" and band_height <= Header.BAND_PX,
+        tostring(band_height) .. " of " .. Header.BAND_PX .. " pixels")
+end
+
 for _, r in ipairs(rows) do
     io.write(string.format("%-12s %-56s %s\n", r[1], r[2], r[3]))
 end

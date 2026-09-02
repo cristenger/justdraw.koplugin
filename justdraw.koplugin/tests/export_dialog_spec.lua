@@ -361,7 +361,7 @@ return function(ctx)
         }
         Dialog.run{
             build = function() return built end,
-            notify = function() end,
+            notify = function(text) said = text end,
             show_modal = function(w) modals[#modals + 1] = w; return w end,
             close_modal = function() end,
             schedule = function(fn) sched:schedule(fn) end,
@@ -842,5 +842,47 @@ return function(ctx)
             "the editor can open one")
         t:check(type(Library.showExport) == "function",
             "and so can the library, with no book open")
+    end)
+    t:case("a reader's own dossier asks about its legacy ink first", function()
+        -- The generic cases above build the warning by hand. This is the one
+        -- that goes through the controller, so the sentence a reader actually
+        -- sees is the one the source composed (ADR-40).
+        if Export.isRunning() then Export.cancelRunning() end
+        local plugin = newPlugin{}
+        plugin.ui.paging = true
+        plugin.store:add(7, { n = 2, w = 4, 10, 10, 30, 10 })
+        local fs = support.newExportFs{ dirs = { [DIR] = true } }
+        local sched = support.newScheduler()
+        local modals, said = {}, nil
+        local job, err = Dialog.run{
+            build = function(scope) return plugin:buildExport(scope) end,
+            scope = "notes",
+            notify = function(text) said = text end,
+            show_modal = function(w) modals[#modals + 1] = w; return w end,
+            close_modal = function() end,
+            schedule = function(fn) sched:schedule(fn) end,
+            format = "pdf", dir = DIR, stem = "Notes",
+            fs = fs,
+            disk = function() return { available = 500 * 1024 * 1024 } end,
+        }
+        t:check(job == nil, "no job while a question is standing")
+        t:eq(err, "confirm_warning", "and the run says which question")
+        t:eq(#modals, 1, "one question")
+        t:check(modals[1].text:find("legacy ink", 1, true) ~= nil,
+            "about the legacy ink: " .. tostring(modals[1].text))
+        modals[1].ok_callback()
+        -- Two queues: the job advances on the dialog's scheduler, and the
+        -- renderer delivers on the plugin's own (both `UIManager:nextTick` in
+        -- production). Pump them together until the run settles.
+        for _ = 1, 20 do
+            if said then break end
+            sched:drain()
+            env.UIManager:flush()
+        end
+        t:check(fs.files[DIR .. "/Notes.pdf"] ~= nil,
+            "and saying yes exports the dossier: " .. tostring(said))
+        t:check(said ~= nil and said:find("Exported", 1, true) ~= nil,
+            "and the reader is told where it went")
+        if Export.isRunning() then Export.cancelRunning() end
     end)
 end

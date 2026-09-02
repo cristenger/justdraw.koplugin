@@ -128,6 +128,12 @@ stopped being true.
 ]]
 local function pageInkSurfaces(opts, items, max_pages)
     local repository = opts.repository
+    -- No store at all is not the same as a store that will not answer. A
+    -- runtime without the stylus API never opens a page-ink session (ADR-41)
+    -- and a book the database cannot identify never gets a row; what such a
+    -- book has is its sidecar, and that is a dossier. A store that is there
+    -- and refuses still says so, below.
+    if repository == nil then return items end
     if type(repository) ~= "table"
         or type(repository.listPageInkSurfaces) ~= "function" then
         return nil, "no_repository"

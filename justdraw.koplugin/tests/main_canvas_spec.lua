@@ -1495,4 +1495,79 @@ return function(ctx)
         t:eq(p.drawing, false, "drawing stopped")
         t:eq(p.canvas_stroke, nil, "and no half a stroke is left dangling")
     end)
+    -- =================================================================
+    t:describe("main / the book's dossier")
+
+    --[[--
+    What a reflowable book offers to export, once there is more than one kind
+    of note in it (ADR-40).
+
+    The sheets scope and the dossier disagree about the anchor index on
+    purpose: "All drawing sheets" is not offered at all without a reading
+    order, while "Document notes" is offered and *disabled*, because a reader
+    whose book has notes in it should be told the option exists and is not
+    ready rather than left to wonder where it went.
+    ]]
+
+    local function scopeNamed(p, value)
+        for _, entry in ipairs(p:exportScopes()) do
+            if entry.value == value then return entry end
+        end
+        return nil
+    end
+
+    t:case("the sheets scope says what it covers", function()
+        local canvases, pages = manySheets(2)
+        local p = canvasPlugin{ canvases = canvases, pages = pages }
+        local sheets = scopeNamed(p, "sheets")
+        t:check(sheets ~= nil, "the scope is there")
+        t:eq(sheets.label, "All drawing sheets", "under a name that is not a page")
+    end)
+
+    t:case("a book with sheets offers its whole dossier", function()
+        local canvases, pages = manySheets(2)
+        local p = canvasPlugin{ canvases = canvases, pages = pages }
+        local notes = scopeNamed(p, "notes")
+        t:check(notes ~= nil, "the dossier is offered")
+        t:check(notes.enabled ~= false, "and it is live once the index is whole")
+        local built, err = p:buildExport("notes")
+        t:check(built ~= nil, "built: " .. tostring(err))
+        t:eq(#built.items, 2, "both sheets")
+        t:eq(built.items[1].kind, "sheet", "as sheets")
+        t:eq(built.confirm_warning, nil, "with nothing to warn about")
+    end)
+
+    t:case("while the index builds, the dossier is offered and refused", function()
+        local canvases, pages = manySheets(3)
+        local p = canvasPlugin{ canvases = canvases, pages = pages,
+            keep_indexing = true }
+        p.store:add(2, { n = 2, w = 4, 10, 10, 30, 10 })
+        local notes = scopeNamed(p, "notes")
+        t:check(notes ~= nil, "the reader can see the option exists")
+        t:eq(notes.enabled, false, "and that it is not ready")
+        t:eq(notes.reason, "index_incomplete", "for the reason it already knows")
+        local built, err = p:buildExport("notes")
+        t:check(built == nil, "and asking for it anyway refuses")
+        t:eq(err, "index_incomplete", "with the same reason")
+        settleIndex(p)
+        t:check(scopeNamed(p, "notes").enabled ~= false,
+            "once the index is whole it is live")
+    end)
+
+    t:case("legacy ink in a book with no sheets is still a dossier", function()
+        local p = canvasPlugin()
+        p.store:add(4, { n = 2, w = 4, 10, 10, 30, 10 })
+        t:check(scopeNamed(p, "notes") ~= nil, "the sidecar is a note")
+        t:check(p:canExport(), "and the menu entry is live for it")
+        local built, err = p:buildExport("notes")
+        t:check(built ~= nil, "built: " .. tostring(err))
+        t:eq(#built.items, 1, "one page of legacy ink")
+        t:eq(built.items[1].kind, "legacy_page", "as legacy")
+        t:check(type(built.confirm_warning) == "string", "and it is warned about")
+    end)
+
+    t:case("a book with nothing in it offers no dossier", function()
+        local p = canvasPlugin()
+        t:eq(scopeNamed(p, "notes"), nil, "nothing to gather")
+    end)
 end

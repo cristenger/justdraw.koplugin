@@ -936,6 +936,23 @@ function Session:deleteCurrent()
 end
 
 --[[--
+The read side of this book's page ink, for one export.
+
+Borrowed, never owned: an export reads the rows and the strokes through the
+same repository this session writes them with, and writes to neither it nor
+the session. The book id comes with it because every page-ink query is keyed
+on it, and a caller that had the repository alone would have to guess.
+
+The *count* of surfaces is deliberately not what an export asks (see
+`countSurfaces`): it answers for the page that happens to be open. A dossier
+asks the repository, after the flush.
+]]
+function Session:exportSources()
+    if not self:isAvailable() then return nil, "unavailable" end
+    return self.repository, self.book_id
+end
+
+--[[--
 How many pages of this book carry ink.
 
 One indexed COUNT, for the entry that offers to delete them all: it has to

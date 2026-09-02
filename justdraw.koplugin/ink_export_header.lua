@@ -198,10 +198,17 @@ actually stop fitting, which is not something the caller can compute.
 ]]
 function Header.textPainter(opts)
     opts = opts or {}
-    local TextWidget = opts.TextWidget or require("ui/widget/textwidget")
-    local Font = opts.Font or require("ui/font")
     local box = tonumber(opts.box) or Header.TEXT_BOX_PX
-    local face
+    local TextWidget, Font, face
+
+    -- Resolved at the first line painted rather than here: a painter is built
+    -- for every dossier, including in a host that has no widget layer at all,
+    -- and `compose` already treats a painter that cannot paint as a lost line
+    -- rather than a lost page.
+    local function widgets()
+        TextWidget = opts.TextWidget or require("ui/widget/textwidget")
+        Font = opts.Font or require("ui/font")
+    end
 
     local function measuredFace()
         local size = tonumber(opts.start_size) or Header.START_SIZE
@@ -217,6 +224,7 @@ function Header.textPainter(opts)
     end
 
     return function(bb, x, y, text, max_width)
+        if not TextWidget then widgets() end
         if not face then face = measuredFace() end
         local widget = TextWidget:new{
             text = text, face = face, max_width = max_width,

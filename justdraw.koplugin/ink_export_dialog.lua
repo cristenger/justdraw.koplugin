@@ -413,7 +413,8 @@ end
 --[[--
   opts.title        what is being exported, for the dialog's heading
   opts.stem         proposed file name; a string, or function(scope) -> string
-  opts.scopes       { { value, label } } -- omitted or single means no choice
+  opts.scopes       { { value, label, enabled } } -- `enabled = false` shows a
+                    scope the book has but cannot export yet
   opts.build        function(scope) -> { items, render, flush, title, finish,
                                         confirm_warning }
   opts.settings     where the format and folder are remembered
@@ -569,7 +570,13 @@ function Dialog.show(opts)
         local scope_buttons = {}
         for i = 1, #opts.scopes do
             local entry = opts.scopes[i]
+            -- `enabled` is relayed rather than assumed: a scope can be one the
+            -- book plainly has and cannot offer yet -- the whole dossier while
+            -- the anchor index is still building (ADR-42) -- and a reader is
+            -- owed the greyed-out option rather than a missing one. Absent
+            -- means enabled: CheckButton's own default.
             scope_buttons[i] = { text = entry.label, value = entry.value,
+                enabled = entry.enabled,
                 checked = i == 1 or nil }
         end
         -- Its own table, so it is its own radio group (RadioButtonTable keeps
