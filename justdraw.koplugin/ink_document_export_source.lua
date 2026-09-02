@@ -41,6 +41,7 @@ rendered without emitting `PageUpdate`, and an export is a read.
 local Blitbuffer = require("ffi/blitbuffer")
 
 local ExportSource = require("ink_export_source")
+local Header = require("ink_export_header")
 local Raster = require("ink_export_raster")
 local Render = require("ink_render")
 local Style = require("ink_style")
@@ -263,17 +264,50 @@ Page ink knows its own units and may be a true 300 dpi; a sheet and legacy ink
 are pixels of a screen nobody recorded and are rendered 1:1. Every kind goes
 through one function because the forecast, the raster and the PDF page must
 agree, and three call sites choosing for themselves is how they stop agreeing.
+
+The scale is then bounded a second time against the page the *header* will
+make. What gets allocated and encoded is the note plus 118 rows, so a scale
+that only fitted the note would put the finished page over the budget the
+budget exists to hold (ADR-40). The point size does not change with it: a page
+note keeps the size the original page measured however far its raster is
+reduced, and the band's own 10 mm is added by `Header.compose`.
 ]]
 function DocumentSource.geometryFor(item)
     if type(item) ~= "table" then return nil, "bad_geometry" end
-    if item.kind == "page_ink" then return ExportSource.pageInkGeometry(item) end
-    if item.kind == "legacy_page" then return ExportSource.legacyGeometry(item) end
-    return ExportSource.canvasGeometry(item)
+    local base, width_pt, height_pt
+    if item.kind == "page_ink" then
+        base, width_pt, height_pt = ExportSource.pageInkGeometry(item)
+    elseif item.kind == "legacy_page" then
+        base, width_pt, height_pt = ExportSource.legacyGeometry(item)
+    else
+        base, width_pt, height_pt = ExportSource.canvasGeometry(item)
+    end
+    if not base then
+        return nil, (type(width_pt) == "string" and width_pt) or "bad_geometry"
+    end
+    local scale, err = Header.budgetedScale(item.logical_w, item.logical_h, base)
+    if not scale then return nil, err end
+    return scale, width_pt, height_pt
 end
 
---- What this dossier will rasterise, for the space forecast and nothing else.
+--[[--
+What this dossier will rasterise, for the space forecast and nothing else.
+
+The band is counted here rather than left to the reader's surprise: it is
+118 rows of every page, which on a forty-page dossier is a page of its own.
+Answers nil if any note has no usable geometry, exactly as the surface forecast
+does -- half a forecast quoted as a whole one is worse than no number.
+]]
 function DocumentSource.totalPixels(items, geometry)
-    return ExportSource.totalPixels(items, geometry or DocumentSource.geometryFor)
+    geometry = geometry or DocumentSource.geometryFor
+    local content = ExportSource.totalPixels(items, geometry)
+    if not content then return nil end
+    local band = 0
+    for i = 1, #items do
+        local scale = geometry(items[i])
+        band = band + Header.bandPixels(items[i].logical_w, scale)
+    end
+    return content + band
 end
 
 --[[--
@@ -330,11 +364,41 @@ local function legacyRenderer(opts)
 end
 
 --[[--
+Put the band on whatever the note's own renderer produced.
+
+Wrapped around `done` rather than folded into each renderer: there are two
+ways a raster gets made and exactly one band, and a second copy of this would
+be the copy that forgets to release. `Header.compose` releases the note's
+raster itself on success and releases nothing on a refusal, which is why the
+refusal branch here releases and the success branch does not.
+]]
+local function withHeader(header, item, done)
+    if type(header) ~= "table" then return done end
+    return function(result, err)
+        if not result then return done(nil, err) end
+        local composed, compose_err = Header.compose{
+            result = result,
+            title = header.title,
+            kind_label = DocumentSource.kindLabel(item.kind),
+            location_label = item.location_label,
+            paint_text = header.paint_text,
+            Blitbuffer = header.Blitbuffer,
+        }
+        if not composed then
+            if type(result.release) == "function" then pcall(result.release) end
+            return done(nil, compose_err or "bad_raster")
+        end
+        return done(composed)
+    end
+end
+
+--[[--
   opts.schedule   function(fn) -- must defer; never call fn inline
   opts.geometry   the scale and page size per item
   opts.track      handed every raster as it opens, so Cancel can close it
   opts.legacy     the frozen sidecar view
   opts.ink        the colour ink is rendered in
+  opts.header     { title, paint_text } -- the band over every page
 
 One renderer for the whole dossier, switching on the descriptor. The stored
 surfaces go through the same `ExportSource.surfaceRenderer` a notebook uses --
@@ -346,6 +410,7 @@ function DocumentSource.renderer(opts)
     local geometry = opts.geometry or DocumentSource.geometryFor
     local legacy_render = legacyRenderer(opts)
     return function(item, index, done)
+        done = withHeader(opts.header, item, done)
         if item.kind == "legacy_page" then
             return legacy_render(item, index, done)
         end

@@ -2327,6 +2327,7 @@ for _, spec in ipairs({
     "export_job_spec",
     "export_reader_spec",
     "export_enumeration_spec",
+    "export_header_spec",
     "export_dialog_spec",
 }) do
     dofile(tests_dir .. "/" .. spec .. ".lua")(ctx)

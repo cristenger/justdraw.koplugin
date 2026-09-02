@@ -532,4 +532,137 @@ return function(ctx)
         t:check(delivered ~= nil, "delivered: " .. tostring(reason))
         delivered.release()
     end)
+    -- =================================================================
+    t:describe("export / enumeration / the notes under their band")
+
+    local Header = require("ink_export_header")
+
+    --- The injected painter, again as a recorder: see export_header_spec.
+    local function recorder()
+        local rec = { calls = {} }
+        rec.paint = function(_, _, _, text, max_width)
+            rec.calls[#rec.calls + 1] = { text = text, max_width = max_width }
+            return 60
+        end
+        return rec
+    end
+
+    t:case("every kind is scaled so the page the band made fits the budget", function()
+        local sheet = { kind = "sheet", logical_w = 2000, logical_h = 4000,
+            units = "px" }
+        t:eq(Source.canvasGeometry(sheet), 1,
+            "the sheet alone is exactly the budget at one to one")
+        local scale = DocumentSource.geometryFor(sheet)
+        t:check(scale < 1, "and the dossier reduces it for the band")
+        local w = math.floor(2000 * scale + 0.5)
+        local h = math.floor(4000 * scale + 0.5)
+        t:check(w * (h + Header.BAND_PX) <= Raster.MAX_PIXELS, "inside it")
+
+        local legacy = { kind = "legacy_page", logical_w = 2000,
+            logical_h = 4000, units = "px" }
+        t:eq(DocumentSource.geometryFor(legacy), scale,
+            "legacy ink is bounded by the same arithmetic")
+        local page_ink = { kind = "page_ink", logical_w = 2000,
+            logical_h = 4000, units = "pt" }
+        local ink_scale = DocumentSource.geometryFor(page_ink)
+        t:check(math.floor(2000 * ink_scale + 0.5)
+            * (math.floor(4000 * ink_scale + 0.5) + Header.BAND_PX)
+            <= Raster.MAX_PIXELS, "and so is a page note")
+    end)
+
+    t:case("the forecast counts the band it is going to write", function()
+        local items = {
+            { kind = "sheet", logical_w = 100, logical_h = 200, units = "px" },
+            { kind = "legacy_page", logical_w = 300, logical_h = 400,
+              units = "px" },
+        }
+        local total = DocumentSource.totalPixels(items)
+        t:eq(total, 100 * (200 + Header.BAND_PX) + 300 * (400 + Header.BAND_PX),
+            "content plus band, per page")
+        t:check(total > Source.totalPixels(items, DocumentSource.geometryFor),
+            "which is more than the content alone")
+    end)
+
+    t:case("a note that cannot be sized leaves no forecast at all", function()
+        t:check(DocumentSource.totalPixels{
+            { kind = "sheet", logical_w = 0, logical_h = 10, units = "px" },
+        } == nil, "half a forecast is worse than none")
+    end)
+
+    t:case("every rendered note arrives under its band", function()
+        local sched = support.newScheduler()
+        local rec = recorder()
+        local render = DocumentSource.renderer{
+            schedule = function(fn) sched:schedule(fn) end,
+            legacy = legacyWith{ [3] = { stroke(10, 10, 20, 20) } },
+            ink = "black",
+            header = { title = "Moby Dick", paint_text = rec.paint },
+        }
+        local item = { kind = "legacy_page", page = 3, legacy = true,
+            logical_w = 600, logical_h = 800, units = "px",
+            location_label = "Stored page 3" }
+        local delivered, reason
+        render(item, 1, function(result, err) delivered, reason = result, err end)
+        sched:drain()
+        t:check(delivered ~= nil, "delivered: " .. tostring(reason))
+        t:eq(delivered.bb:getHeight(), 800 + Header.BAND_PX,
+            "the note grew by the band")
+        t:eq(rec.calls[1].text, "Moby Dick · Legacy ink · Stored page 3",
+            "which says what this page is")
+        delivered.release()
+    end)
+
+    t:case("a stored surface gets the same band, and its own words", function()
+        local canvases = { { id = 4, logical_w = 100, logical_h = 200 } }
+        local store = support.newCanvasStore(canvases)
+        local sched = support.newScheduler()
+        local rec = recorder()
+        local render = DocumentSource.renderer{
+            repository = store,
+            schedule = function(fn) sched:schedule(fn) end,
+            header = { title = "Moby Dick", paint_text = rec.paint },
+        }
+        local items = DocumentSource.documentNotes{
+            rolling = true, canvases = canvases,
+            index = newIndex(true, { [4] = 2 }),
+            repository = store, screen = { w = 600, h = 800 },
+        }
+        local delivered, reason
+        render(items[1], 1, function(result, err) delivered, reason = result, err end)
+        sched:drain()
+        t:check(delivered ~= nil, "delivered: " .. tostring(reason))
+        t:eq(delivered.bb:getHeight(), 200 + Header.BAND_PX, "with its band")
+        t:eq(rec.calls[1].text, "Moby Dick · Drawing sheet · Page 2",
+            "named for what it is")
+        -- The band adds points as well as pixels, or the PDF would squeeze
+        -- the whole composed page into the note's own height.
+        t:check(math.abs(delivered.height_pt
+            - (Raster.nominalPoints(200, Raster.NOMINAL_DPI) + Header.BAND_PT))
+            < 1e-9, "and the page grew by the same 10 mm")
+        delivered.release()
+    end)
+
+    t:case("a surface that fails to raster never reaches the band", function()
+        local canvases = { { id = 4, logical_w = 100, logical_h = 200 } }
+        local store = support.newCanvasStore(canvases)
+        store.fail_stroke_list = "database is locked"
+        local sched = support.newScheduler()
+        local rec = recorder()
+        local render = DocumentSource.renderer{
+            repository = store,
+            schedule = function(fn) sched:schedule(fn) end,
+            header = { title = "T", paint_text = rec.paint },
+        }
+        local items = DocumentSource.documentNotes{
+            rolling = true, canvases = canvases,
+            index = newIndex(true, { [4] = 2 }),
+            repository = store, screen = { w = 600, h = 800 },
+        }
+        local delivered, reason
+        render(items[1], 1, function(result, err) delivered, reason = result, err end)
+        sched:drain()
+        t:check(delivered == nil, "nothing to compose")
+        t:eq(reason, "database is locked", "and the reason is the store's")
+        t:eq(#rec.calls, 0, "the band was never painted")
+    end)
 end
