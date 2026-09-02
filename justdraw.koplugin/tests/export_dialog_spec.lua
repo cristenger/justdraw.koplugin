@@ -354,7 +354,7 @@ return function(ctx)
             files = { [target] = "an earlier export" },
         }
         local sched = support.newScheduler()
-        local modals, tracker = {}, {}
+        local modals, tracker, said = {}, {}, nil
         local built = {
             items = { {}, {} },
             render = function(item, index, done) end,   -- never answers

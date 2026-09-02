@@ -439,6 +439,11 @@ local function endSurfaceStroke(self, route)
         return nil, err
     end
     self[route.backpressure_flag] = false
+    if route == DOCUMENT_ROUTE then
+        -- The first stroke on a page is what turns an empty surface into one
+        -- the menu counts; the row itself was created before the contact.
+        self.document_ink_count = nil
+    end
     if painted and tr then
         self[route.paint](self, {
             x = left, y = top, w = right - left, h = bottom - top,
@@ -2374,7 +2379,11 @@ function JustDraw:diagnosticReport()
     local named, revision = pcall(function() return Version:getCurrentRevision() end)
     local r = {
         version   = named and revision or nil,
-        capabilities = self.capabilities or Compat.capabilities(),
+        -- The file manager's start-up probe is deliberately narrowed (see
+        -- `init`), and would report the two reader capabilities as absent.
+        -- The report is a user action and can afford the full probe.
+        capabilities = self.is_docless and Compat.capabilities()
+            or self.capabilities or Compat.capabilities(),
         model     = Device.model,
         mode      = self.input_mode,
         backend   = backend,

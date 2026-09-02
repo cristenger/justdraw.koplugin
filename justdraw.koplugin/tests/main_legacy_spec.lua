@@ -503,15 +503,44 @@ return function(ctx)
         -- only the gate, so probing the other two there would drag ReaderView
         -- and Document into file-manager start-up for an answer nobody asks.
         ctx.reset{ wacom_protocol = true }
+        -- Kept, because every case after this one loads them again through
+        -- the ordinary requires and would otherwise be measuring this one.
+        local view = package.loaded["apps/reader/modules/readerview"]
+        local document = package.loaded["document/document"]
         package.loaded["apps/reader/modules/readerview"] = nil
         package.loaded["document/document"] = nil
+        local ran, err = pcall(function()
+            local p = support.newFileManagerPlugin(ctx.JustDraw, env)
+            t:eq(p.is_docless, true, "this is the file-manager host")
+            t:eq(package.loaded["apps/reader/modules/readerview"], nil,
+                "ReaderView was never required")
+            t:eq(package.loaded["document/document"], nil,
+                "and neither was Document")
+            t:eq(p.capabilities.stylus_api, true, "the gate is still answered")
+        end)
+        package.loaded["apps/reader/modules/readerview"] = view
+        package.loaded["document/document"] = document
+        if not ran then error(err, 0) end
+    end)
+
+    --[[--
+    The narrowed probe is a start-up decision, not a description of the
+    runtime. Diagnostics is a user action on a machine the reader is about to
+    file a bug from, so it re-asks and reports what this KOReader actually
+    has -- otherwise a notebook's report from the file manager says the
+    transform and the page size are missing on a build that has both.
+    ]]
+    t:case("diagnostics from the file manager still describe the whole runtime", function()
+        ctx.reset{ wacom_protocol = true }
         local p = support.newFileManagerPlugin(ctx.JustDraw, env)
         t:eq(p.is_docless, true, "this is the file-manager host")
-        t:eq(package.loaded["apps/reader/modules/readerview"], nil,
-            "ReaderView was never required")
-        t:eq(package.loaded["document/document"], nil,
-            "and neither was Document")
-        t:eq(p.capabilities.stylus_api, true, "the gate is still answered")
+        t:eq(p.capabilities.view_transform, false,
+            "start-up did not probe the reader stack")
+        local lines = table.concat(p:diagnosticLines(), "\n")
+        t:check(lines:find("page transform: yes", 1, true) ~= nil,
+            "but the report probed it and found it")
+        t:check(lines:find("native page size: yes", 1, true) ~= nil,
+            "and the native page size with it")
     end)
 
     t:case("a reader host does probe all four", function()

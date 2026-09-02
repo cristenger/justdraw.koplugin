@@ -1310,6 +1310,19 @@ return function(ctx)
 
     t:describe("main / page ink / no commit under a contact (ADR-42)")
 
+    t:case("the first stroke on a page makes the menu's count stale", function()
+        local p = documentPlugin()
+        t:eq(startDrawing(p), true, "drawing is on")
+        -- Reading it is what caches it, whatever it answers.
+        p:documentInkCount()
+        t:check(p.document_ink_count ~= nil, "the menu's count is cached")
+        penDown(p, INK_XY.x, INK_XY.y)
+        penFrame(p, INK_XY.x + 20, INK_XY.y + 20)
+        penLift(p, INK_XY.x + 40, INK_XY.y + 40)
+        t:eq(p.document_ink_count, nil,
+            "the stroke invalidated the cache the menu reads")
+    end)
+
     t:case("the write timer stands aside while the pen is on the glass", function()
         local p, store = documentPlugin()
         t:eq(startDrawing(p), true, "drawing is on")

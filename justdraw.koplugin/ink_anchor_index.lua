@@ -140,6 +140,9 @@ function Index:open()
     self.after_id = nil
     self.placed = 0
     self.state = "metadata"
+    -- This also retires the resolve batches of the previous open: they carry
+    -- the load generation they were built under, and the list they were
+    -- resolving is the one the lines above have just emptied.
     self.load_generation = self.load_generation + 1
     self:_scheduleLoad(self.load_generation, false)
     return true
@@ -414,6 +417,9 @@ end
 function Index:_rebuild()
     self.generation = self.generation + 1
     local generation = self.generation
+    -- The list this rebuild reads belongs to one open. A later `open` empties
+    -- it without touching `generation`, so a batch has to carry both.
+    local load_generation = self.load_generation
 
     self.page_of = {}
     self.ids_by_page = {}
@@ -440,7 +446,7 @@ function Index:_rebuild()
         return
     end
     self.state = "resolving"
-    self:_scheduleBatch(generation)
+    self:_scheduleBatch(generation, load_generation)
 end
 
 function Index:_place(canvas_id, page)
@@ -454,20 +460,23 @@ function Index:_place(canvas_id, page)
     ids[#ids + 1] = canvas_id
 end
 
-function Index:_scheduleBatch(generation)
+function Index:_scheduleBatch(generation, load_generation)
     local run
     run = function()
-        if self.cancelled or generation ~= self.generation then return end
+        if self.cancelled or generation ~= self.generation
+            or load_generation ~= self.load_generation then
+            return
+        end
         if not self:_canWork() then
             self:_defer(run, true)
             return
         end
-        self:_resolveBatch(generation)
+        self:_resolveBatch(generation, load_generation)
     end
     self:_defer(run, false)
 end
 
-function Index:_resolveBatch(generation)
+function Index:_resolveBatch(generation, load_generation)
     local doc = self.document
     local resolved = {}
     for _ = 1, self.batch do
@@ -503,7 +512,7 @@ function Index:_resolveBatch(generation)
     end
 
     if not final then
-        self:_scheduleBatch(generation)
+        self:_scheduleBatch(generation, load_generation)
         return
     end
 

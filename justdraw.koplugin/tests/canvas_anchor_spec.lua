@@ -499,6 +499,31 @@ return function(ctx)
         t:eq(index:count(), 20, "back to the book's own rows")
     end)
 
+    --[[--
+    A second `open` empties the list and the map, and the resolve batches of
+    the first are still in the scheduler. They check the generation they were
+    built under -- but a reopen is not a rebuild, so `generation` is unchanged
+    and only the load generation tells them their list is gone.
+    ]]
+    t:case("reopening retires the resolve batches of the previous open", function()
+        local index, doc, _, sched = fixture(20, { batch = 2 })
+        index:open()
+        sched:drain()
+        t:eq(index:isComplete(), true, "the first build finished")
+        local resolutions = doc.resolutions
+
+        -- Reopen and let it run to the end: nothing from the first build may
+        -- finalise against the list this one is rereading.
+        index:open()
+        sched:drain()
+        t:eq(index:isComplete(), true, "the second build finished too")
+        t:eq(index:count(), 20, "with every row of the book, once")
+        for id = 1, 20 do
+            t:eq(index:pageOf(id), id, "canvas " .. id .. " placed once, on its own page")
+        end
+        t:check(doc.resolutions >= resolutions, "and it did its own resolving")
+    end)
+
     t:case("a new canvas is placed straight away", function()
         local index, doc, _, sched = fixture(3)
         index:open()
