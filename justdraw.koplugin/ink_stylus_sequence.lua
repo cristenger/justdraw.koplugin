@@ -114,6 +114,18 @@ function Sequence.new(spec)
         on_domain_error = spec.on_domain_error,
         drop_contact = spec.drop_contact,
 
+        --- Kernel-side evidence, read once per frame (ADR-44):
+        --- `function() -> syn_dropped_count, btn_touch_count`, the two
+        --- counters ink_slot_steer keeps. Absent on a runtime with no steer,
+        --- and then nothing below it runs.
+        sync_counts = spec.sync_counts,
+        on_desync = spec.on_desync,
+        sync_drops = nil,
+        sync_edges = nil,
+        desync_edges = nil,
+        desyncs = 0,
+        desync_cuts = 0,
+
         state = "idle",
         owner_slot = nil,
         owner_id = nil,
@@ -359,6 +371,63 @@ function Sequence:_endPhysical(target_state, reason, clear_history)
         self:_clearOwner()
     end
     return ended
+end
+
+--[[--
+The kernel overflowed evdev, and `ink_slot_steer` counted the `SYN_DROPPED`.
+
+Frames were lost, and the slot now carries whichever axes the tail of the
+lost window happened to rewrite: (1048,1061) -> drop -> a frame with only
+ABS_Y -> (1048,990) -> (1204,989), the corner nobody drew (crash.log
+2026-09-02, line 60695). Nothing after this point is known to be adjacent to
+what came before, so the ink in flight is *finished* where it stands -- it was
+real -- and no later frame is joined to it.
+
+The contact stays owned. The pen may well still be down, and the write queue
+and the sheet index have to keep yielding to it. But it draws nothing until
+`BTN_TOUCH` moves: a lift, or a down after a lift that was lost inside the
+window. That edge is the only evidence available here -- KOReader writes
+`id = pen_slot` on every BTN_TOUCH 1 (input.lua 783-787), so a fresh contact
+looks exactly like the old one from inside this callback. The kernel's own
+rule is to ignore everything up to and including the next SYN_REPORT, so an
+edge counted in the frame that carried the drop is not one of those
+boundaries either (ADR-44).
+]]
+function Sequence:_desync(edges)
+    self.desyncs = self.desyncs + 1
+    self.desync_edges = edges
+    local state = self.state
+    local cut = false
+    -- A forwarded contact is GestureDetector's: a lift it never sees is
+    -- KOReader's to notice, and taking the slot back here would strand a
+    -- pending hold timer (ADR-22). Nothing below may move for one.
+    if not isForwardedState(state) then
+        if state == "idle" or state == "proximity_wait" then
+            -- No contact to cut, but the boundary the next one is measured
+            -- against may name a place the pen has since left: make the next
+            -- pair provisional rather than trusted.
+            self:_resetGeometry(true)
+        else
+            if self.effect_active then
+                self:_closeEffect("finish", "evdev_desync")
+                cut = true
+                self.desync_cuts = self.desync_cuts + 1
+            end
+            self.effect = nil
+            self.effect_active = false
+            self.point_count = 0
+            self.state = "desync_wait"
+            self:_resetGeometry(true)
+        end
+    end
+    -- Told in every case, forwarded included: a drop with nothing beside it
+    -- in the log is a drop nothing noticed.
+    if self.on_desync then self.on_desync(cut) end
+end
+
+--- How many overflows this lease has seen, and how many of them cut a stroke.
+function Sequence:desyncCounts()
+    return self.desyncs, self.desync_cuts
 end
 
 function Sequence:_closeEffect(mode, reason)
@@ -702,6 +771,16 @@ function Sequence:feed(slot)
     local timev = slot and slot.timev
     local before = self.state
 
+    -- Before anything is decided from this frame: did the kernel drop any
+    -- since the last one? (ADR-44.) The first frame of a lease only records
+    -- the counters -- an overflow older than this sequence is not its stroke.
+    if self.sync_counts then
+        local drops, edges = self.sync_counts()
+        local overflowed = self.sync_drops ~= nil and drops ~= self.sync_drops
+        self.sync_drops, self.sync_edges = drops, edges
+        if overflowed then self:_desync(edges) end
+    end
+
     -- Defense in depth behind InkWacomPalm. On Wacom the digitizer owns one
     -- slot; a stylus-valued tool anywhere else is a promoted palm wearing the
     -- eraser's number, and no state here may move because of it. Dominated,
@@ -749,6 +828,34 @@ function Sequence:feed(slot)
     -- with it. Only the trusted pen reaches here, so only the trusted pen ever
     -- moves the boundary.
     self:_noteGeometry(x, y)
+
+    if self.state == "desync_wait" then
+        if self.sync_edges ~= self.desync_edges then
+            -- BTN_TOUCH moved after the overflow: a boundary the pen itself
+            -- reported, and the first thing since the drop that can be
+            -- trusted (ADR-44).
+            self:_endPhysical("idle", "evdev_desync", true)
+            if id < 0 then
+                return self:_traceResult(true, "lift", "desync_lift", before,
+                    slot_number, id, tool, x, y, timev)
+            end
+            local delivery, decision, reason =
+                self:_beginAndProcess(slot_number, id, tool, x, y, timev,
+                    "contact_down")
+            return self:_traceResult(delivery, decision, reason, before,
+                slot_number, id, tool, x, y, timev)
+        end
+        if tool == self.tool_finger and self.wacom_protocol
+            and slot_number == self.pen_slot then
+            -- Proximity-out is a physical boundary too, and the only one a
+            -- pen lifted clear of the digitizer will ever report.
+            self:_endPhysical("proximity_wait", "wacom_proximity", true)
+            return self:_traceResult(true, "proximity_out", "desync_proximity",
+                before, slot_number, id, tool, x, y, timev)
+        end
+        return self:_traceResult(true, "discard", "desync_wait", before,
+            slot_number, id, tool, x, y, timev)
+    end
 
     if self.state == "proximity_wait" then
         if id < 0 then
@@ -941,7 +1048,7 @@ function Sequence:hasOwnedPhysicalContact()
     local state = self.state
     return state == "contact_pending" or state == "geometry_pending"
         or state == "active_draw" or state == "active_block"
-        or state == "suspended"
+        or state == "suspended" or state == "desync_wait"
 end
 
 function Sequence:hasForwardedContact()

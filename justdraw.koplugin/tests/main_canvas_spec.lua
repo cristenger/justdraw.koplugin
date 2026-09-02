@@ -926,6 +926,33 @@ return function(ctx)
         t:eq(p.live_refresh:hasPending(), false, "nothing pending")
     end)
 
+    t:describe("main / an evdev overflow ends the stroke, it does not bridge it (ADR-44)")
+
+    t:case("a kernel drop mid-stroke persists what was drawn and nothing across the gap", function()
+        local p, store = canvasPlugin()
+        openForPen(p)
+        -- The steer's counters, driven by hand: the harness arms no steer, so
+        -- production's `Capture:steerCounts` closure would answer zeros.
+        local drops, edges = 0, 0
+        p.stylus_sequence.sync_counts = function() return drops, edges end
+        penDown(p, SHEET.x + 10, SHEET.y + 10)
+        penFrame(p, SHEET.x + 20, SHEET.y + 20)
+        penFrame(p, SHEET.x + 30, SHEET.y + 30)
+        drops = 1
+        penFrame(p, SHEET.x + 30, SHEET.y + 200)   -- the half-updated frame
+        penFrame(p, SHEET.x + 200, SHEET.y + 200)
+        edges = 1
+        penLift(p, SHEET.x + 200, SHEET.y + 200)
+        env.UIManager:flush()
+        p:onSaveSettings()
+
+        local strokes = store.strokes[p.session:activeCanvas().id] or {}
+        t:eq(#strokes, 1, "one stroke reached the store")
+        t:eq(strokes[1].n, 3, "with the points from before the drop, and no more")
+        t:eq(p.evdev_desyncs, 1, "the plugin counted the desync")
+        t:eq(p.evdev_desync_cuts, 1, "and that it cost a stroke")
+    end)
+
     t:case("canvas fallback repaint waits until a modal uncovers the overlay", function()
         local p = canvasPlugin()
         local overlay = openForPen(p)

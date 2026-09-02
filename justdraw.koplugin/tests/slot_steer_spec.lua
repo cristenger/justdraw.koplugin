@@ -273,4 +273,41 @@ return function(ctx)
         Capture:remove()
         t:eq((Capture:steerCounts()), 0, "gone with the lease")
     end)
+
+    -- =================================================================
+    t:describe("slot steer / drops and touch edges, for the sequence (ADR-44)")
+
+    --[[--
+    The two counters InkStylusSequence reads every frame. The drop is the
+    kernel saying it discarded input; the edge is the only evidence a lift
+    happened inside the discarded window, because KOReader writes
+    `id = pen_slot` on every BTN_TOUCH 1 and the callback cannot tell the
+    next contact from the last one.
+    ]]
+    t:case("every BTN_TOUCH is an edge, every SYN_DROPPED a drop, and reset clears both", function()
+        local input = support.newSlotInput()
+        local state = Steer.new(input); state.active = true
+        feed(state, input, key(C.BTN_TOUCH, 1))
+        feed(state, input, syn(C.SYN_DROPPED))
+        feed(state, input, abs(C.ABS_Y, 990))
+        feed(state, input, syn())
+        feed(state, input, key(C.BTN_TOUCH, 0))
+        local _pen, _panel, drops, edges = Steer.counts(state)
+        t:eq(drops, 1, "one drop")
+        t:eq(edges, 2, "the down and the up")
+        Steer.reset(state)
+        local _p, _q, cleared_drops, cleared_edges = Steer.counts(state)
+        t:eq(cleared_drops, 0, "reset clears the drops")
+        t:eq(cleared_edges, 0, "and the edges")
+    end)
+
+    t:case("an edge is counted on the pen's own slot too, where nothing is steered", function()
+        local input = support.newSlotInput()
+        local state = Steer.new(input); state.active = true
+        input:setupSlotData(input.pen_slot)
+        feed(state, input, key(C.BTN_TOUCH, 1))
+        local pen, _panel, _drops, edges = Steer.counts(state)
+        t:eq(pen, 0, "the cursor was already there: nothing to steer")
+        t:eq(edges, 1, "but the pen still reported a boundary")
+    end)
 end

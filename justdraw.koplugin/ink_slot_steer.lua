@@ -83,6 +83,7 @@ function Steer.new(input, generic_handler)
         steered_pen = 0,
         steered_panel = 0,
         drops = 0,
+        touch_edges = 0,
     }
 end
 
@@ -96,6 +97,9 @@ S2  ABS_MT_SLOT names the panel's slot: remember it, KOReader does the rest.
 S3  any other ABS_MT_* while the pen slot is current: the panel omitted its
     ABS_MT_SLOT (protocol B); cursor back to the panel's last slot.
 S4  SYN_DROPPED: the kernel overflowed; count it (KOReader only names it).
+S5  every BTN_TOUCH, whichever slot is current, is a transition the pen
+    really reported: InkStylusSequence resynchronises on it after a drop,
+    because KOReader's `id` cannot show one (ADR-44).
 ]]
 function Steer.apply(state, input, ev)
     if not state.active then return end
@@ -116,9 +120,12 @@ function Steer.apply(state, input, ev)
             end
         end
     elseif etype == codes.EV_KEY then
-        if ev.code == codes.BTN_TOUCH and input.cur_slot ~= input.pen_slot then
-            input:setupSlotData(input.pen_slot)
-            state.steered_pen = state.steered_pen + 1
+        if ev.code == codes.BTN_TOUCH then
+            state.touch_edges = state.touch_edges + 1
+            if input.cur_slot ~= input.pen_slot then
+                input:setupSlotData(input.pen_slot)
+                state.steered_pen = state.steered_pen + 1
+            end
         end
     elseif etype == codes.EV_SYN and ev.code == codes.SYN_DROPPED then
         state.drops = state.drops + 1
@@ -126,13 +133,14 @@ function Steer.apply(state, input, ev)
 end
 
 function Steer.counts(state)
-    return state.steered_pen, state.steered_panel, state.drops
+    return state.steered_pen, state.steered_panel, state.drops, state.touch_edges
 end
 
 function Steer.reset(state)
     state.steered_pen = 0
     state.steered_panel = 0
     state.drops = 0
+    state.touch_edges = 0
 end
 
 return Steer

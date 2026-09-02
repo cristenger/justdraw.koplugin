@@ -82,6 +82,8 @@ return function(ctx)
                 return true
             end,
             on_pending_finish = opts.on_pending_finish,
+            sync_counts = opts.sync_counts,
+            on_desync = opts.on_desync,
             on_domain_error = opts.on_domain_error or function(reason, phase)
                 log.errors[#log.errors + 1] = { reason = reason, phase = phase }
             end,
@@ -1139,5 +1141,129 @@ return function(ctx)
         t:eq(frame_calls, 3, "wrapper frame handler called once per SYN")
         t:eq(taps, 1, "down and final lift form one control tap")
         Capture:remove()
+    end)
+
+    --[[--
+    The kernel discards input when this process stops reading, says so once
+    with SYN_DROPPED, and never says what it discarded. The slot then carries
+    whichever axes the tail of the lost window rewrote, and joining them to
+    what came before is the corner nobody drew (crash.log 2026-09-02, line
+    60695). These cases state the recovery: cut, wait, and resynchronise on a
+    boundary the pen itself reported (ADR-44).
+    ]]
+    t:describe("ink_stylus_sequence / SYN_DROPPED is a boundary (ADR-44)")
+
+    --- A sequence wired to counters a test drives by hand, the way
+    --- `ink_slot_steer` drives them on the device.
+    local function synced(opts)
+        local counters = { drops = 0, edges = 0, desyncs = {} }
+        opts = opts or {}
+        opts.sync_counts = function() return counters.drops, counters.edges end
+        opts.on_desync = function(cut) counters.desyncs[#counters.desyncs + 1] = cut end
+        local seq, log = harness(opts)
+        return seq, log, counters
+    end
+
+    t:case("a drop mid-stroke finishes the ink where it stands and joins nothing after it", function()
+        local seq, log, c = synced()
+        seq:feed(pen(1, 10, 10)); seq:feed(pen(1, 20, 20)); seq:feed(pen(1, 30, 30))
+        t:eq(#log.points, 3, "three points before the drop")
+        c.drops = 1                                -- the steer saw SYN_DROPPED
+        seq:feed(pen(1, 30, 200))                  -- the half-updated frame
+        t:eq(log.finishes, 1, "the stroke was finished")
+        t:eq(log.order[#log.order], "finish:evdev_desync", "with the desync reason")
+        t:eq(#log.points, 3, "and the stale frame added nothing")
+        t:eq(c.desyncs[1], true, "the host was told a stroke was cut")
+        seq:feed(pen(1, 200, 200)); seq:feed(pen(1, 210, 210))
+        t:eq(#log.points, 3, "nothing inks until the pen reports a boundary")
+        t:eq(seq:hasOwnedPhysicalContact(), true,
+            "the contact stays owned, so the queue and the index keep yielding")
+        c.edges = 1                                -- BTN_TOUCH 0
+        seq:feed(pen(-1, 210, 210))
+        t:eq(log.ends, 1, "the lift ends the contact")
+        t:eq(log.starts, 1, "one contact, one start")
+        t:eq(seq:isLifecycleBlocked(), false, "idle again")
+        seq:feed(pen(1, 300, 300)); seq:feed(pen(1, 310, 310))
+        t:eq(log.starts, 2, "and the next down is an ordinary contact")
+    end)
+
+    t:case("a down after a lost lift starts a new contact instead of gluing the strokes", function()
+        local seq, log, c = synced()
+        seq:feed(pen(1, 10, 10)); seq:feed(pen(1, 20, 20))
+        c.drops = 1
+        seq:feed(pen(1, 20, 20))                   -- the frame that carried the drop
+        t:eq(log.finishes, 1, "cut")
+        -- BTN_TOUCH 1 in a clean frame. KOReader keeps id = pen_slot, so the
+        -- callback sees the same id it saw before the drop; only the edge
+        -- count says a contact began (input.lua 783-787).
+        c.edges = 1
+        seq:feed(pen(1, 500, 500))
+        t:eq(log.ends, 1, "the old contact ended")
+        t:eq(log.starts, 2, "and a new one began")
+        seq:feed(pen(1, 510, 510)); seq:feed(pen(1, 520, 520))
+        t:eq(log.points[#log.points].first, false, "the new stroke is running")
+        local first_new
+        for i = 2, #log.points do
+            if log.points[i].first then first_new = log.points[i] end
+        end
+        t:check(first_new ~= nil and first_new.x >= 500,
+            "its first point is on the new side of the gap, never (20,20)")
+    end)
+
+    t:case("a BTN_TOUCH inside the dropped frame is not a boundary", function()
+        local seq, log, c = synced()
+        seq:feed(pen(1, 10, 10)); seq:feed(pen(1, 20, 20))
+        c.drops, c.edges = 1, 1                    -- drop and edge in the same frame
+        seq:feed(pen(1, 20, 20))
+        seq:feed(pen(1, 40, 40))
+        t:eq(#log.points, 2,
+            "still waiting: that edge is inside the window the kernel says to ignore")
+        c.edges = 2
+        seq:feed(pen(1, 40, 40))
+        t:eq(log.starts, 2, "the next edge is a boundary")
+    end)
+
+    t:case("a drop while idle only clears the baseline; while forwarded it moves nothing", function()
+        local geometry = acceptGeometry()
+        local seq, log, c = synced{ geometry = geometry }
+        seq:feed(pen(nil, 5, 5))                   -- hover: primes the counters
+        c.drops = 1
+        seq:feed(pen(nil, 5, 5))
+        t:eq(geometry.resets[#geometry.resets], true, "the baseline was cleared")
+        t:eq(log.starts + log.finishes + log.ends, 0, "and no contact callback ran")
+        t:eq(c.desyncs[1], false, "the host heard about it, with nothing cut")
+
+        local fwd, flog, fc = synced{ classify = function() return "pass" end }
+        fwd:feed(pen(1, 10, 10)); fwd:feed(pen(1, 20, 20))
+        local before = #flog.order
+        fc.drops = 1
+        fwd:feed(pen(1, 30, 30))
+        t:eq(#flog.order, before, "a forwarded contact is GestureDetector's")
+        t:eq(fwd:hasForwardedContact(), true, "and stays forwarded")
+    end)
+
+    t:case("proximity-out during the wait ends the contact; a second drop keeps waiting", function()
+        local seq, log, c = synced{ wacom_protocol = true, pen_slot = 4, tool_finger = 0 }
+        seq:feed(pen(1, 10, 10)); seq:feed(pen(1, 20, 20))
+        c.drops = 1
+        seq:feed(pen(1, 20, 20))
+        c.drops = 2
+        seq:feed(pen(1, 25, 25))
+        local desyncs, cuts = seq:desyncCounts()
+        t:eq(desyncs, 2, "two drops")
+        t:eq(cuts, 1, "one of them had a stroke to cut")
+        seq:feed(pen(1, 25, 25, 0))                -- tool back to finger: proximity out
+        t:eq(log.ends, 1, "proximity-out is a boundary")
+        t:eq(seq:hasOwnedPhysicalContact(), false, "nothing is owned any more")
+    end)
+
+    t:case("abort during the wait ends the contact cleanly", function()
+        local seq, log, c = synced()
+        seq:feed(pen(1, 10, 10)); seq:feed(pen(1, 20, 20))
+        c.drops = 1
+        seq:feed(pen(1, 20, 20))
+        seq:abort("reset", true)
+        t:eq(log.ends, 1, "the contact ended")
+        t:eq(seq:isLifecycleBlocked(), false, "idle again")
     end)
 end

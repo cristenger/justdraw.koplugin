@@ -440,7 +440,7 @@ end
 
 function Capture:steerCounts()
     local state = self.slot_steer
-    if not state then return 0, 0, 0 end
+    if not state then return 0, 0, 0, 0 end
     return Steer.counts(state)
 end
 

@@ -534,6 +534,10 @@ function JustDraw:init()
     self.max_open_points = Limits.MAX_OPEN_POINTS
     self.max_contact_samples = Limits.MAX_CONTACT_SAMPLES
     self.stylus_budget_notified = false
+    --- What the kernel dropped and what it cost, for the diagnostics report
+    --- (ADR-44). Per plugin instance, like every other counter there.
+    self.evdev_desyncs = 0
+    self.evdev_desync_cuts = 0
 
     self.stylus_trace = nil
     self.trace_instance = nil
@@ -1899,6 +1903,7 @@ function JustDraw:buildStylusMachine(input)
         classify = function(slot) return Capture:physicalSlotRole(slot, input) end,
         retire_touch = function(slot_number) self:retireTouchSlot(slot_number) end,
     }
+    self.evdev_desyncs, self.evdev_desync_cuts = 0, 0
     self.stylus_sequence = StylusSequence.new{
         wacom_protocol = input ~= nil and input.wacom_protocol == true,
         pen_slot = input and input.pen_slot,
@@ -1925,6 +1930,22 @@ function JustDraw:buildStylusMachine(input)
             logger.warn("JustDraw: stylus contact reported", reason, phase)
         end,
         drop_contact = function(slot) return Capture:dropContact(slot) end,
+        -- Two integer reads; the steer answers zeros when it is not armed,
+        -- and then nothing downstream of them ever fires (ADR-44).
+        sync_counts = function()
+            local _steered_pen, _steered_panel, drops, edges = Capture:steerCounts()
+            return drops, edges
+        end,
+        on_desync = function(cut)
+            self.evdev_desyncs = self.evdev_desyncs + 1
+            if cut then self.evdev_desync_cuts = self.evdev_desync_cuts + 1 end
+            -- One line per overflow, at info: `tests/scribe_log_audit.lua`
+            -- counts these against the kernel's own SYN_DROPPED, and a drop
+            -- with no line beside it is a drop nothing answered.
+            logger.info("JustDraw: evdev desync,",
+                cut and "stroke cut" or "nothing in flight",
+                "waiting for a touch boundary")
+        end,
     }
     self.trace_instance = self:activeStylusTrace(self:diagnosticSource())
     self.stylus_sequence:setTrace(self.trace_instance)
@@ -2365,7 +2386,10 @@ function JustDraw:diagnosticReport()
     }
     r.eraser_by_button, r.eraser_by_tool = Capture:eraserCounts()
     r.collapsed_dots, r.collapsed_discards = Capture:collapsedCounts()
-    r.steered_pen, r.steered_panel, r.evdev_drops = Capture:steerCounts()
+    r.steered_pen, r.steered_panel, r.evdev_drops, r.touch_edges =
+        Capture:steerCounts()
+    r.desyncs = self.evdev_desyncs or 0
+    r.desync_cuts = self.evdev_desync_cuts or 0
 
     -- The first unmet precondition, in the order the user can act on them.
     if r.mode == "finger" then
@@ -2428,7 +2452,13 @@ function JustDraw:diagnosticLines()
         -- the kernel's own overflow count: with ADR-26 it should stay at 0.
         "Pen frames steered back to the pen slot: " .. tostring(r.steered_pen),
         "Hand frames kept off the pen slot: " .. tostring(r.steered_panel),
-        "Input events the kernel dropped: " .. tostring(r.evdev_drops),
+        -- "dropped" is the kernel's own overflow count; with ADR-26/43 it
+        -- should stay at 0. The other two say what happened when it did not:
+        -- every drop is answered by a resynchronisation, and a cut is a
+        -- stroke that ended there instead of jumping the gap (ADR-44).
+        "Input events the kernel dropped: " .. tostring(r.evdev_drops)
+            .. "   resynchronised: " .. tostring(r.desyncs)
+            .. "   strokes cut: " .. tostring(r.desync_cuts),
     }
     if r.blocker then lines[#lines + 1] = "" ; lines[#lines + 1] = r.blocker end
     return lines, r
