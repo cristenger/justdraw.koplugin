@@ -1210,6 +1210,43 @@ return function(ctx)
             "its first point is on the new side of the gap, never (20,20)")
     end)
 
+    --[[--
+    The case ADR-44 was written about, and the one that latches if the edge
+    count is read first: the frame that carried the overflow also carried the
+    real `BTN_TOUCH 0`, so its edge is the untrusted one and the count never
+    moves again. The tracking id going negative is the lift, whatever the
+    edges say.
+    ]]
+    t:case("a lift that arrives with the drop still ends the contact", function()
+        local seq, log, c = synced()
+        seq:feed(pen(1, 10, 10)); seq:feed(pen(1, 20, 20))
+        -- One frame: the kernel overflowed and the pen came up inside it.
+        c.drops, c.edges = 1, 1
+        seq:feed(pen(-1, 20, 20))
+        t:eq(log.finishes, 1, "the ink was closed")
+        t:eq(log.ends, 1, "and so was the contact")
+        t:eq(seq:hasOwnedPhysicalContact(), false,
+            "nothing is left owned, so the queue and the index stop yielding")
+        t:eq(seq:isLifecycleBlocked(), false, "idle")
+        -- Hover frames afterwards must not resurrect it.
+        for _ = 1, 5 do seq:feed(pen(nil, 20, 20)) end
+        t:eq(seq:hasOwnedPhysicalContact(), false, "still nothing owned")
+        seq:feed(pen(1, 300, 300)); seq:feed(pen(1, 310, 310))
+        t:eq(log.starts, 2, "and the next down is an ordinary contact")
+    end)
+
+    t:case("a lift during the wait ends it without needing an edge", function()
+        local seq, log, c = synced()
+        seq:feed(pen(1, 10, 10)); seq:feed(pen(1, 20, 20))
+        c.drops = 1
+        seq:feed(pen(1, 20, 20))            -- the drop, no edge with it
+        seq:feed(pen(1, 40, 40))            -- refused, still waiting
+        t:eq(log.ends, 0, "the contact is still owned")
+        seq:feed(pen(-1, 40, 40))           -- the lift, still no edge
+        t:eq(log.ends, 1, "which ends it on its own")
+        t:eq(seq:hasOwnedPhysicalContact(), false, "and releases the gates")
+    end)
+
     t:case("a BTN_TOUCH inside the dropped frame is not a boundary", function()
         local seq, log, c = synced()
         seq:feed(pen(1, 10, 10)); seq:feed(pen(1, 20, 20))

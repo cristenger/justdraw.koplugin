@@ -830,14 +830,37 @@ function Sequence:feed(slot)
     self:_noteGeometry(x, y)
 
     if self.state == "desync_wait" then
+        if id < 0 then
+            --[[--
+            A lift needs no edge to prove it. The slot's tracking id going
+            negative *is* the boundary, and it stays negative afterwards --
+            only a contact *down* after a lost lift is invisible here, which
+            is the whole reason the edge count exists.
+
+            Reading the edge first would swallow exactly the case ADR-44 was
+            written about: a frame whose tail carried both the overflow and
+            the real `BTN_TOUCH 0`. Its edge is consumed by `_desync` as the
+            untrusted one, so the count would not move, and the contact would
+            stay owned with no lift ever coming -- holding the write queue
+            and the sheet index off for the rest of the session.
+            ]]
+            self:_endPhysical("idle", "evdev_desync", true)
+            return self:_traceResult(true, "lift", "desync_lift", before,
+                slot_number, id, tool, x, y, timev)
+        end
         if self.sync_edges ~= self.desync_edges then
             -- BTN_TOUCH moved after the overflow: a boundary the pen itself
             -- reported, and the first thing since the drop that can be
-            -- trusted (ADR-44).
+            -- trusted (ADR-44). A contact down, since a lift was handled
+            -- above.
             self:_endPhysical("idle", "evdev_desync", true)
-            if id < 0 then
-                return self:_traceResult(true, "lift", "desync_lift", before,
-                    slot_number, id, tool, x, y, timev)
+            -- Refused the way a replacement is: a close that failed leaves a
+            -- domain error pending, and starting a new host generation over
+            -- one is what `_replaceOwned` exists not to do.
+            if self.pending_domain_reason ~= nil then
+                self:_holdUnstartedReplacement(slot_number, id, tool)
+                return self:_traceResult(true, "suspend", "domain_error",
+                    before, slot_number, id, tool, x, y, timev)
             end
             local delivery, decision, reason =
                 self:_beginAndProcess(slot_number, id, tool, x, y, timev,

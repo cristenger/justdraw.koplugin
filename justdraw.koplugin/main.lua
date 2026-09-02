@@ -2398,8 +2398,7 @@ function JustDraw:diagnosticReport()
     }
     r.eraser_by_button, r.eraser_by_tool = Capture:eraserCounts()
     r.collapsed_dots, r.collapsed_discards = Capture:collapsedCounts()
-    r.steered_pen, r.steered_panel, r.evdev_drops, r.touch_edges =
-        Capture:steerCounts()
+    r.steered_pen, r.steered_panel, r.evdev_drops = Capture:steerCounts()
     r.desyncs = self.evdev_desyncs or 0
     r.desync_cuts = self.evdev_desync_cuts or 0
 
