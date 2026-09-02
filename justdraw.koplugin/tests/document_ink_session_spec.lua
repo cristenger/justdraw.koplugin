@@ -187,6 +187,8 @@ return function(ctx)
         t:eq(session:isAvailable(), false, "page ink stays off")
         t:check(notes[1] and notes[1]:find("Both JustDraw and FingerInk", 1, true),
             "the reader gets an actionable explanation")
+        t:check(notes[1]:find("notes databases", 1, true),
+            "naming the one file honestly: it is not a sheet database")
     end)
 
     t:case("a book with no usable identity is unavailable", function()
@@ -217,6 +219,20 @@ return function(ctx)
         t:eq(stroke_err, "read_only", "so is a stroke that got through anyway")
         t:eq(#store.canvases, 1, "and nothing was written")
         t:check(notes[1] ~= nil, "the reader was told once, when the page opened")
+    end)
+
+    t:case("a newer schema that never registered this book stays empty", function()
+        local session, store, sched = fixture{ read_only = true }
+        function store:findBookId() return nil, "not_found" end
+        function store:bookId() error("a read-only schema must not be written") end
+        t:eq(session:open(), true, "the book opens read-only and empty")
+        t:eq(session:setPage(1), true, "and a page turn is fine")
+        sched:drain()
+        t:eq(session:stateName(), "idle", "there is nothing to find")
+        t:eq(session:surface(), nil, "so nothing is open")
+        local _, err = session:ensureSurface()
+        t:eq(err, "read_only", "and Draw may not insert a row this plugin cannot own")
+        t:eq(#store.canvases, 0, "nothing was written")
     end)
 
     -- =================================================================
@@ -330,6 +346,38 @@ return function(ctx)
         t:eq(#store.strokes[1], 1, "the stroke went to the page it was drawn on")
     end)
 
+    t:case("a surface closing is never this session's own \"closed\"", function()
+        -- "closed" is the token the reader wiring tears its UI down on, and
+        -- `SurfaceSession:close` reports its own state unconditionally. Every
+        -- page turn, every suspend and every delete closes a surface; none of
+        -- them closes this session, so none of them may say so.
+        local session, _, sched, _, events = openedPage{
+            canvases = { pageRow(1, 1), pageRow(2, 2) },
+            strokes = { [1] = { bar() }, [2] = { bar() } },
+        }
+        session:setPage(2)
+        sched:drain()
+        session:suspend("scroll_mode")
+        session:resume()
+        sched:drain()
+        session:deleteCurrent()
+        sched:drain()
+
+        t:eq(session:isClosed(), false, "the session was never closed")
+        local said_closed = 0
+        for _, name in ipairs(events.state) do
+            if name == "closed" then said_closed = said_closed + 1 end
+        end
+        t:eq(said_closed, 0, "and it never once said it was")
+        t:eq(events.state[#events.state], "idle",
+            "the last thing it said is where it actually is")
+        t:eq(session:stateName(), "idle", "which is true")
+
+        t:eq(session:close(), true, "closing for real")
+        t:eq(events.state[#events.state], "closed", "is the one time it says so")
+        t:eq(session:isClosed(), true, "and it means it")
+    end)
+
     -- =================================================================
     t:describe("ink_document_ink_session / the view")
 
@@ -440,6 +488,21 @@ return function(ctx)
         t:eq(session:stateName(), "ready", "with its ink")
     end)
 
+    t:case("a page that cannot state its size says so, not \"bad geometry\"",
+    function()
+        local session, store = fixture{ view = { native = false } }
+        session:open()
+        t:eq(session:setPage(1), true, "there is no row on this page to open")
+        local ok, err = session:refreshView()
+        t:eq(ok, nil, "the view cannot be mapped")
+        t:eq(err, "no_dimensions",
+            "with the page's own reason, not the empty probe's bad_geometry")
+        t:eq(session:viewReason(), "no_dimensions", "and it is remembered")
+        local _, ensure_err = session:ensureSurface()
+        t:eq(ensure_err, "no_dimensions", "Draw answers the same, in any order")
+        t:eq(#store.canvases, 0, "and creates nothing for a page it cannot measure")
+    end)
+
     -- =================================================================
     t:describe("ink_document_ink_session / drawing")
 
@@ -461,6 +524,25 @@ return function(ctx)
 
         t:eq(session:ensureSurface(), true, "pressing Draw again is idempotent")
         t:eq(#store.canvases, 1, "no second row for the same page")
+    end)
+
+    t:case("Draw remaps the view rather than trusting the last one", function()
+        -- No view event has been delivered since the mode changed, so the
+        -- remembered answer is still "this maps fine". Draw is a lifecycle
+        -- entry point and asks again itself: a caller must not have to know
+        -- the order to be told the truth.
+        local session, store, _, rv = openedPage{}
+        t:eq(session:viewReason(), nil, "nothing has refused yet")
+        rv.view.page_scroll = true
+        local ok, err = session:ensureSurface()
+        t:eq(ok, nil, "Draw is refused")
+        t:eq(err, "unsupported_mode", "with the reason as it is now")
+        t:eq(#store.canvases, 0, "and nothing was created on an unmappable page")
+        t:eq(session:viewReason(), "unsupported_mode", "the refusal was recorded")
+
+        rv.view.page_scroll = false
+        t:eq(session:ensureSurface(), true, "and it recovers with no view event")
+        t:eq(#store.canvases, 1, "creating the surface it was asked for")
     end)
 
     t:case("a page whose size changed keeps its ink and loses editing", function()
@@ -597,5 +679,77 @@ return function(ctx)
         session:close{ force = true }
         t:eq(session:isClosed(), true, "a forced close lets go anyway")
         t:eq(session:cache(), nil, "and leaves no raster behind")
+    end)
+
+    -- =================================================================
+    --[[--
+    The seam both sessions reach their book row through.
+
+    Sheets and page ink share one file and one way into it, and three of the
+    four decisions on that way are invariants -- which filename, which of the
+    two book lookups a read-only schema allows, and who may close the
+    connection afterwards. Written twice they drift; these are the ones a
+    second copy would have got wrong.
+    ]]
+    t:describe("ink_book_database / the shared way in")
+
+    local BookDatabase = require("ink_book_database")
+
+    t:case("a refused database is a reason, not a connection attempt", function()
+        local handle, reason = BookDatabase.open{ repository = false }
+        t:eq(handle, nil, "refused")
+        t:eq(reason, "no_repository", "by name")
+    end)
+
+    t:case("two databases fail closed before anything is opened", function()
+        local handle, reason = BookDatabase.open{
+            path_provider = function()
+                return nil, "database_conflict", "/a.sqlite3", "/b.sqlite3"
+            end,
+        }
+        t:eq(handle, nil, "refused")
+        t:eq(reason, "database_conflict", "with the conflict preserved")
+    end)
+
+    t:case("a connection handed in is used, owned by nobody here", function()
+        local store = support.newCanvasStore({})
+        local handle = BookDatabase.open{
+            repository = store, identity = IDENTITY, file = "/book.pdf",
+        }
+        t:check(handle ~= nil, "resolved")
+        t:eq(handle.repository, store, "over the connection it was given")
+        t:eq(handle.owns_repository, false, "which it does not own")
+        t:eq(handle.book_id, 12, "and the book was identified")
+        t:eq(handle.read_only, false, "on a writable database")
+        t:eq(BookDatabase.close(handle), false, "so closing it is refused")
+        t:eq(store.closed, false, "and the caller's connection is still open")
+    end)
+
+    t:case("a book that cannot be identified closes nothing it was lent",
+    function()
+        local store = support.newCanvasStore({})
+        function store:bookId() return nil, "no_identity" end
+        local handle, reason = BookDatabase.open{
+            repository = store, identity = IDENTITY, file = "/book.pdf",
+        }
+        t:eq(handle, nil, "refused")
+        t:eq(reason, "no_identity", "by name")
+        t:eq(store.closed, false,
+            "and the connection it was handed stays the caller's to close")
+    end)
+
+    t:case("a newer schema with no row for this book is not a failure",
+    function()
+        local store = support.newCanvasStore({})
+        store.read_only = true
+        function store:findBookId() return nil, "not_found" end
+        function store:bookId() error("a read-only schema must not be written") end
+        local handle = BookDatabase.open{
+            repository = store, identity = IDENTITY, file = "/book.pdf",
+        }
+        t:check(handle ~= nil, "the database opens")
+        t:eq(handle.book_id, nil, "with no book row")
+        t:eq(handle.empty_read_only, true, "which is stated, not guessed")
+        t:eq(handle.read_only, true, "and the schema is known to be newer")
     end)
 end

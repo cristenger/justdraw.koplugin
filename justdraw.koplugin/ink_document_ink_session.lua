@@ -50,8 +50,8 @@ SurfaceSession's queue and are written on the next tick.
 local logger = require("logger")
 local _ = require("gettext")
 
+local BookDatabase = require("ink_book_database")
 local DocumentTransform = require("ink_document_transform")
-local Repository = require("ink_canvas_repository")
 local SurfaceSession = require("ink_surface_session")
 
 local Session = {}
@@ -61,7 +61,7 @@ local MESSAGES = {
     no_identity = _("Page notes are unavailable for this book"),
     no_repository = _("Page notes need a database this KOReader cannot open"),
     read_only = _("This page's ink is read-only because it was created by a newer JustDraw version."),
-    database_conflict = _("Both JustDraw and FingerInk sheet databases exist. Close KOReader, then move one database together with its matching -wal and -shm files to another directory."),
+    database_conflict = _("Both JustDraw and FingerInk notes databases exist. Close KOReader, then move one database together with its matching -wal and -shm files to another directory."),
 }
 
 local function finite(v)
@@ -141,6 +141,7 @@ function Session.new(opts)
         suspended = false,
         notified_read_only = false,
         last_state = nil,
+        muted = false,
         available = false,
         closed = false,
     }, Session)
@@ -157,44 +158,25 @@ book's notes on its path loses them the first time it is renamed.
 ]]
 function Session:open()
     if self.closed then return nil, "closed" end
-    if self.repository == false then return self:_unavailable("no_repository") end
-
-    if not self.repository then
-        local path, path_err, current_path, legacy_path = self:_databasePath()
-        if not path then
-            logger.warn("JustDraw: canvas database conflict:",
-                path_err, current_path, legacy_path)
-            return self:_unavailable(path_err)
-        end
-        local repo, err = Repository.open{ path = path, wal = self:_canUseWAL() }
-        if not repo then
-            logger.warn("JustDraw: canvas database unavailable:", err)
-            return self:_unavailable("no_repository")
-        end
-        self.repository = repo
-        self.owns_repository = true
-    end
-
-    local read_only = self.repository.read_only == true
-    local book_id, err
-    if read_only then
-        book_id, err = self.repository:findBookId(
-            self.identity.partial_md5, self.identity.file_size)
-    else
-        book_id, err = self.repository:bookId(
-            self.identity.partial_md5, self.identity.file_size, self.file)
-    end
-    if not book_id then
-        if not (read_only and err == "not_found") then
-            logger.warn("JustDraw: no stable identity for this book:", err)
-            return self:_unavailable("no_identity")
-        end
-        -- A newer plugin has not registered this book. There can be no page
-        -- ink to find, and this older one must not insert the row.
-        self.book_id = nil
-    else
-        self.book_id = book_id
-    end
+    -- Which file, whether this session opened it, and which of the two book
+    -- lookups a read-only schema allows are the same decisions the sheet
+    -- session makes, so both go through one seam (`ink_book_database`). What
+    -- stays here is what differs: this feature's wording, and a connection
+    -- that is closed only if this session opened it.
+    local handle, reason = BookDatabase.open{
+        repository = self.repository,
+        identity = self.identity,
+        file = self.file,
+        path_provider = function() return self:_databasePath() end,
+    }
+    if not handle then return self:_unavailable(reason) end
+    self.repository = handle.repository
+    if handle.owns_repository then self.owns_repository = true end
+    -- Nil together with `empty_read_only`: a newer plugin has not registered
+    -- this book, so there is no page ink to find and this one must not
+    -- insert the row.
+    local book_id = handle.book_id
+    self.book_id = book_id
 
     self.available = true
     self:_notifyState()
@@ -211,26 +193,21 @@ function Session:_unavailable(reason)
 end
 
 function Session:_closeOwnedRepository()
-    if self.owns_repository and self.repository and self.repository.close then
-        self.repository:close()
-        self.repository = nil
-        self.owns_repository = false
-    end
+    if not self.owns_repository then return end
+    BookDatabase.close{
+        repository = self.repository,
+        owns_repository = true,
+    }
+    self.repository = nil
+    self.owns_repository = false
 end
 
---- Required here rather than at the top: `datastorage` and `device` pull in a
---- chunk of KOReader that a session handed a repository never touches, and
---- this module has to stay loadable -- and drivable -- with neither.
+--- The file this book's ink lives in -- the same one the sheets use. A method
+--- rather than a call, so a caller can put its own answer in front of the
+--- seam's; `device` and `datastorage` stay inside the seam, which is what
+--- keeps this module loadable with neither.
 function Session:_databasePath()
-    local DataStorage = require("datastorage")
-    local Compat = require("ink_compat")
-    return Compat.databasePath(DataStorage:getSettingsDir(),
-        "justdraw.sqlite3", "fingerink.sqlite3")
-end
-
-function Session:_canUseWAL()
-    local Device = require("device")
-    return Device.canUseWAL and Device:canUseWAL() or false
+    return BookDatabase.path()
 end
 
 function Session:isAvailable()
@@ -262,7 +239,9 @@ function Session:close(opts)
         ok, err = self:_closeSurfaceSession()
         if not ok and not opts.force then return nil, err end
         if not ok then
+            self.muted = true
             self.surface_session:close{ discard = true }
+            self.muted = false
             self.surface_session = nil
         end
     end
@@ -300,7 +279,19 @@ function Session:stateName()
     return ss:stateName()
 end
 
+--[[--
+Say the state, once, when it changes.
+
+Muted across a surface being closed. `SurfaceSession:close` reports its own
+state unconditionally and that state is "closed" -- which here is the token
+the reader wiring tears its UI down on, and which would otherwise be emitted
+on every page turn that had a surface open, with `isClosed()` answering false
+throughout. The surface closing is a step inside this session's work, not a
+state this session is ever in, so the step is silent and whatever comes out
+of it is announced by the caller that asked for it.
+]]
 function Session:_notifyState()
+    if self.muted then return end
     local name = self:stateName()
     if name == self.last_state then return end
     self.last_state = name
@@ -499,11 +490,15 @@ function Session:_openSurfaceSession()
 end
 
 --- Close the open surface, keeping the row. Nil plus the queue's reason when
---- the last write could not be made durable.
+--- the last write could not be made durable -- which is a state this session
+--- *is* in, and is therefore announced; a clean close is not, because what
+--- replaces the surface has not happened yet.
 function Session:_closeSurfaceSession(opts)
     local ss = self.surface_session
     if not ss then return true end
+    self.muted = true
     local ok, err = ss:close(opts)
+    self.muted = false
     if not ok then
         self:_notifyState()
         return nil, err
@@ -552,11 +547,12 @@ function Session:refreshView()
     if self.suspended then return nil, "suspended" end
     if not self.page_no then return nil, "no_page" end
 
-    local target = self.surface_obj
+    local target, spec_err = self.surface_obj, nil
     if not target then
-        target = DocumentTransform.surfaceSpec(self:_document(), self.page_no)
+        target, spec_err = DocumentTransform.surfaceSpec(
+            self:_document(), self.page_no)
     end
-    local transform, reason = self:_buildTransform(target)
+    local transform, reason = self:_buildTransform(target, spec_err)
     if not transform then
         self:_notifyState()
         return nil, reason
@@ -578,12 +574,23 @@ function Session:refreshView()
     return true
 end
 
-function Session:_buildTransform(surface)
+--[[--
+The transform for `surface`, or nil plus the first thing wrong.
+
+`spec_err` is how a probe keeps its own reason. With no row on this page the
+surface handed in is the page's own geometry, and when the *page* could not
+state a size there is no geometry to probe with: `fromView` would then answer
+`bad_geometry`, which describes the probe rather than the page. Substituted
+only for that one reason, and only after `fromView` has spoken, so the mode
+refusals -- which come first and matter more -- still win.
+]]
+function Session:_buildTransform(surface, spec_err)
     local w, h
     if self.screen then w, h = self.screen() end
     local transform, reason = DocumentTransform.fromView(self.ui, self.view,
         surface, { screen = { w = w, h = h } })
     if not transform then
+        if spec_err and reason == "bad_geometry" then reason = spec_err end
         self:_refuseView(reason)
         return nil, self.view_reason
     end
@@ -618,7 +625,12 @@ function Session:ensureSurface()
     if self.suspended then return nil, "suspended" end
     if not self:isWritable() then return nil, "read_only" end
     if not self.page_no then return nil, "no_page" end
-    if self.view_reason then return nil, self.view_reason end
+    -- Remapped here rather than trusted: `view_reason` is as old as the last
+    -- view event, and a caller should not have to know the order to get a
+    -- current answer. This is a lifecycle entry point and never an input
+    -- path, so the cost is one transform on a key press.
+    local mapped, view_err = self:refreshView()
+    if not mapped then return nil, view_err end
 
     if self.surface_obj then
         if not self.geometry_ok then return nil, "page_geometry_changed" end
@@ -760,7 +772,12 @@ function Session:deleteCurrent()
     local closed, cerr = self:_flushAndClose()
     if not closed then return nil, cerr end
     local ok, err = self.repository:deletePageInkSurface(self.book_id, self.page_no)
-    if not ok then return nil, err end
+    if not ok then
+        -- The surface is closed either way, which is a state change of its
+        -- own even though the row is still there.
+        self:_notifyState()
+        return nil, err
+    end
     self.surface_obj = nil
     self.transform_obj = nil
     self.geometry_ok = false
@@ -777,7 +794,10 @@ function Session:deleteAll()
     local closed, cerr = self:_flushAndClose()
     if not closed then return nil, cerr end
     local ok, err = self.repository:deleteAllPageInkSurfaces(self.book_id)
-    if not ok then return nil, err end
+    if not ok then
+        self:_notifyState()
+        return nil, err
+    end
     self.surface_obj = nil
     self.transform_obj = nil
     self.geometry_ok = false
