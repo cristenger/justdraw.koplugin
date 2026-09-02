@@ -1534,6 +1534,20 @@ return function(ctx)
         t:eq(sheets.label, "All drawing sheets", "under a name that is not a page")
     end)
 
+    t:case("deciding the scopes reads the index, never a listing of every sheet", function()
+        local canvases, pages = manySheets(40)
+        local p, store = canvasPlugin{ canvases = canvases, pages = pages }
+        local lists = store.calls.list
+        local sheets = scopeNamed(p, "sheets")
+        t:check(sheets ~= nil, "the scope is still offered")
+        t:eq(store.calls.list, lists,
+            "and no listCanvases was needed to decide that (ADR-42)")
+        -- The enumeration itself is the reader's choice, and pays for itself.
+        local built = p:buildExport("sheets")
+        t:check(built ~= nil, "the export still enumerates when asked")
+        t:check(store.calls.list > lists, "which is where the listing belongs")
+    end)
+
     t:case("a book with sheets offers its whole dossier", function()
         local canvases, pages = manySheets(2)
         local p = canvasPlugin{ canvases = canvases, pages = pages }

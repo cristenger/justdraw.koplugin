@@ -468,6 +468,37 @@ return function(ctx)
     -- =================================================================
     t:describe("ink_anchor_index / adding and forgetting")
 
+    --[[--
+    `count` is read on every paint of the export menu, so it answers from the
+    list rather than walking the map (ADR-42). That is only correct while the
+    list and the map hold the same ids, which is what this states across every
+    path that changes either.
+    ]]
+    t:case("count is the number of known canvases through batches, add and forget", function()
+        local index, doc, _, sched = fixture(20, { batch = 3 })
+        local function mapped()
+            local n = 0
+            for _ in pairs(index.by_id) do n = n + 1 end
+            return n
+        end
+        index:open()
+        t:eq(index:count(), mapped(), "during the metadata phase")
+        sched:drain()
+        t:eq(index:count(), mapped(), "after the load")
+        t:eq(index:count(), 20, "which is every row of the book")
+        doc.pages["/p99"] = 9
+        index:add({ id = 99, anchor_kind = "xpointer",
+                    anchor_raw = "/p99", anchor_normalized = "/p99" }, 9)
+        t:eq(index:count(), mapped(), "after an add")
+        t:eq(index:count(), 21, "one more")
+        index:add({ id = 99, anchor_kind = "xpointer",
+                    anchor_raw = "/p99", anchor_normalized = "/p99" }, 9)
+        t:eq(index:count(), 21, "and a repeat of it adds nothing")
+        index:forget(99)
+        t:eq(index:count(), mapped(), "after a forget")
+        t:eq(index:count(), 20, "back to the book's own rows")
+    end)
+
     t:case("a new canvas is placed straight away", function()
         local index, doc, _, sched = fixture(3)
         index:open()

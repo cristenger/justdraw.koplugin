@@ -97,12 +97,14 @@ function Controller:scopes()
     end
     if session and session:isAvailable() then
         local repository, index = session:exportSources()
-        if repository and index and index:isComplete() then
-            local canvases = session:allCanvases()
-            if canvases and #canvases > 0 then
-                scopes[#scopes + 1] = {
-                    value = "sheets", label = _("All drawing sheets") }
-            end
+        -- Answered from the index, which already holds every sheet of this
+        -- book: `scopes` runs whenever the dialog is opened, and a SELECT of
+        -- them all to decide whether to draw one radio button is exactly the
+        -- whole-book listing ADR-42 exists to avoid. The enumeration itself
+        -- still happens in `build`, once, if the reader picks this.
+        if repository and index and index:isComplete() and index:count() > 0 then
+            scopes[#scopes + 1] = {
+                value = "sheets", label = _("All drawing sheets") }
         end
     end
     local notes = self:notesScope()
