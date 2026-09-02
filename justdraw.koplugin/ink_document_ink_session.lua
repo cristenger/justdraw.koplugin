@@ -237,7 +237,7 @@ end
 function Session:_unavailable(reason)
     self.available = false
     self:_closeOwnedRepository()
-    self.notify(MESSAGES[reason] or MESSAGES.no_repository)
+    self.notify(MESSAGES[reason] or Session.FALLBACK_MESSAGE)
     self:_notifyState()
     return nil, reason
 end
@@ -547,13 +547,26 @@ function Session:_openSurfaceSession()
     return true
 end
 
---- Close the open surface, keeping the row. Nil plus the queue's reason when
---- the last write could not be made durable -- which is a state this session
---- *is* in, and is therefore announced; a clean close is not, because what
---- replaces the surface has not happened yet.
+--[[--
+Close the open surface. Nil plus the queue's reason when the last write could
+not be made durable -- which is a state this session *is* in, and is therefore
+announced; a clean close is not, because what replaces the surface has not
+happened yet.
+
+The row goes with it when nothing was ever drawn on it. Only `ensureSurface`
+creates one, but Draw stays on across a page turn, so a reader who turns ten
+pages with the pen in their hand would otherwise collect ten empty rows --
+which `countSurfaces` would count as page notes, "Delete all page notes" would
+offer to delete, and the dossier would print as ten blank pages with headers.
+Every page turn, suspend, delete and teardown reaches the surface through
+here, so this is the one place that has to know it.
+]]
 function Session:_closeSurfaceSession(opts)
     local ss = self.surface_session
     if not ss then return true end
+    -- Asked before the close, while the queue and the raster are still there
+    -- to answer it.
+    local drop = self:_surfaceIsEmpty(ss)
     self.muted = true
     local ok, err = ss:close(opts)
     self.muted = false
@@ -562,6 +575,66 @@ function Session:_closeSurfaceSession(opts)
         return nil, err
     end
     self.surface_session = nil
+    if drop then self:_dropEmptySurface() end
+    return true
+end
+
+--[[--
+Whether the open surface holds nothing at all.
+
+Three things have to be true and each is a way to lose ink by getting it
+wrong: nothing may still be waiting in the queue; the last write must not have
+failed, because its strokes are then in memory and not in `strokes()`; and the
+raster must have been able to read the row in the first place -- a listing
+that failed leaves an empty metadata table that says nothing about what is
+stored.
+]]
+function Session:_rasterIsEmpty(ss)
+    if ss:saveFailed() or ss:pendingWrites() ~= 0 then return false end
+    local cache = ss:cache()
+    if not cache or cache:stateName() == "load_failed" then return false end
+    local strokes = cache:strokes()
+    return strokes ~= nil and #strokes == 0
+end
+
+--- Whether this surface may be forgotten: empty, and a row this session is
+--- allowed to delete. A read-only database is somebody else's to tidy.
+function Session:_surfaceIsEmpty(ss)
+    if not self.surface_obj or not self:isWritable() then return false end
+    return self:_rasterIsEmpty(ss)
+end
+
+--[[--
+Whether this page carries ink a reader could delete.
+
+Not the same question as "is there a row": Draw creates one before the first
+stroke, and it is dropped again when the page is left, so between the two
+there is a working surface with nothing on it. Offering to delete that would
+be offering to delete nothing.
+]]
+function Session:hasInk()
+    if not self.surface_obj then return false end
+    local ss = self.surface_session
+    if not ss then return true end
+    return not self:_rasterIsEmpty(ss)
+end
+
+--- Forget an empty row. Best effort by construction: a DELETE that fails
+--- leaves an empty surface the reader will simply meet again, and refusing a
+--- page turn over it would be the wrong trade entirely.
+function Session:_dropEmptySurface()
+    local row = self.surface_obj
+    if not row then return false end
+    local page = row.fixed_page or self.page_no
+    local ok, err = self.repository:deletePageInkSurface(self.book_id, page)
+    if not ok then
+        logger.warn("JustDraw: an empty page-ink row could not be dropped:", err)
+        return false
+    end
+    logger.dbg("JustDraw: dropped the empty page-ink row for page", page)
+    self.surface_obj = nil
+    self.transform_obj = nil
+    self.geometry_ok = false
     return true
 end
 
@@ -801,10 +874,13 @@ function Session:retrySave()
         applied, apply_err = self:setPage(pending)
     end
     self.holding_save_recovered = false
-    if self.deferred_save_recovered then
-        self.deferred_save_recovered = false
-        if self.on_save_recovered then self.on_save_recovered(self) end
-    end
+    -- Only when the page change it was holding actually happened. Told
+    -- otherwise, the owner turns drawing back on for a page it cannot have,
+    -- and the reader gets two sentences for one press: the failure, and then
+    -- the refusal that follows from acting on the recovery.
+    local relay = self.deferred_save_recovered and applied
+    self.deferred_save_recovered = false
+    if relay and self.on_save_recovered then self.on_save_recovered(self) end
     return applied, apply_err
 end
 
@@ -879,7 +955,14 @@ function Session:countSurfaces()
         logger.warn("JustDraw: cannot count this book's page ink:", err)
         return 0
     end
-    return tonumber(n) or 0
+    n = tonumber(n) or 0
+    -- The database has counted the open surface since `ensureSurface`
+    -- inserted it, and it will be dropped again when the page is left. Until
+    -- something is drawn on it, it is a working surface and not a page note.
+    if self.surface_session and self:_surfaceIsEmpty(self.surface_session) then
+        n = n - 1
+    end
+    return n > 0 and n or 0
 end
 
 --- Delete every page's ink in this book, and no sheet: three different things
@@ -907,7 +990,9 @@ Put the surface away without forgetting the page.
 
 Scroll mode and anything else the transform cannot describe: the raster is the
 expensive part and there is no point holding one that cannot be painted, but
-the row stays and `resume` brings it back exactly where it was.
+the row stays and `resume` brings it back exactly where it was -- unless
+nothing was ever drawn on it, in which case closing the surface forgets it and
+there is nothing to bring back.
 ]]
 function Session:suspend(reason)
     if self.closed then return nil, "closed" end

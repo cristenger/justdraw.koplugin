@@ -355,6 +355,45 @@ return function(ctx)
             "and it is the reason the surface gave")
     end)
 
+    t:case("a refused contact is told once, not once a tick", function()
+        local row = pageRow(1, 1)
+        row.logical_w, row.logical_h = 300, 400   -- the page's size changed
+        local p = documentPlugin{ canvases = { row } }
+        env.notifications = {}
+        -- One contact, three frames, a UI tick between each: the tick is what
+        -- `notifyDeferred`'s own latch cannot span.
+        p:onContactPoint(0, INK_XY.x, INK_XY.y)
+        env.UIManager:flush()
+        p:onContactPoint(0, INK_XY.x + 10, INK_XY.y + 10)
+        env.UIManager:flush()
+        p:onContactPoint(0, INK_XY.x + 20, INK_XY.y + 20)
+        env.UIManager:flush()
+        t:eq(#env.notifications, 1, "one sentence for the whole contact")
+        p:endStroke()   -- the lift
+        p:onContactPoint(0, INK_XY.x, INK_XY.y)
+        env.UIManager:flush()
+        t:eq(#env.notifications, 2, "and a new contact may be told again")
+    end)
+
+    t:case("nothing inks between the latch and the frame that acts on it", function()
+        local p = documentPlugin{ canvases = { pageRow(1, 1) } }
+        startDrawing(p)
+        penDown(p, INK_XY.x, INK_XY.y)
+        penFrame(p, INK_XY.x + 20, INK_XY.y)
+        p.document_session.addStroke = function()
+            return nil, "operation_too_large"
+        end
+        penLift(p, INK_XY.x + 20, INK_XY.y)
+        t:eq(p.document_pending_capture_stop, true, "the stop is latched")
+        local bb = p.document_session:cache():buffer()
+        local writes = #bb.writes
+        penDown(p, INK_XY.x, INK_XY.y + 60)
+        penFrame(p, INK_XY.x + 40, INK_XY.y + 60)
+        t:eq(#bb.writes, writes,
+            "and the rest of the frame reaches the page raster with nothing")
+        t:eq(p.document_stroke, nil, "no stroke was started behind it")
+    end)
+
     t:case("an oversized page stroke disarms capture after the frame", function()
         local p = documentPlugin{ canvases = { pageRow(1, 1) } }
         startDrawing(p)
@@ -577,6 +616,113 @@ return function(ctx)
         env.UIManager:flush()
         t:eq(#store:listStrokes(row.id), 1, "and the stroke landed on it")
         t:eq(#store:listStrokes(1), 1, "page 1 kept its own")
+
+        p.view.state.page = 3
+        p:onPageUpdate(3)
+        env.UIManager:flush()
+        t:check(store:findPageInkSurface(12, 3) ~= nil, "page 3 gets one too")
+        t:check(store:findPageInkSurface(12, 2) ~= nil, "page 2 keeps its ink")
+        p.view.state.page = 4
+        p:onPageUpdate(4)
+        env.UIManager:flush()
+        t:eq(store:findPageInkSurface(12, 3), nil,
+            "but page 3, left untouched, is forgotten when it is left")
+    end)
+
+    t:case("paging with Draw on and drawing nothing leaves no rows", function()
+        local p, store = documentPlugin()
+        startDrawing(p)
+        for page = 2, 6 do
+            p.view.state.page = page
+            p:onPageUpdate(page)
+            env.UIManager:flush()
+        end
+        t:eq(p.drawing, true, "Draw stayed on the whole way")
+        t:eq(store:countPageInkSurfaces(12), 1,
+            "only the page under the reader holds a surface")
+        p:teardown()
+        t:eq(store:countPageInkSurfaces(12), 0,
+            "and the last one goes with the document: reading creates nothing")
+    end)
+
+    t:case("the delete entries stay grey through paging with Draw on", function()
+        local p, store = documentPlugin()
+        startDrawing(p)
+        p.view.state.page = 2
+        p:onPageUpdate(2)
+        env.UIManager:flush()
+        t:eq(store:countPageInkSurfaces(12), 1,
+            "the page under the reader has a working surface in the database")
+        t:eq(p.document_session:countSurfaces(), 0,
+            "which is not a page note until something is drawn on it")
+        t:eq(pageNotesItem(p, "Delete all page notes").enabled_func(), false,
+            "so there is nothing to delete")
+        t:eq(pageNotesItem(p, "Delete this page note").enabled_func(), false,
+            "and nothing on this page either")
+
+        penDown(p, INK_XY.x, INK_XY.y)
+        penFrame(p, INK_XY.x + 40, INK_XY.y)
+        penLift(p, INK_XY.x + 40, INK_XY.y)
+        p.document_ink_count = nil
+        t:eq(p.document_session:countSurfaces(), 1, "one stroke makes it one")
+        t:eq(pageNotesItem(p, "Delete this page note").enabled_func(), true,
+            "and there is now something on this page to delete")
+    end)
+
+    t:case("an empty row is kept while a write is still owed", function()
+        local p, store = documentPlugin{
+            canvases = { pageRow(1, 1) }, strokes = { [1] = { bar_stroke() } },
+        }
+        startDrawing(p)
+        t:eq(p:onJustDrawUndo(), true, "the page's only stroke is taken back")
+        t:eq(#p.document_session:cache():strokes(), 0, "the raster is empty")
+        t:check(p.document_session:pendingWrites() > 0, "but a delete is owed")
+        p:teardown()
+        t:check(store:findPageInkSurface(12, 1) ~= nil,
+            "so the row stays: a write in flight is not an empty page")
+    end)
+
+    t:case("an empty row is kept when the last write failed", function()
+        local p, store = documentPlugin{
+            canvases = { pageRow(1, 1) }, strokes = { [1] = { bar_stroke() } },
+        }
+        startDrawing(p)
+        p:onJustDrawUndo()
+        store.fail_transaction = "commit"
+        env.UIManager:flush()
+        t:eq(p.document_session:saveFailed(), true, "the delete could not commit")
+        p:teardown()
+        t:check(store:findPageInkSurface(12, 1) ~= nil,
+            "the row stays: the work is in memory, not in the raster")
+    end)
+
+    t:case("a read-only database is never deleted from", function()
+        local p, store = documentPlugin{
+            read_only = true, canvases = { pageRow(1, 1) },
+        }
+        t:eq(p.document_session:isWritable(), false, "nothing may be written")
+        p:teardown()
+        t:check(store:findPageInkSurface(12, 1) ~= nil,
+            "and an empty row of somebody else's is left exactly as it was")
+    end)
+
+    t:case("a page turn onto ink keeps Draw while the raster reads", function()
+        local p = documentPlugin{
+            canvases = { pageRow(1, 1), pageRow(2, 2) },
+            strokes = { [2] = { bar_stroke() } },
+        }
+        startDrawing(p)
+        p.view.state.page = 2
+        p:onPageUpdate(2)
+        -- Only the page tick: the raster batches on the ticks behind it, and
+        -- what is being checked is the state between the two.
+        table.remove(env.UIManager._queue)()
+        t:eq(p.document_session:stateName(), "loading", "the ink is still coming")
+        t:eq(p.drawing, true,
+            "and Draw is not taken away for the length of a page load")
+        env.UIManager:flush()
+        t:eq(p.document_session:stateName(), "ready", "the raster finishes")
+        t:eq(p.drawing, true, "with the pen still in the reader's hand")
     end)
 
     t:case("a page turn onto a view it cannot map stops Draw and says why", function()
@@ -625,6 +771,34 @@ return function(ctx)
             "on a surface for the page the reader is actually on")
     end)
 
+    t:case("a retry whose held turn fails does not say drawing may resume", function()
+        local p, store = documentPlugin{ canvases = { pageRow(1, 1) } }
+        startDrawing(p)
+        penDown(p, INK_XY.x, INK_XY.y)
+        penFrame(p, INK_XY.x + 40, INK_XY.y + 40)
+        penLift(p, INK_XY.x + 40, INK_XY.y + 40)
+        store.fail_transaction = "commit"
+        env.UIManager:flush()
+        p.view.state.page = 2
+        p:onPageUpdate(2)
+        env.UIManager:flush()
+        t:eq(p.document_session:page(), 1, "the turn is being held")
+
+        store.fail_transaction = nil
+        store.fail_find_page_ink = "disk error"   -- the held turn cannot land
+        local relayed = false
+        local recovered = p.onDocumentInkSaveRecovered
+        p.onDocumentInkSaveRecovered = function(plugin, ...)
+            relayed = true
+            return recovered(plugin, ...)
+        end
+        pageNotesItem(p, "Retry saving ink").callback()
+        env.UIManager:flush()
+        t:eq(relayed, false,
+            "the owner is not told it may draw again on a page that did not open")
+        t:eq(p.drawing, false, "so Draw stays off rather than refusing twice")
+    end)
+
     t:case("a retry gives Draw back only to somebody who had it", function()
         local p, store = documentPlugin{ canvases = { pageRow(1, 1) } }
         startDrawing(p)
@@ -641,7 +815,12 @@ return function(ctx)
     end)
 
     t:case("continuous scrolling suspends page ink and says so", function()
-        local p = documentPlugin{ canvases = { pageRow(1, 1) } }
+        -- With ink on it, so that what resume brings back is a real surface:
+        -- an empty row is dropped when its surface closes.
+        local p = documentPlugin{
+            canvases = { pageRow(1, 1) },
+            strokes = { [1] = { bar_stroke() } },
+        }
         startDrawing(p)
         p.view.page_scroll = true
         p:onSetScrollMode(true)
@@ -654,7 +833,9 @@ return function(ctx)
         p.view.page_scroll = false
         p:onSetScrollMode(false)
         env.UIManager:flush()
+        env.UIManager:flush()   -- the resumed raster rasterises on a tick
         t:eq(p.document_session:stateName(), "ready", "and turning it back off resumes")
+        t:eq(#p.document_session:cache():strokes(), 1, "with the page's ink on it")
     end)
 
     t:case("continuous scrolling says nothing to a reader who was not drawing", function()

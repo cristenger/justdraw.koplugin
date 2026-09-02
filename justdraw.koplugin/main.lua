@@ -517,6 +517,7 @@ function JustDraw:init()
     self.document_backpressure_notified = false
     self.document_backpressure_notice_pending = false
     self.document_refusal_notice_pending = false
+    self.document_refusal_notified = false
     self.document_pending_capture_stop = false
     --- Whether a failed write, and not the reader, is what stopped Draw. A
     --- retry gives it back only to somebody who had it.
@@ -1183,6 +1184,9 @@ function JustDraw:scheduleDocumentPage(page)
         -- A refused turn (`flush_failed`) has already been notified by the
         -- queue that failed, and the session is holding the page for a retry.
         local turned = session:setPage(target or self:currentPage())
+        -- Leaving a page can forget its row -- an empty surface is not a page
+        -- note -- so the menu's cached count is no longer the truth.
+        if turned then self.document_ink_count = nil end
         if turned and self.drawing then self:continueDocumentInk() end
     end)
 end
@@ -1204,6 +1208,11 @@ be worse than not saying it at all.
 function JustDraw:continueDocumentInk()
     local ready, reason = self:prepareDocumentInk()
     if ready then return true end
+    -- A raster still reading is not a refusal: `on_ready` is on its way, and
+    -- stopping Draw for the length of one page's load would take the pen out
+    -- of the reader's hand on every annotated page they turn to. Points that
+    -- arrive meanwhile are refused, once, with that same sentence.
+    if reason == "loading" then return true end
     if self.drawing then
         self:setDrawing(false)
         self:notify(documentMessage(reason))
@@ -1459,13 +1468,27 @@ function JustDraw:notifyDocumentBackpressure()
         function() return self.document_session ~= nil end)
 end
 
---- Why a point the pen just made went nowhere. Reached from inside the stylus
---- callback and once per sample, so it is deferred and coalesced like every
---- other notice raised from there.
+--[[--
+Why a point the pen just made went nowhere.
+
+`notifyDeferred`'s own latch only coalesces one tick's worth, and the tick
+between two frame batches is exactly what a contact on a page that cannot take
+ink -- a raster still loading, most often, right after a page turn -- spends
+its whole length crossing. So the latch here is the contact: armed when one
+starts, and spent on the first refused sample of it.
+]]
 function JustDraw:notifyDocumentRefusal(reason)
+    if self.document_refusal_notified then return end
+    self.document_refusal_notified = true
     self:notifyDeferred("document_refusal_notice_pending",
         documentMessage(reason),
         function() return self.document_session ~= nil end)
+end
+
+--- A new contact may be told again why it is being refused. Called from both
+--- routes' contact-down, which is the only place that means "a new one".
+function JustDraw:armDocumentRefusalNotice()
+    self.document_refusal_notified = false
 end
 
 function JustDraw:notifyStrokeBudget()
@@ -1925,6 +1948,7 @@ function JustDraw:onContactPoint(slot, raw_x, raw_y, tool)
             self:abortStroke()
             return
         end
+        self:armDocumentRefusalNotice()
         self.draw_slot = slot
     elseif self.draw_slot ~= slot then
         return
@@ -2052,7 +2076,7 @@ on that: the router's pen destination decides where the *stroke* goes and
 cancels resting fingers with it, so it waits for a pair the policy vouches for.
 ]]
 function JustDraw:classifyStylusContact(x, y, tool, coherent)
-    if self.canvas_pending_capture_stop then return "block" end
+    if self:captureStopPending() then return "block" end
     if self.canvas_open and self.router and coherent then
         self.router:penContact(x, y)
     end
@@ -2074,6 +2098,7 @@ end
 
 function JustDraw:onStylusContactStart()
     self.stylus_budget_notified = false
+    self:armDocumentRefusalNotice()
     -- Latch here, not at the first drawable point: the geometry policy can
     -- withhold several frames proving a coherent pair, and a manual style
     -- change in that window must not reach a contact already under way.
@@ -2096,7 +2121,7 @@ edge rather than scribbling over the buttons, and a dialog that appeared after
 the contact began, which stops the ink without handing the slot back.
 ]]
 function JustDraw:onStylusPoint(x, y, tool, is_first)
-    if self.canvas_pending_capture_stop then return "abort_suspend" end
+    if self:captureStopPending() then return "abort_suspend" end
     if not is_first and self:dialogOnTop() then return "abort_suspend" end
 
     if self.canvas_open then
@@ -2679,6 +2704,21 @@ function JustDraw:onCanvasCacheWillRebuild(canvas)
     self:setDrawing(false)
 end
 
+--[[--
+Whether a domain-fatal stop is latched for the end of this frame, on either
+surface.
+
+The latch is set from inside the stylus callback and acted on by the residual
+handler, so between the two there is a stretch of one frame in which nothing
+may ink: the stroke that tripped it has already been refused and taken back
+off the raster, and the samples behind it would paint over a surface that is
+about to stop accepting anything at all.
+]]
+function JustDraw:captureStopPending()
+    return self.canvas_pending_capture_stop ~= nil
+        or self.document_pending_capture_stop == true
+end
+
 --- Latch a domain-fatal input stop until the residual handler for this same
 --- SYN_REPORT has filtered palms and advanced diagnostics. The stylus callback
 --- runs before feedEvent, so releasing the lease there would bypass both.
@@ -3179,7 +3219,9 @@ function JustDraw:_flushPendingDocumentCaptureStop()
     self.document_pending_capture_stop = false
     local lease = self.input_lease
     if not lease then
-        self:setDrawing(false)
+        -- Nothing to release, and a frame handler is not the place to change
+        -- the visible state by hand: the sheet's twin makes the same choice.
+        if self.bar then self.bar:update(false) end
         return true
     end
     local generation = self.drawing_generation or 0
@@ -3837,10 +3879,12 @@ function JustDraw:documentInkMenu()
         keep_menu_open = true,
         -- Read through the plugin, not the captured session: a built submenu
         -- outlives the document it was built for, and this runs on every
-        -- paint of it.
+        -- paint of it. `hasInk`, not "is there a row": Draw creates the row
+        -- before the first stroke, and offering to delete an empty working
+        -- surface would be offering to delete nothing.
         enabled_func = function()
             return self.document_session ~= nil
-                and self.document_session:surface() ~= nil
+                and self.document_session:hasInk()
         end,
         callback = function() self:confirmDeleteDocumentInk() end,
     }
