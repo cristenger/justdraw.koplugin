@@ -49,6 +49,14 @@ the geometry the notes were drawn in, so they are hidden rather than shown in
 the wrong place. Zoomed far in, the page's note layer would not fit the memory
 budget; zoom out and it comes back. Nothing is lost in either case.
 
+**Strokes with corners you did not draw, or two strokes joined into one.**
+When the device cannot keep up with the pen, the kernel throws input away and
+says so once. JustDraw now ends the stroke there rather than joining what came
+after it, so a lost moment costs the rest of one stroke instead of a line
+across the page. *More tools → JustDraw → Stylus diagnostics* reports **Input
+events the kernel dropped**; it should read 0. If it does not, the log is the
+useful thing to attach.
+
 **Reporting an input problem.** *More tools → JustDraw → Stylus diagnostics*
 records a bounded trace of pen decisions to the local KOReader log. It stops by
 itself. If you also turned KOReader's debug logging on, turn it off again once
