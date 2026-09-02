@@ -28,9 +28,9 @@ local logger = require("logger")
 local _ = require("gettext")
 
 local Anchor = require("ink_anchor")
+local BookDatabase = require("ink_book_database")
 local Index = require("ink_anchor_index")
 local Overlay = require("ink_canvas_overlay")
-local Repository = require("ink_canvas_repository")
 local SurfaceSession = require("ink_surface_session")
 local Transform = require("ink_canvas_transform")
 
@@ -101,49 +101,26 @@ end
 --- Open the database and start indexing. Returns true, or nil plus a reason
 --- that has already been shown to the reader.
 function Session:open()
-    if self.repository == false then return self:_unavailable("no_repository") end
+    -- Which file, whether this session opened it, and which of the two book
+    -- lookups a read-only schema allows are the same four decisions page ink
+    -- makes, so they live in one place (`ink_book_database`). What stays here
+    -- is what differs: the wording, the notification, and the fact that this
+    -- session's connection lives as long as the document.
+    local handle, reason = BookDatabase.open{
+        repository = self.repository,
+        identity = self.identity,
+        file = self.file,
+        path_provider = function() return self:_databasePath() end,
+    }
+    if not handle then return self:_unavailable(reason) end
+    self.repository = handle.repository
+    if handle.owns_repository then self.owns_repository = true end
 
-    if not self.repository then
-        local path, path_err, current_path, legacy_path = self:_databasePath()
-        if not path then
-            logger.warn("JustDraw: canvas database conflict:",
-                path_err, current_path, legacy_path)
-            return self:_unavailable(path_err)
-        end
-        local repo, err = Repository.open{
-            path = path,
-            wal = Device.canUseWAL and Device:canUseWAL() or false,
-        }
-        if not repo then
-            logger.warn("JustDraw: canvas database unavailable:", err)
-            return self:_unavailable("no_repository")
-        end
-        self.repository = repo
-        self.owns_repository = true
-    end
-
-    local read_only = self.repository.read_only == true
-    local book_id, err
-    if read_only then
-        book_id, err = self.repository:findBookId(
-            self.identity.partial_md5, self.identity.file_size)
-    else
-        book_id, err = self.repository:bookId(
-            self.identity.partial_md5, self.identity.file_size, self.file)
-    end
-    local empty_read_only = read_only and err == "not_found"
-    if not book_id then
-        if empty_read_only then
-            -- A newer plugin has not registered this book. There can be no
-            -- canvases to list and this older plugin must not insert the row.
-            self.book_id = nil
-        else
-            logger.warn("JustDraw: no stable identity for this book:", err)
-            return self:_unavailable("no_identity")
-        end
-    else
-        self.book_id = book_id
-    end
+    -- Nil together with `empty_read_only`: there can be no canvases to list
+    -- and this older plugin must not insert the book row.
+    local book_id = handle.book_id
+    local empty_read_only = handle.empty_read_only
+    self.book_id = book_id
     self.index = Index.new{
         repository = self.repository,
         document = self.document,
@@ -204,20 +181,19 @@ function Session:_unavailable(reason)
 end
 
 function Session:_closeOwnedRepository()
-    if self.owns_repository and self.repository and self.repository.close then
-        self.repository:close()
-        self.repository = nil
-        self.owns_repository = false
-    end
+    if not self.owns_repository then return end
+    BookDatabase.close{
+        repository = self.repository,
+        owns_repository = true,
+    }
+    self.repository = nil
+    self.owns_repository = false
 end
 
---- Required here rather than at the top: datastorage pulls in a chunk of
---- KOReader that a session with an injected repository never needs.
+--- The file this book's canvases live in. A method rather than a call, so a
+--- caller can put its own answer in front of the seam's.
 function Session:_databasePath()
-    local DataStorage = require("datastorage")
-    local Compat = require("ink_compat")
-    return Compat.databasePath(DataStorage:getSettingsDir(),
-        "justdraw.sqlite3", "fingerink.sqlite3")
+    return BookDatabase.path()
 end
 
 function Session:isAvailable()
