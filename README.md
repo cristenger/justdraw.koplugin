@@ -12,10 +12,20 @@ development, so expect rough edges and breaking changes.
 
 ## Features
 
-- Draw directly on document pages.
+- Draw on the pages of fixed-layout documents (PDF, DjVu, comics). The ink is
+  stored per page in the page's own coordinates, so it stays put under zoom
+  and pan. Needs KOReader 2026.07 or newer.
 - Attach drawing sheets to reflowable documents.
 - Create standalone notebooks, on blank, ruled, squared or dotted paper.
+- Export every note in a book — sheets, page notes and older direct ink — as
+  one PDF or a series of images ("Document notes").
 - Reject touch input while the stylus is drawing.
+
+On KOReader 2026.03 only the original route remains: drawing straight onto the
+screen with a finger, saved with the book's settings. From 2026.07 that older
+"legacy" ink is still shown and exported, but nothing new is added to it: new
+ink goes on drawing sheets (EPUB) or page notes (fixed layout). It can be
+removed with **Clear legacy ink** in the JustDraw menu.
 
 ## Troubleshooting
 
@@ -30,6 +40,14 @@ a palm: it draws nothing, erases nothing, and is withheld from the reader.
 any contact is still on the glass. Lift the pen *and* your hand; the rail comes
 back on its own, and an action you activate meanwhile now says why it was
 refused instead of failing silently.
+
+**"Turn off continuous scrolling / reflow / page optimisation to draw page
+notes", "Zoom out to see and draw page notes".** Page notes are shown and
+editable only in single-page mode on an unmodified page: with scroll mode,
+reflow or KOReader's page optimisation on, the page on screen no longer has
+the geometry the notes were drawn in, so they are hidden rather than shown in
+the wrong place. Zoomed far in, the page's note layer would not fit the memory
+budget; zoom out and it comes back. Nothing is lost in either case.
 
 **Reporting an input problem.** *More tools → JustDraw → Stylus diagnostics*
 records a bounded trace of pen decisions to the local KOReader log. It stops by
@@ -57,16 +75,22 @@ available under **File manager → More tools → Notebooks**.
 Back up KOReader's settings before using or upgrading the plugin. Sync is not
 implemented.
 
-**Export.** A notebook, an EPUB sheet and the page you are reading in a
-fixed-layout document can be written out as PDF, PNG or JPEG, to a folder you
-choose. The entry is **Export…** — in the JustDraw menu while reading, in a
-notebook's **More** menu, and in the library's per-notebook actions. The
-proposed file name carries the page number when you are exporting a single
-page, and you can change it. If the folder looks too full you are asked before
-anything is written, and if an earlier export was interrupted you are offered
-its leftovers to delete. The PDF is a raster: the ink is a picture, not
-editable vectors. Exporting a whole EPUB by page, and exporting a page of a
-reflowable book directly, are not implemented.
+**Export.** A notebook, an EPUB sheet, the page you are reading in a
+fixed-layout document (with its page notes and any legacy ink), or every note
+in the book (**Document notes**) can be written out as PDF, PNG or JPEG, to a
+folder you choose. The entry is **Export…** — in the JustDraw menu while
+reading, in a notebook's **More** menu, and in the library's per-notebook
+actions. "Document notes" writes the notes on white, in reading order, each
+page under a small header naming the book, the kind of note and where it was;
+it does not reproduce the book's pages. If the set includes legacy ink you
+are warned first, because its original zoom and screen size were never
+stored. The proposed file name carries the page number when you are exporting
+a single page, and you can change it. If the folder looks too full you are
+asked before anything is written, and if an earlier export was interrupted
+you are offered its leftovers to delete. The PDF is a raster: the ink is a
+picture, not editable vectors. Exporting the book's own pages with the notes
+on them, and exporting a page of a reflowable book directly, are not
+implemented.
 
 ## Development
 
