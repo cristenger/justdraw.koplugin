@@ -141,6 +141,62 @@ return function(ctx)
         t:eq(tr:contains(500, 1001), true, "and just below the edge is")
     end)
 
+    t:case("contains answers the canvas rectangle, without building one", function()
+        --[[--
+        `contains` is asked once per accepted pen sample, so it computes the
+        rectangle's four edges rather than allocating one -- which is only
+        safe while the two round the same way. Every boundary of several
+        shapes is checked from both sides, including a fixed page's transform,
+        whose fit rectangle is the page at zoom rather than the screen.
+        ]]
+        local shapes = {
+            landscape(), portrait(), portrait(1000),
+            Transform.new{
+                logical_w = 596, logical_h = 842,
+                fit_rect = { x = 17, y = 9, w = 298, h = 421 },
+                clip_rect = { x = 0, y = 0, w = 600, h = 800 },
+                align_x = "left", align_y = "top",
+            },
+            Transform.new{
+                logical_w = 596, logical_h = 842,
+                fit_rect = { x = -40, y = -30, w = 894, h = 1263 },
+                clip_rect = { x = 0, y = 0, w = 600, h = 800 },
+                align_x = "left", align_y = "top",
+            },
+            -- A width whose fraction rounds *up*: MuPDF measures pages in
+            -- points and does not round, so this is the ordinary case on a
+            -- PDF and the one where truncating instead of rounding would put
+            -- the last column of the page outside the canvas.
+            Transform.new{
+                logical_w = 596, logical_h = 842,
+                fit_rect = { x = 0, y = 0, w = 298.7, h = 900 },
+                clip_rect = { x = 0, y = 0, w = 600, h = 800 },
+                align_x = "left", align_y = "top",
+            },
+            -- The same, panned by a fraction, so both edges round.
+            Transform.new{
+                logical_w = 596, logical_h = 842,
+                fit_rect = { x = -20.6, y = -12.7, w = 641.9, h = 900 },
+                clip_rect = { x = 0, y = 0, w = 600, h = 800 },
+                align_x = "left", align_y = "top",
+            },
+        }
+        for i = 1, #shapes do
+            local tr = shapes[i]
+            local r = tr:canvasRect()
+            local label = " (shape " .. i .. ")"
+            t:eq(tr:contains(r.x, r.y), true, "the top-left corner is in" .. label)
+            t:eq(tr:contains(r.x + r.w - 1, r.y + r.h - 1), true,
+                "and the last pixel inside is" .. label)
+            t:eq(tr:contains(r.x - 1, r.y), false, "one left of it is out" .. label)
+            t:eq(tr:contains(r.x, r.y - 1), false, "one above it is out" .. label)
+            t:eq(tr:contains(r.x + r.w, r.y), false,
+                "the half-open right edge is out" .. label)
+            t:eq(tr:contains(r.x, r.y + r.h), false,
+                "and so is the bottom one" .. label)
+        end
+    end)
+
     t:case("the visible canvas rectangle stops at the bottom of the screen", function()
         local tr = portrait(1000)
         local r = tr:canvasRect()

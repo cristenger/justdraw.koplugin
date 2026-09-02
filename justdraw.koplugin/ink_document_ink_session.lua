@@ -57,12 +57,60 @@ local SurfaceSession = require("ink_surface_session")
 local Session = {}
 Session.__index = Session
 
-local MESSAGES = {
+--[[--
+Every reason page ink can refuse, as a sentence a reader can act on.
+
+One table for the whole feature, and it lives here because this is the module
+both halves of it can see: the session says some of these itself, and the
+reader wiring turns the rest into a message when a refusal reaches a menu or a
+toolbar. Two tables meant two sentences for `read_only`, two msgids for a
+translator to tell apart, and no way to know which one a reader had been shown.
+
+Reasons come from three places and all three are answered here: this session
+(`unavailable`, `read_only`, `flush_failed`, ...), `ink_document_transform`
+(`unsupported_mode`, `zoom_too_large`, ...) and the surface underneath
+(`loading`, `save_failed`). Several share a sentence on purpose -- `suspended`
+is only ever entered from scroll mode, and a session with no usable database
+answers `unavailable` to everything.
+]]
+Session.MESSAGES = {
+    -- opening the book
     no_identity = _("Page notes are unavailable for this book"),
-    no_repository = _("Page notes need a database this KOReader cannot open"),
-    read_only = _("This page's ink is read-only because it was created by a newer JustDraw version."),
+    no_repository = _("Page notes need a database this KOReader cannot open."),
+    unavailable = _("Page notes need a database this KOReader cannot open."),
+    closed = _("Page notes need a database this KOReader cannot open."),
     database_conflict = _("Both JustDraw and FingerInk notes databases exist. Close KOReader, then move one database together with its matching -wal and -shm files to another directory."),
+    read_only = _("Page notes are read-only because this database was created by a newer JustDraw version."),
+    -- the view the transform could not describe
+    unsupported_mode = _("Turn off continuous scrolling to draw page notes."),
+    suspended = _("Turn off continuous scrolling to draw page notes."),
+    unsupported_reflow = _("Turn off reflow to draw page notes."),
+    unsupported_optimizing = _("Turn off page optimisation to draw page notes."),
+    unsupported_rotation = _("Page notes need the page unrotated."),
+    zoom_too_large = _("Zoom out to see and draw page notes."),
+    no_view = _("Page notes can't be placed on this view."),
+    unsupported_document = _("Page notes can't be placed on this view."),
+    no_page = _("Page notes can't be placed on this view."),
+    bad_page = _("Page notes can't be placed on this view."),
+    -- the page itself
+    page_geometry_changed = _("This page's size changed. Its notes are kept but can't be edited."),
+    bad_geometry = _("This page does not say how big it is, so notes cannot be placed on it."),
+    no_dimensions = _("This page does not say how big it is, so notes cannot be placed on it."),
+    no_surface = _("There are no page notes on this page yet."),
+    -- the surface underneath
+    loading = _("Page notes are still loading. Try again in a moment."),
+    load_failed = _("This page's notes could not be read."),
+    -- The sheet's bargain, word for word: the ink is not lost, it is not
+    -- durable, and one menu entry is what finishes it.
+    flush_failed = _("Could not save ink. It is still here: use Retry saving."),
+    save_failed = _("Could not save ink. It is still here: use Retry saving."),
 }
+
+--- A reason with no line of its own still has to say something the reader can
+--- read; a driver error is the usual way to get here.
+Session.FALLBACK_MESSAGE = _("Page notes are not available here.")
+
+local MESSAGES = Session.MESSAGES
 
 local function finite(v)
     return type(v) == "number" and v == v
@@ -140,6 +188,8 @@ function Session.new(opts)
         pending_page = nil,
         suspended = false,
         notified_read_only = false,
+        holding_save_recovered = false,
+        deferred_save_recovered = false,
         last_state = nil,
         muted = false,
         available = false,
@@ -471,6 +521,14 @@ function Session:_openSurfaceSession()
         end,
         on_save_recovered = function()
             if self.surface_session ~= ss then return end
+            -- Held back while `retrySave` still has a page change to apply:
+            -- the owner reads this as "you may draw again", and until the
+            -- held turn has been made that would be an answer about the page
+            -- the reader has already left.
+            if self.holding_save_recovered then
+                self.deferred_save_recovered = true
+                return
+            end
             if self.on_save_recovered then self.on_save_recovered(self) end
         end,
         on_will_rebuild = function()
@@ -723,15 +781,31 @@ function Session:retrySave()
     if self.closed then return nil, "closed" end
     if not self:isAvailable() then return nil, "unavailable" end
     if not self.surface_session then return true end
+    -- The relay is withheld across the write and the page change it was
+    -- holding, and let out at the end: an owner that turns drawing back on
+    -- when it hears this has to hear it about the page it ends up on, not the
+    -- one the failure stranded it against.
+    self.holding_save_recovered = true
+    self.deferred_save_recovered = false
     local ok, err = self.surface_session:retrySave()
     self:_notifyState()
-    if not ok then return nil, err end
+    if not ok then
+        self.holding_save_recovered = false
+        self.deferred_save_recovered = false
+        return nil, err
+    end
+    local applied, apply_err = true, nil
     local pending = self.pending_page
     if pending then
         self.pending_page = nil
-        return self:setPage(pending)
+        applied, apply_err = self:setPage(pending)
     end
-    return true
+    self.holding_save_recovered = false
+    if self.deferred_save_recovered then
+        self.deferred_save_recovered = false
+        if self.on_save_recovered then self.on_save_recovered(self) end
+    end
+    return applied, apply_err
 end
 
 --- Read this page's ink again after a failure -- either the raster's own

@@ -178,14 +178,19 @@ function Transform:sheetRect()
     return { x = r.x, y = r.y, w = r.w, h = r.h }
 end
 
+--- The drawn canvas intersected with the clip, unrounded. Four returns rather
+--- than a rectangle, so the hit test below can share the arithmetic without
+--- building a table per call.
+local function visibleEdges(self)
+    return max(self.offset_x, self.clip_rect.x),
+        max(self.offset_y, self.clip_rect.y),
+        min(self.offset_x + self.draw_w, self.clip_rect.x + self.clip_rect.w),
+        min(self.offset_y + self.draw_h, self.clip_rect.y + self.clip_rect.h)
+end
+
 --- The part of the canvas that is actually on screen. What ink is clipped to.
 function Transform:canvasRect()
-    local left = max(self.offset_x, self.clip_rect.x)
-    local top = max(self.offset_y, self.clip_rect.y)
-    local right = min(self.offset_x + self.draw_w,
-        self.clip_rect.x + self.clip_rect.w)
-    local bottom = min(self.offset_y + self.draw_h,
-        self.clip_rect.y + self.clip_rect.h)
+    local left, top, right, bottom = visibleEdges(self)
     local w, h = max(0, right - left), max(0, bottom - top)
     return {
         x = floor(left + 0.5),
@@ -199,11 +204,21 @@ end
 
 Transform.visibleCanvasRect = Transform.canvasRect
 
---- Whether a screen point is on the canvas -- not merely on the sheet. The
---- side margins are sheet, not canvas, and ink must not start in them.
+--[[--
+Whether a screen point is on the canvas -- not merely on the sheet. The side
+margins are sheet, not canvas, and ink must not start in them.
+
+The same rectangle `canvasRect` reports, rounded the same way, computed
+without building it: this is asked once per accepted pen sample, and a
+six-field table per sample is garbage the drawing path does not have to make.
+`canvas_geometry_spec` states the two agree, boundaries included.
+]]
 function Transform:contains(sx, sy)
-    local r = self:canvasRect()
-    return sx >= r.x and sx < r.x + r.w and sy >= r.y and sy < r.y + r.h
+    local left, top, right, bottom = visibleEdges(self)
+    local x, y = floor(left + 0.5), floor(top + 0.5)
+    local w = floor(max(0, right - left) + 0.5)
+    local h = floor(max(0, bottom - top) + 0.5)
+    return sx >= x and sx < x + w and sy >= y and sy < y + h
 end
 
 return Transform
