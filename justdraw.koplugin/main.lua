@@ -25,6 +25,7 @@ local UIManager = require("ui/uimanager")
 local Version = require("version")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local logger = require("logger")
+local time = require("ui/time")
 local _ = require("gettext")
 local T = require("ffi/util").template
 
@@ -44,6 +45,7 @@ local StylusGeometry = require("ink_stylus_geometry")
 local StylusSequence = require("ink_stylus_sequence")
 local Legacy = require("ink_legacy_ink")
 local Limits = require("ink_limits")
+local LiveRefresh = require("ink_live_refresh")
 local Render = require("ink_render")
 local Router = require("ink_contact_router")
 local Stack = require("ink_stack")
@@ -152,6 +154,15 @@ local function blitCacheBox(cache, src, dest, dest_x, dest_y, src_x, src_y, w, h
     else
         dest:blitFrom(src, dest_x, dest_y, src_x, src_y, w, h)
     end
+end
+
+--- Seconds as a plain number. `time.now()` is fts-encoded on the device and
+--- a plain number in the test harness; `to_s` exists only on the former (the
+--- notebook editor and the write queue make the same distinction).
+local function monotonicSeconds()
+    local now = time.now()
+    if time.to_s then return time.to_s(now) end
+    return now / time.s(1)
 end
 
 --[[--
@@ -544,6 +555,25 @@ function JustDraw:init()
     self.stroke_budget_notice_pending = false
     self.canvas_pending_repaint = nil
     self.canvas_pending_capture_stop = nil
+
+    --- Every live box on every reader surface goes through this one
+    --- accumulator; the panel is asked at its cadence, never per pen sample
+    --- (ADR-43).
+    self.live_refresh = LiveRefresh.new{
+        clock = monotonicSeconds,
+        schedule_in = function(delay, action) UIManager:scheduleIn(delay, action) end,
+        unschedule = function(action) UIManager:unschedule(action) end,
+        refresh = function(mode, left, top, right, bottom)
+            local w, h = right - left, bottom - top
+            if mode == "ui" then
+                Screen:refreshUI(left, top, w, h)
+            elseif mode == "fast" then
+                Screen:refreshFast(left, top, w, h)
+            else
+                Screen:refreshPartial(left, top, w, h)
+            end
+        end,
+    }
     --- Left nil in production, where the session opens its own connection.
     --- The suite runs under a bare interpreter that cannot load the SQLite
     --- driver at all, so it hands one in.
@@ -975,6 +1005,9 @@ function JustDraw:teardown()
     -- Closing the document takes its repository with it, and a raster still
     -- replaying through that connection would be reading a closed one.
     Export.cancelRunning()
+    -- The screen this was refreshing is going away; a timer holding a box of
+    -- it must not outlive the plugin instance (ADR-43).
+    if self.live_refresh then self.live_refresh:close() end
     self.screen_resize_serial = self.screen_resize_serial + 1
     self.screen_resize_pending = false
     if self.notebook_ui then
@@ -1761,6 +1794,10 @@ function JustDraw:setDrawing(on)
         self:resetStylusState()
         self.input_backend = nil
         self.drawing = false
+        -- After the abandoned stroke's repair, not before it: nothing the pen
+        -- put on the panel may be left waiting on a timer once the pen route
+        -- is gone (ADR-43).
+        self.live_refresh:flush()
         logger.info("JustDraw: drawing off")
     end
     if self.bar then self.bar:update(true) end
@@ -2738,6 +2775,16 @@ end
 --- dialog opening mid-stroke, Stop -- means "finish what is being drawn", and
 --- what that is depends on whether a sheet is open.
 function JustDraw:endStroke()
+    local ok, err = self:_endStroke()
+    -- Everything a lift puts on the panel goes out now, as one box: the run's
+    -- held segments and the dot a single-point contact paints below, which is
+    -- never painted live. Waiting for the accumulator's trailing timer here
+    -- would leave the last of a stroke behind (ADR-43).
+    self.live_refresh:flush()
+    return ok, err
+end
+
+function JustDraw:_endStroke()
     if self.canvas_open then return self:endCanvasStroke() end
     -- Not an `elseif`: with a page-ink session open the direct route holds
     -- nothing, and running both is what keeps a session that appeared or went
@@ -2768,6 +2815,14 @@ end
 
 --- Gives up whichever stroke is in progress. See endStroke.
 function JustDraw:abortStroke()
+    local ok, err = self:_abortStroke()
+    -- The repair that takes an abandoned stroke back off the surface is
+    -- painted inside, and it is the last thing the reader sees of it.
+    self.live_refresh:flush()
+    return ok, err
+end
+
+function JustDraw:_abortStroke()
     if self.canvas_open then
         self.draw_slot = nil
         return self:abortCanvasStroke()
@@ -3496,22 +3551,41 @@ function JustDraw:repaint()
     UIManager:setDirty(self.ui, "ui")
 end
 
---- Refresh the half-open coverage returned by InkRender, clamped to screen.
---- `grayscale` overrides the fast path: the device's fast refresh is forced
---- monochrome and drops gray ink. The grayscale pass is `ui`, never
---- `partial` -- partial is REAGL, and its completion fence with the pen
---- reporting overflows evdev and drops input (ADR-26/36, crash (7).log).
+--[[--
+Refresh the half-open coverage returned by InkRender, clamped to screen,
+through the live accumulator: the framebuffer already holds the pixels, and
+the panel is asked at `ink_live_refresh`'s cadence, never once per pen sample
+(ADR-43).
+
+`grayscale` overrides the fast path: the device's fast refresh is forced
+monochrome and drops gray ink. The grayscale pass is `ui`, never `partial` --
+partial is REAGL, and its completion fence with the pen reporting overflows
+evdev and drops input (ADR-26/36, crash (7).log). That same fence is why a
+device whose `partial` blocks rides `ui` here even with the live-fast
+preference turned off.
+]]
 function JustDraw:refreshBox(left, top, right, bottom, grayscale)
     local x, y, w, h = screenBox(left, top, right, bottom)
     if not x then return end
 
+    local mode
     if grayscale then
-        Screen:refreshUI(x, y, w, h)
+        mode = "ui"
     elseif self.live_fast then
-        Screen:refreshFast(x, y, w, h)
+        mode = "fast"
+    elseif self:partialBlocksInput() then
+        mode = "ui"
     else
-        Screen:refreshPartial(x, y, w, h)
+        mode = "partial"
     end
+    self.live_refresh:add(mode, x, y, x + w, y + h)
+end
+
+--- Whether this device's `partial` fences on completion with the pen in
+--- range (ADR-26). The notebook editor asks the same question of the same
+--- capability flag.
+function JustDraw:partialBlocksInput()
+    return type(Device.isMTK) == "function" and Device:isMTK() == true
 end
 
 -- -------------------------------------------------------------------- menu

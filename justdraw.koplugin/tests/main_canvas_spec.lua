@@ -247,7 +247,12 @@ return function(ctx)
         end
         env.UIManager:flush()
         t:eq(store.calls.list, 1, "nothing was asked of the database")
-        t:eq(delays[1], 0.1, "the batch came back a tenth of a second later")
+        -- The live refresh accumulator keeps a cadence timer of its own while
+        -- the pen is down (ADR-43), so the index's yield is the tenth of a
+        -- second among the delays, not necessarily the first of them.
+        local yielded = false
+        for i = 1, #delays do if delays[i] == 0.1 then yielded = true end end
+        t:eq(yielded, true, "the batch came back a tenth of a second later")
 
         penLift(p, READER.x + 2, READER.y + 2)
         env.UIManager.scheduleIn = scheduleIn
@@ -821,6 +826,104 @@ return function(ctx)
         t:check(kindsAfter(mark):find("fast", 1, true) == nil
             and kindsAfter(mark):find("partial", 1, true) == nil,
             "eraser repaints over gray ink ride ui too")
+    end)
+
+    t:describe("main / live boxes reach the panel at a bounded cadence (ADR-43)")
+
+    -- The fake `ui/time` is frozen unless a case moves it; `s(1)` is a
+    -- million, the same fixed point the device uses.
+    local clock = require("ui/time")
+    local function at(seconds) clock._set(seconds * clock.s(1)) end
+
+    -- A contact-down paints nothing -- a single point has no segment, and a
+    -- dot is painted at the lift -- so the first *box* of a stroke is its
+    -- first penFrame.
+
+    t:case("fifty pen frames inside one interval are one refresh, and the lift flushes the union", function()
+        local p = canvasPlugin()
+        openForPen(p)
+        at(0)
+        local mark = #Device.screen.refreshes
+        penDown(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 1, SHEET.y + 1)
+        local first = #Device.screen.refreshes
+        t:eq(first, mark + 1, "the first segment of a stroke goes out at once")
+        for i = 2, 50 do penFrame(p, SHEET.x + i, SHEET.y + i) end
+        t:eq(#Device.screen.refreshes, first, "the next forty-nine are held")
+        penLift(p, SHEET.x + 50, SHEET.y + 50)
+        t:eq(#Device.screen.refreshes, first + 1, "the lift flushed them as one")
+        local r = Device.screen.refreshes[first + 1]
+        t:check(r[4] >= 45 and r[5] >= 45, "and the union covers the whole run")
+        env.UIManager:flush()
+        t:eq(#Device.screen.refreshes, first + 1, "the stale trailing timer found nothing")
+    end)
+
+    t:case("a frame past the interval refreshes from the callback, at the cadence", function()
+        local p = canvasPlugin()
+        openForPen(p)
+        at(0)
+        penDown(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 5, SHEET.y)          -- the first segment: immediate
+        local mark = #Device.screen.refreshes
+        at(0.010); penFrame(p, SHEET.x + 10, SHEET.y)
+        at(0.015); penFrame(p, SHEET.x + 15, SHEET.y)
+        t:eq(#Device.screen.refreshes, mark, "inside the fast interval nothing goes out")
+        at(0.021); penFrame(p, SHEET.x + 21, SHEET.y)
+        t:eq(#Device.screen.refreshes, mark + 1, "the sample that crossed 20 ms flushed")
+        t:eq(Device.screen.refreshes[mark + 1][1], "fast", "as fast on a clean sheet")
+    end)
+
+    t:case("gray ink is coalesced on the slow interval and stays ui", function()
+        local p = canvasPlugin()
+        openForPen(p)
+        p:setPenStyle(65)                          -- graphite, as the case above does
+        at(0)
+        local mark = #Device.screen.refreshes
+        penDown(p, SHEET.x, SHEET.y + 40)
+        penFrame(p, SHEET.x + 10, SHEET.y + 40)
+        t:eq(#Device.screen.refreshes, mark + 1, "the first gray segment went out")
+        t:eq(Device.screen.refreshes[mark + 1][1], "ui", "gray rides ui")
+        at(0.05); penFrame(p, SHEET.x + 20, SHEET.y + 40)
+        t:eq(#Device.screen.refreshes, mark + 1, "50 ms is inside the slow interval")
+        at(0.11); penFrame(p, SHEET.x + 40, SHEET.y + 40)
+        t:eq(#Device.screen.refreshes, mark + 2, "110 ms crossed it")
+        t:eq(Device.screen.refreshes[mark + 2][1], "ui", "still ui")
+        penLift(p, SHEET.x + 40, SHEET.y + 40)
+        for i = mark + 1, #Device.screen.refreshes do
+            t:check(Device.screen.refreshes[i][1] ~= "fast", "no fast box over a gray sheet")
+        end
+    end)
+
+    t:case("with live fast off a device whose partial blocks rides ui, not partial", function()
+        local p = canvasPlugin()
+        openForPen(p)
+        p.live_fast = false
+        local was = Device.isMTK
+        Device.isMTK = function() return true end
+        at(0)
+        local mark = #Device.screen.refreshes
+        penDown(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 10, SHEET.y + 10)
+        penLift(p, SHEET.x + 10, SHEET.y + 10)
+        Device.isMTK = was
+        t:check(#Device.screen.refreshes > mark, "something went out")
+        for i = mark + 1, #Device.screen.refreshes do
+            t:eq(Device.screen.refreshes[i][1], "ui",
+                "never partial with the pen down on MTK (ADR-26)")
+        end
+    end)
+
+    t:case("turning Draw off flushes what was pending and leaves no timer", function()
+        local p = canvasPlugin()
+        openForPen(p)
+        at(0)
+        penDown(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 5, SHEET.y + 5)
+        at(0.005); penFrame(p, SHEET.x + 8, SHEET.y + 8)
+        local mark = #Device.screen.refreshes
+        p:setDrawing(false)
+        t:check(#Device.screen.refreshes >= mark + 1, "the held box went out on stop")
+        t:eq(p.live_refresh:hasPending(), false, "nothing pending")
     end)
 
     t:case("canvas fallback repaint waits until a modal uncovers the overlay", function()
