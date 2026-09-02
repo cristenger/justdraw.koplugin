@@ -8,6 +8,10 @@ Policy.required_stylus_claims = {
     ["pen_slot is defined"] = true,
     ["getMtSlot hands out one persistent table per slot"] = true,
     ["GestureDetector exposes getContact and dropContact"] = true,
+    -- ADR-41: the four capabilities the new surfaces stand on. Required in
+    -- strict mode because "uncheckable" here means the probe was run against
+    -- a runtime older than the feature it exists to describe.
+    ["Compat.capabilities answers all four true on this runtime"] = true,
 }
 
 function Policy.countFailures(rows, strict_stylus)

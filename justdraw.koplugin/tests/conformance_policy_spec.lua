@@ -14,6 +14,7 @@ return function(ctx)
         "pen_slot is defined",
         "getMtSlot hands out one persistent table per slot",
         "GestureDetector exposes getContact and dropContact",
+        "Compat.capabilities answers all four true on this runtime",
     }
 
     local function rows(stylus_status)

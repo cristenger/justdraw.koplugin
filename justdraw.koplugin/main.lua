@@ -42,6 +42,7 @@ local PalmGate = require("ink_wacom_palm")
 local Style = require("ink_style")
 local StylusGeometry = require("ink_stylus_geometry")
 local StylusSequence = require("ink_stylus_sequence")
+local Legacy = require("ink_legacy_ink")
 local Limits = require("ink_limits")
 local Render = require("ink_render")
 local Router = require("ink_contact_router")
@@ -92,6 +93,18 @@ local INPUT_ERRORS = {
     already_installed = _("JustDraw: input is already captured"),
     handler_error = _("JustDraw: drawing stopped after an input error"),
 }
+
+--[[--
+What "Start drawing" means in a reflowable book on a runtime that has sheets.
+
+The sidecar is frozen (ADR-39), so there is nowhere for this contact to go and
+the honest answer is not "no" but "here is where the ink lives now". Said by
+`setDrawing` rather than at the first point, because the whole refusal is that
+nothing starts: no capture, no toolbar forced on, no sheet created behind the
+reader's back.
+]]
+local LEGACY_FROZEN_EPUB = _(
+    "Open a drawing sheet here to draw in this book: Draw ▸ Open drawing sheet here.")
 
 --[[--
 Every reason page ink can refuse, as a sentence naming the thing to change.
@@ -249,6 +262,23 @@ function JustDraw:init()
     -- view and doc_settings. Keep notebook construction document-free so the
     -- same library can be opened safely from either host.
     self.is_docless = self.ui.document == nil
+
+    --[[--
+    What this runtime can do, asked once (ADR-41).
+
+    `stylus_api` is the whole product gate: it separates v2026.07 from
+    v2026.03 and decides whether the new surfaces exist at all. The other
+    three are here so an unusual build says so in the log instead of failing
+    later, in a widget, as something that reads like a plugin bug.
+    ]]
+    self.capabilities = Compat.capabilities()
+    self.legacy_frozen = Compat.fullSupport(self.capabilities)
+    local complete, missing = Compat.assertCapabilities(self.capabilities)
+    if not complete then
+        logger.warn("JustDraw: this KOReader is missing", missing,
+            "- page ink and drawing sheets may not work here")
+    end
+
     self.notebooks = nil
     self.notebook_input = nil
     self.notebook_ui = nil
@@ -371,6 +401,17 @@ function JustDraw:init()
     pages, self.stroke_storage_id, self.stroke_storage_present =
         Compat.readDataSetting(self.ui.doc_settings, "strokes")
     self.store = Store.new(pages)
+    --[[--
+    The frozen sidecar, behind a view that cannot add to it (ADR-39).
+
+    Everything that only reads the sidecar -- `paintTo`, the two "Clear legacy
+    ink" entries -- goes through this and not through `self.store`, on both
+    runtimes, so there is one paint path rather than two. What the gate
+    decides is whether anything may still *write*, and that is
+    `legacyInkFrozen`: the direct-ink route below keeps its own reference to
+    the store, and is the only thing in this file that has one.
+    ]]
+    self.legacy = Legacy.new(self.store)
     self.direct_ink_clear_all = false
 
     self.view:registerViewModule("justdraw", self)
@@ -808,8 +849,12 @@ function JustDraw:onSaveSettings()
     end
 end
 
+--- The reader's explicit "delete all of it". `direct_ink_clear_all` is what
+--- turns an emptied table into a deletion of *both* compatibility identities
+--- at the next flush; without it the legacy key would survive and the ink
+--- would be back on the next open.
 function JustDraw:clearWholeDocumentInk()
-    self.store:clearAll()
+    self.legacy:clearAll()
     self.direct_ink_clear_all = true
     self:repaint()
 end
@@ -1318,6 +1363,18 @@ function JustDraw:setDrawing(on)
             return
         end
     end
+    if on and not self.canvas_open and not self.document_session
+        and self.ui.rolling and self:legacyInkFrozen() then
+        -- A reflowable book with no sheet open has nowhere to put ink on this
+        -- runtime, and "Start drawing" used to answer that by filling the
+        -- sidecar with screen pixels that the next font change made
+        -- meaningless (ADR-39). Refused here rather than at the first point,
+        -- so nothing at all is created: no sheet, no capture, no toolbar
+        -- forced on. Every way in -- this menu entry, the bar's Draw button,
+        -- the dispatcher toggle -- comes through here.
+        self:notify(LEGACY_FROZEN_EPUB)
+        return
+    end
     if on and self.document_session then
         -- Before the lease, always: acquiring capture and then discovering
         -- there is nowhere to put the ink leaves the reader drawing into
@@ -1335,6 +1392,7 @@ function JustDraw:setDrawing(on)
     -- lift. Never let trace deltas bridge that boundary.
     self:resetStylusTraceContactHistory()
     self.drawing_generation = (self.drawing_generation or 0) + 1
+    self.legacy_refusal_logged = false
 
     if on then
         -- Resolve before touching the toolbar: a refusal must not leave the
@@ -1717,6 +1775,12 @@ function JustDraw:applyPoint(x, y, tool)
         if self:documentInkActive() then return self:applyDocumentPoint(x, y, tool) end
         return false
     end
+    -- The sidecar is frozen from v2026.07 (ADR-39). Every other route above
+    -- has already had its chance at this contact; what is left below writes
+    -- screen pixels into the document's settings, and on this runtime nothing
+    -- may do that -- not a book whose sheet database would not open, and not a
+    -- page whose ink surface was refused.
+    if self:legacyInkFrozen() then return self:refuseLegacyPoint() end
     if tool == Capture.TOOL_ERASER or self.eraser then
         self:eraseAt(x, y)
     elseif self.stroke then
@@ -1922,8 +1986,13 @@ only state anybody is in when they ask this question.
 function JustDraw:diagnosticReport()
     local input = Device.input or {}
     local backend, reason = self:resolveInputBackend()
+    -- Guarded: the revision is the first line of a bug report and the last
+    -- thing that should be able to stop one being written. A build that
+    -- cannot answer it still has to be able to show the rest.
+    local named, revision = pcall(function() return Version:getCurrentRevision() end)
     local r = {
-        version   = Version:getCurrentRevision(),
+        version   = named and revision or nil,
+        capabilities = self.capabilities or Compat.capabilities(),
         model     = Device.model,
         mode      = self.input_mode,
         backend   = backend,
@@ -1953,12 +2022,27 @@ function JustDraw:diagnosticReport()
     return r
 end
 
+--- yes/no, because this line is read by someone comparing two devices, and
+--- `true`/`nil` reads as "the field is missing" rather than "the runtime is".
+local function capabilityWord(value)
+    return value and "yes" or "no"
+end
+
 --- The report as lines, for the log and for the on-screen message.
 function JustDraw:diagnosticLines()
     local r = self:diagnosticReport()
+    local caps = r.capabilities or {}
     local lines = {
         "KOReader: " .. tostring(r.version),
         "Device: " .. tostring(r.model),
+        -- The runtime's own answer to "which JustDraw is this" (ADR-41). No
+        -- feature is version-string-gated, so the revision above is a label
+        -- and this line is the fact: stylus API is the gate for the new
+        -- surfaces, and the other three would be a build to report.
+        "Capabilities: stylus API: " .. capabilityWord(caps.stylus_api)
+            .. "   page transform: " .. capabilityWord(caps.view_transform)
+            .. "   native page size: " .. capabilityWord(caps.native_dimensions)
+            .. "   alpha overlay: " .. capabilityWord(caps.alpha_blit),
         "Input mode: " .. tostring(r.mode) .. "  ->  backend: " .. tostring(r.backend),
         "Stylus API: " .. tostring(r.stylus_api)
             .. "   tool types: " .. tostring(r.tool_types),
@@ -2252,6 +2336,45 @@ end
 
 -- ------------------------------------------------------------------ stroke
 
+--[[--
+Whether this reader may still add to the sidecar (ADR-39).
+
+Two things have to be true for the answer to be "no". The first is the
+runtime: `stylus_api` is the one discriminator (ADR-41), and on v2026.03 every
+line below behaves exactly as it always did, which is what the pre-existing
+suite proves. The second is that this reader has a surface of its own to offer
+instead -- a rolling reader has drawing sheets, a paging one has page ink --
+because refusing the reader's ink while offering nowhere to put it would be a
+worse plugin than the one that stored screen pixels.
+
+ReaderUI is always one or the other, and registers whichever it is before it
+loads a plugin (readerui.lua:297 and :382, plugins at :464). The pair is read
+at the call rather than latched in `init` so a host that registers its route
+later cannot leave a stale answer behind.
+]]
+function JustDraw:legacyInkFrozen()
+    if not self.legacy_frozen then return false end
+    return self.ui.rolling ~= nil or self.ui.paging ~= nil
+end
+
+--[[--
+Refuse a point the frozen sidecar would otherwise have swallowed.
+
+Reached only if something upstream let a contact through with no surface to
+put it on -- a fixed layout whose database would not open, say. It is a
+defect, not a reader error, so it goes to the log and not to the screen: the
+reader has already been told why page ink is unavailable by the path that
+refused it. Once per drawing session, because this is per point.
+]]
+function JustDraw:refuseLegacyPoint()
+    if not self.legacy_refusal_logged then
+        self.legacy_refusal_logged = true
+        logger.warn("JustDraw: direct ink is frozen on this runtime;",
+            "a point was refused rather than written to the sidecar (ADR-39)")
+    end
+    return false
+end
+
 function JustDraw:startStroke(x, y, style)
     style = Style.normalize(style)
     self.stroke = {
@@ -2311,6 +2434,10 @@ function JustDraw:endStroke()
             self:refreshBox(left, top, right, bottom, Style.isGray(s.t))
         end
     end
+    -- The second half of the freeze, and the one that matters: `applyPoint`
+    -- decides, but this is the single line in the file that grows the sidecar,
+    -- and a stroke that somehow started must still not be persisted (ADR-39).
+    if self:legacyInkFrozen() then return self:refuseLegacyPoint() end
     self.store:add(self:currentPage(), s)
 end
 
@@ -3166,7 +3293,10 @@ end
 function JustDraw:paintTo(bb, x, y)
     self:paintMarks(bb)
 
-    local list = self.store:get(self:currentPage())
+    -- Through the read-only view, on both runtimes: what a paint needs from
+    -- the sidecar is the page's list and nothing else, and the object it asks
+    -- has no way to grow one (ADR-39).
+    local list = self.legacy:strokes(self:currentPage())
     if list then
         for i = 1, #list do
             Render.stroke(bb, list[i], 0, 0, Style.colorFor(list[i].t, INK))
@@ -3260,6 +3390,15 @@ function JustDraw:onJustDrawUndo()
         return true
     end
     if self.document_session then return self:undoDocumentInk() end
+    -- Undo means "take back what I just drew", and on this runtime nothing
+    -- that was just drawn is in the sidecar. Popping it would delete a stroke
+    -- from another KOReader version instead (ADR-39). The event is still
+    -- consumed: the reader asked this plugin to undo, and there is nothing
+    -- underneath it that should act on the gesture either.
+    if self:legacyInkFrozen() then
+        logger.info("JustDraw: undo has nothing to take back; legacy ink is frozen")
+        return true
+    end
 
     local page = self:currentPage()
     if not self.store:pop(page) then
@@ -3998,36 +4137,89 @@ function JustDraw:addToMainMenu(menu_items)
                 callback = function() self:showExportDialog() end,
                 help_text = _([[Writes what you have drawn to a PDF, PNG or JPEG in a folder of your choosing. Exports the page you are reading, the sheet that is open, or every sheet in this book. Nothing in the book itself is changed.]]),
             },
-            {
-                text = _("Clear this page"),
-                keep_menu_open = true,
-                callback = function()
-                    if self.store:clearPage(self:currentPage()) then
-                        self:repaint()
-                    else
-                        self:notify(_("No ink on this page"))
-                    end
-                end,
-            },
-            {
-                text = _("Clear whole document"),
-                keep_menu_open = true,
-                callback = function()
-                    if self.store:countPages() == 0 then
-                        self:notify(_("No ink in this document"))
-                        return
-                    end
-                    UIManager:show(ConfirmBox:new{
-                        text = _("Delete all ink in this document?"),
-                        ok_text = _("Delete"),
-                        ok_callback = function()
-                            self:clearWholeDocumentInk()
-                        end,
-                    })
-                end,
-            },
         },
     }
+    local sub = menu_items.justdraw.sub_item_table
+    local clear_page, clear_all = self:legacyInkItems()
+    sub[#sub + 1] = clear_page
+    sub[#sub + 1] = clear_all
+end
+
+--[[--
+The two entries that delete direct ink, named for what they delete.
+
+Three families of ink can be in a book at once and each has its own deletion,
+so no confirmation may say just "ink": deleting a page note, deleting a sheet
+and deleting the sidecar are three different losses (ADR-39). "Stored page N"
+is the honest label for the number, too -- in a reflowable book it stopped
+meaning a page at the first reflow, which is exactly why this ink is frozen.
+
+With the gate false these are the entries they always were, word for word: on
+v2026.03 direct ink is the only ink there is, and calling it "legacy" in front
+of a reader who is still drawing it would be a lie.
+]]
+function JustDraw:legacyInkItems()
+    if not self:legacyInkFrozen() then
+        return {
+            text = _("Clear this page"),
+            keep_menu_open = true,
+            callback = function()
+                if self.legacy:clearPage(self:currentPage()) then
+                    self:repaint()
+                else
+                    self:notify(_("No ink on this page"))
+                end
+            end,
+        }, {
+            text = _("Clear whole document"),
+            keep_menu_open = true,
+            callback = function()
+                if self.legacy:isEmpty() then
+                    self:notify(_("No ink in this document"))
+                    return
+                end
+                UIManager:show(ConfirmBox:new{
+                    text = _("Delete all ink in this document?"),
+                    ok_text = _("Delete"),
+                    ok_callback = function() self:clearWholeDocumentInk() end,
+                })
+            end,
+        }
+    end
+
+    return {
+        text = _("Clear legacy ink on this stored page"),
+        keep_menu_open = true,
+        enabled_func = function()
+            return self.legacy:hasInk(self:currentPage())
+        end,
+        help_text = _([[Ink drawn on this page by an older JustDraw or FingerInk, in screen pixels. It is shown and exported as it was stored, and this is the only thing that can change it.]]),
+        callback = function() self:confirmClearLegacyPage() end,
+    }, {
+        text = _("Clear all legacy ink"),
+        keep_menu_open = true,
+        enabled_func = function() return not self.legacy:isEmpty() end,
+        callback = function() self:confirmClearLegacyBook() end,
+    }
+end
+
+function JustDraw:confirmClearLegacyPage()
+    local page = self:currentPage()
+    UIManager:show(ConfirmBox:new{
+        text = T(_("Delete the legacy ink stored for page %1? Drawing sheets and page notes are not affected."), page),
+        ok_text = _("Delete"),
+        ok_callback = function()
+            if self.legacy:clearPage(page) then self:repaint() end
+        end,
+    })
+end
+
+function JustDraw:confirmClearLegacyBook()
+    UIManager:show(ConfirmBox:new{
+        text = _("Delete all legacy ink in this book? Drawing sheets and page notes are not affected."),
+        ok_text = _("Delete"),
+        ok_callback = function() self:clearWholeDocumentInk() end,
+    })
 end
 
 -- Compatibility event handlers for Gesture Manager assignments created by

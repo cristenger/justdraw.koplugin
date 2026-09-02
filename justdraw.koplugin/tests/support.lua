@@ -2034,7 +2034,32 @@ function support.install()
     -- The raster cache's default ruling colour. Without it every paper
     -- assertion would pass against a nil colour, which paints nothing.
     env.Blitbuffer.COLOR_GRAY = "gray"
+    -- The transparent pixel a BB8A overlay is cleared with. Nothing in the
+    -- plugin calls it -- the raster's clear arrives injected -- but the
+    -- capability probe does, and a module without it would describe a
+    -- KOReader that cannot compose page ink at all (ADR-41).
+    env.Blitbuffer.Color8A = function(value, alpha) return { v = value, a = alpha } end
     package.preload["ffi/blitbuffer"] = function() return env.Blitbuffer end
+
+    --[[--
+    The two core modules the capability probe asks about, and nothing more.
+
+    `Compat.capabilities` reads exactly four things off the runtime; these are
+    two of them. Stubbing the whole of ReaderView or Document here would be a
+    fake nobody checks, so what is preloaded is the shape the probe looks at:
+    the transform pair and the native page size. That every one of the four is
+    genuinely present on a real v2026.07 is stated in tests/conformance.lua,
+    which is what keeps these two from becoming wishful thinking.
+    ]]
+    package.preload["apps/reader/modules/readerview"] = function()
+        return {
+            screenToPageTransform = function() end,
+            pageToScreenTransform = function() end,
+        }
+    end
+    package.preload["document/document"] = function()
+        return { getNativePageDimensions = function() end }
+    end
     env.WidgetContainer = WidgetContainer
     package.preload["ui/widget/container/widgetcontainer"] = function() return WidgetContainer end
     package.preload["ui/widget/notification"] = function() return Notification end

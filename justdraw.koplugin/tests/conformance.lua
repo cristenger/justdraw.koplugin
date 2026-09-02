@@ -92,6 +92,47 @@ claim("pen_slot is defined",
     Input.pen_slot ~= nil, true, "pen_slot = " .. tostring(Input.pen_slot))
 
 -- ---------------------------------------------------------------------
+--[[--
+The capability report (ADR-41), against the runtime it describes.
+
+`Compat.capabilities` is what decides that this KOReader has the new surfaces,
+and it decides it by probing four things rather than by reading a version
+string. Three of those four are stubbed in tests/support.lua -- the ReaderView
+transform pair, the document's native page size and a BB8A buffer that
+composes -- so this is the claim that keeps those stubs honest: on a runtime
+that has the stylus API, all four have to be genuinely there. In strict mode
+an older runtime fails here rather than passing quietly, which is the whole
+point of running the probe against a 2026.07 build.
+]]
+do
+    local Compat = require("ink_compat")
+    local caps = Compat.capabilities()
+    local detail = string.format(
+        "stylus_api=%s view_transform=%s native_dimensions=%s alpha_blit=%s",
+        tostring(caps.stylus_api), tostring(caps.view_transform),
+        tostring(caps.native_dimensions), tostring(caps.alpha_blit))
+    claim("Compat.capabilities answers all four true on this runtime",
+        caps.stylus_api,
+        caps.stylus_api and caps.view_transform and caps.native_dimensions
+            and caps.alpha_blit,
+        detail)
+    claim("Compat.fullSupport agrees with Capture:supportsStylus",
+        true,
+        Compat.fullSupport(caps) == require("ink_capture"):supportsStylus(),
+        "one gate, asked two ways")
+
+    -- The first line of the diagnostics screen, and the first line of any bug
+    -- report written from it. main.lua calls it under pcall; what this states
+    -- is that there is something to call.
+    local named, revision = pcall(function()
+        return require("version"):getCurrentRevision()
+    end)
+    claim("version:getCurrentRevision answers a string",
+        true, named and type(revision) == "string" and #revision > 0,
+        "revision = " .. tostring(revision))
+end
+
+-- ---------------------------------------------------------------------
 -- The shared slot cursor (ADR-25). Both scenarios are sequences recorded on a
 -- Kindle Scribe (crash.log 2026-08-28, lines 71495-71503 and 201452-201473).
 -- They run against the *class's* methods on a controlled state: Device.input

@@ -2310,6 +2310,7 @@ for _, spec in ipairs({
     "document_ink_session_spec",
     "main_canvas_spec",
     "main_document_spec",
+    "main_legacy_spec",
     "canvas_scale_spec",
     "notebook_geometry_spec",
     "notebook_input_spec",
