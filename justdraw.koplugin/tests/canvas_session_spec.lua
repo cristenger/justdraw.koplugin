@@ -390,6 +390,35 @@ return function(ctx)
         return session, store, sched, doc, notes
     end
 
+    --[[--
+    A sheet with no strokes finishes its raster inside `SurfaceSession:open()`,
+    which runs before `overlay_widget` is assigned -- so the `on_ready` that
+    would otherwise ask for the panel is dropped by the guard that tests for
+    the widget. The show is the only thing left that can ask, and a show with
+    no refresh type enqueues none (pinned in tests/conformance.lua). On the
+    device that left the reader looking at the page under a sheet the
+    framebuffer already held (ADR-43).
+    ]]
+    t:case("an empty canvas is shown with a refresh, not only a repaint", function()
+        local session, _, sched = openedSession{
+            canvases = { canvasAt(1, "/p1") }, pages = { ["/p1"] = 3 },
+        }
+        local before = #env.UIManager.dirty
+        local overlay = session:openCanvas(session:canvasById(1))
+        t:check(overlay ~= nil, "the canvas opened")
+        t:eq(session:cache():isReady(), true,
+            "and its raster was finished before the widget existed")
+        local asked = nil
+        for i = before + 1, #env.UIManager.dirty do
+            local d = env.UIManager.dirty[i]
+            if d[1] == overlay and d[2] ~= nil then asked = d end
+        end
+        t:check(asked ~= nil, "the overlay asked the panel for itself")
+        t:eq(asked[2], "ui", "through the grayscale pass")
+        t:eq(asked[3], nil, "over the whole widget, not a region of it")
+        sched:drain()
+    end)
+
     t:case("opening a canvas puts up exactly one window", function()
         local session, _, sched = openedSession{
             canvases = { canvasAt(1, "/p1") }, pages = { ["/p1"] = 3 },

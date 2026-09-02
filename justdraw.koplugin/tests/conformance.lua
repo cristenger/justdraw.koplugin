@@ -682,6 +682,37 @@ do
         true, notified == 1,
         "so a second close refreshes with nothing repainting behind it")
 
+    --[[--
+    What `UIManager:show` does with its refresh argument (ADR-43). A sheet
+    with no strokes finishes its raster before the overlay exists, so the
+    show is the only thing left that can ask for the panel; a show with no
+    refresh type schedules a repaint and no refresh, which is how the sheet
+    reached the framebuffer and never the screen. The fake in
+    tests/support.lua now relays exactly this.
+    ]]
+    local plain = WidgetContainerReal:new{}
+    local asked = WidgetContainerReal:new{}
+    local saved_show_stack, saved_show_dirty, saved_show_refreshes =
+        UIManagerReal._window_stack, UIManagerReal._dirty,
+        UIManagerReal._refresh_stack
+    UIManagerReal._window_stack, UIManagerReal._dirty = {}, {}
+    UIManagerReal._refresh_stack = {}
+    UIManagerReal:show(plain)
+    local after_plain = #UIManagerReal._refresh_stack
+    local marked = UIManagerReal._dirty[plain] == true
+    UIManagerReal:show(asked, "ui")
+    local enqueued = UIManagerReal._refresh_stack[#UIManagerReal._refresh_stack]
+    local after_asked = #UIManagerReal._refresh_stack
+    UIManagerReal:close(asked)
+    UIManagerReal:close(plain)
+    UIManagerReal._window_stack, UIManagerReal._dirty, UIManagerReal._refresh_stack =
+        saved_show_stack, saved_show_dirty, saved_show_refreshes
+    claim("UIManager:show enqueues a refresh only when given a refresh type",
+        true, after_plain == 0 and after_asked == 1 and marked
+            and enqueued and enqueued.mode == "ui",
+        string.format("no type -> %d enqueued (marked dirty=%s); \"ui\" -> %d",
+            after_plain, tostring(marked), after_asked - after_plain))
+
     local cancels, self_closed = 0, false
     local probe_box = ConfirmBoxReal:new{
         text = "conformance probe",

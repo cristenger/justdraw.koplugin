@@ -1889,9 +1889,9 @@ function support.install()
     function UIManager:show(w, refreshtype, refreshregion, _x, _y, refreshdither)
         self.shown[#self.shown + 1] = w
         self._window_stack[#self._window_stack + 1] = { widget = w }
-        if refreshtype then
-            self:setDirty(w, refreshtype, refreshregion, refreshdither)
-        end
+        -- Unconditionally, as the real one does: a `show` with no refresh
+        -- type still marks the widget dirty, it just enqueues no refresh.
+        self:setDirty(w, refreshtype, refreshregion, refreshdither)
     end
     --- Mirrors UIManager:sendEvent @ v2026.07: toasts are offered the event but
     --- never consume it, the topmost non-toast widget gets first refusal, and a
