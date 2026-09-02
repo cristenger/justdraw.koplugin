@@ -2305,6 +2305,7 @@ for _, spec in ipairs({
     "slot_steer_spec",
     "input_controller_spec",
     "canvas_queue_spec",
+    "live_refresh_spec",
     "surface_session_spec",
     "canvas_session_spec",
     "document_ink_session_spec",
