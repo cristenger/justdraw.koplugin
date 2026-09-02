@@ -500,28 +500,38 @@ return function(ctx)
     end)
 
     --[[--
-    A second `open` empties the list and the map, and the resolve batches of
+    A second `open` empties the list and the map while the resolve batches of
     the first are still in the scheduler. They check the generation they were
     built under -- but a reopen is not a rebuild, so `generation` is unchanged
-    and only the load generation tells them their list is gone.
+    and only the load generation tells them their list is gone. Without that,
+    a stale batch pops an emptied `pending`, reads "nothing left to do" and
+    declares the index ready over a book it has not indexed.
     ]]
     t:case("reopening retires the resolve batches of the previous open", function()
-        local index, doc, _, sched = fixture(20, { batch = 2 })
-        index:open()
-        sched:drain()
-        t:eq(index:isComplete(), true, "the first build finished")
-        local resolutions = doc.resolutions
+        local index, _, _, sched = fixture(20, { batch = 2 })
+        local completions = 0
+        index.on_complete = function() completions = completions + 1 end
 
-        -- Reopen and let it run to the end: nothing from the first build may
-        -- finalise against the list this one is rereading.
+        loadMetadata(index, sched)
+        t:eq(index:phase(), "resolving", "the first build is placing anchors")
+        sched:tick()
+        t:eq(index:phase(), "resolving", "with batches still queued behind it")
+        t:eq(completions, 0, "and nothing has completed")
+
         index:open()
+        t:eq(index:phase(), "metadata", "the reopen starts from the list again")
+        sched:tick()      -- the first thing due is the stale resolve batch
+        t:eq(index:phase(), "metadata",
+            "which cannot finish a build it does not belong to")
+        t:eq(completions, 0, "and cannot announce one either")
+
         sched:drain()
-        t:eq(index:isComplete(), true, "the second build finished too")
-        t:eq(index:count(), 20, "with every row of the book, once")
+        t:eq(index:isComplete(), true, "the second build finishes on its own")
+        t:eq(completions, 1, "with exactly one completion, its own")
+        t:eq(index:count(), 20, "over every row of the book")
         for id = 1, 20 do
             t:eq(index:pageOf(id), id, "canvas " .. id .. " placed once, on its own page")
         end
-        t:check(doc.resolutions >= resolutions, "and it did its own resolving")
     end)
 
     t:case("a new canvas is placed straight away", function()

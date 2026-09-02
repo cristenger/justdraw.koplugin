@@ -247,12 +247,8 @@ return function(ctx)
         end
         env.UIManager:flush()
         t:eq(store.calls.list, 1, "nothing was asked of the database")
-        -- The live refresh accumulator keeps a cadence timer of its own while
-        -- the pen is down (ADR-43), so the index's yield is the tenth of a
-        -- second among the delays, not necessarily the first of them.
-        local yielded = false
-        for i = 1, #delays do if delays[i] == 0.1 then yielded = true end end
-        t:eq(yielded, true, "the batch came back a tenth of a second later")
+        t:eq(#delays, 1, "one thing asked to come back later")
+        t:eq(delays[1], 0.1, "the batch came back a tenth of a second later")
 
         penLift(p, READER.x + 2, READER.y + 2)
         env.UIManager.scheduleIn = scheduleIn
