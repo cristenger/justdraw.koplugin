@@ -31,6 +31,7 @@ local T = require("ffi/util").template
 local CanvasSession = require("ink_canvas_session")
 local Capture = require("ink_capture")
 local Compat = require("ink_compat")
+local DocumentInkSession = require("ink_document_ink_session")
 local Export = require("ink_export")
 local ExportController = require("ink_document_export_controller")
 local InputController = require("ink_input_controller")
@@ -91,6 +92,150 @@ local INPUT_ERRORS = {
     already_installed = _("JustDraw: input is already captured"),
     handler_error = _("JustDraw: drawing stopped after an input error"),
 }
+
+--[[--
+Every reason page ink can refuse, as a sentence naming the thing to change.
+
+The session and the transform factory each answer with a short reason and
+nothing else, deliberately: what a reader can do about it is a property of the
+reader's screen, not of a coordinate module. This is the one place that
+translation happens, so a reason that reaches the reader as "unsupported_mode"
+is a missing line here and not a missing branch somewhere.
+
+Several reasons share a sentence on purpose. `suspended` is only ever entered
+from scroll mode, and `unavailable` is what a session with no usable database
+answers to everything.
+]]
+local DOCUMENT_ERRORS = {
+    unsupported_mode = _("Turn off continuous scrolling to draw page notes."),
+    suspended = _("Turn off continuous scrolling to draw page notes."),
+    unsupported_reflow = _("Turn off reflow to draw page notes."),
+    unsupported_optimizing = _("Turn off page optimisation to draw page notes."),
+    unsupported_rotation = _("Page notes need the page unrotated."),
+    zoom_too_large = _("Zoom out to see and draw page notes."),
+    page_geometry_changed = _("This page's size changed. Its notes are kept but can't be edited."),
+    bad_geometry = _("This page does not say how big it is, so notes cannot be placed on it."),
+    no_dimensions = _("This page does not say how big it is, so notes cannot be placed on it."),
+    read_only = _("Page notes are read-only because this database was created by a newer JustDraw version."),
+    loading = _("Page notes are still loading. Try again in a moment."),
+    no_repository = _("Page notes need a database this KOReader cannot open."),
+    unavailable = _("Page notes need a database this KOReader cannot open."),
+    closed = _("Page notes need a database this KOReader cannot open."),
+    no_surface = _("There are no page notes on this page yet."),
+    load_failed = _("This page's notes could not be read."),
+    -- The sheet's bargain, word for word: the ink is not lost, it is not
+    -- durable, and one menu entry is what finishes it.
+    flush_failed = _("Could not save ink. It is still here: use Retry saving."),
+    save_failed = _("Could not save ink. It is still here: use Retry saving."),
+    no_view = _("Page notes can't be placed on this view."),
+    unsupported_document = _("Page notes can't be placed on this view."),
+    no_page = _("Page notes can't be placed on this view."),
+    bad_page = _("Page notes can't be placed on this view."),
+}
+
+--- A reason with no line of its own still has to say something the reader can
+--- read; a repository error is the usual way to get here.
+local DOCUMENT_ERROR_FALLBACK = _("Page notes are not available here.")
+
+local function documentMessage(reason)
+    return DOCUMENT_ERRORS[reason] or DOCUMENT_ERROR_FALLBACK
+end
+
+--[[--
+Copy one box of a raster onto the screen, composed if the raster is an overlay.
+
+A page-ink raster is `TYPE_BB8A` and mostly transparent, and `blitFrom` copies
+the alpha byte as if it were a pixel: every untouched pixel of the box would
+land black, painting a rectangle over the book's own text. `alphablitFrom`
+leaves alpha 0 alone and copies 0xFF, which is what composition means here
+(ADR-38). One `isOverlay()` at the blit is what keeps both surfaces on one
+path instead of two.
+]]
+local function blitCacheBox(cache, src, dest, dest_x, dest_y, src_x, src_y, w, h)
+    if cache:isOverlay() then
+        dest:alphablitFrom(src, dest_x, dest_y, src_x, src_y, w, h)
+    else
+        dest:blitFrom(src, dest_x, dest_y, src_x, src_y, w, h)
+    end
+end
+
+--[[--
+The half-open coverage InkRender reports, snapped outward and clipped to the
+screen -- or nil when nothing is left of it.
+
+Shared by the refresh and by the regional repaint because both would take a
+NaN or an infinity straight into the eink update, and a box that has been
+clipped to nothing must not become a full-screen one.
+]]
+local function screenBox(left, top, right, bottom)
+    left, top, right, bottom = tonumber(left), tonumber(top),
+        tonumber(right), tonumber(bottom)
+    if not left or not top or not right or not bottom
+        or left ~= left or top ~= top or right ~= right or bottom ~= bottom
+        or left == math.huge or top == math.huge
+        or right == math.huge or bottom == math.huge
+        or left == -math.huge or top == -math.huge
+        or right == -math.huge or bottom == -math.huge then
+        return nil
+    end
+    local x, y = math.floor(left), math.floor(top)
+    local edge_x, edge_y = math.ceil(right), math.ceil(bottom)
+    local sw, sh = Screen:getWidth(), Screen:getHeight()
+    if x < 0 then x = 0 end
+    if y < 0 then y = 0 end
+    if edge_x > sw then edge_x = sw end
+    if edge_y > sh then edge_y = sh end
+    local w, h = edge_x - x, edge_y - y
+    if w <= 0 or h <= 0 then return nil end
+    return x, y, w, h
+end
+
+--[[--
+Whether an eraser sample is far enough from the last one to be worth a sweep.
+
+Shared by the sheet and the page, because it is the same bargain on both: an
+eraser that cuts on every sample spends a whole contact re-cutting strokes it
+already cut, and the reach in surface units grows as the surface shrinks.
+]]
+local function eraseSampleMoved(lx, ly, cx, cy, radius)
+    if lx == nil then return true end
+    local threshold = radius / 3
+    if threshold < 1 then threshold = 1 end
+    local dx, dy = cx - lx, cy - ly
+    return dx * dx + dy * dy >= threshold * threshold
+end
+
+--[[--
+Append one point to a live surface stroke and paint the segment into its
+raster.
+
+Shared by the sheet and the page: the duplicate-point test, the open-point
+budget, the bounding box a repair will need and the live-raster token are the
+same arithmetic on both, and only where the box then goes differs. Answers
+`false` when the budget stopped the stroke -- the caller aborts -- and
+otherwise `true` plus the dirty box, which is nil when nothing was painted.
+]]
+local function addSurfacePoint(s, cx, cy, cache, limit)
+    local i = s.n * 2
+    local px, py = s[i - 1], s[i]
+    if px == cx and py == cy then return true end
+    if s.n >= limit then return false end
+
+    s[i + 1] = cx
+    s[i + 2] = cy
+    s.n = s.n + 1
+    if cx < s.min_x then s.min_x = cx elseif cx > s.max_x then s.max_x = cx end
+    if cy < s.min_y then s.min_y = cy elseif cy > s.max_y then s.max_y = cy end
+
+    if not cache then
+        s.live_raster_complete = false
+        return true
+    end
+    local box, raster_cache, raster_generation =
+        cache:drawSegment(px, py, cx, cy, s.w, Style.colorFor(s.t, nil))
+    updateLiveRasterToken(s, box, raster_cache, raster_generation)
+    return true, box
+end
 
 local JustDraw = WidgetContainer:extend{
     name = "justdraw",
@@ -172,6 +317,30 @@ function JustDraw:init()
     --- The suite runs under a bare interpreter that cannot load the SQLite
     --- driver at all, so it hands one in.
     self.canvas_repository = nil
+
+    -- Page ink on a fixed layout. Everything here stays nil unless the
+    -- runtime has the stylus API (ADR-41) and ReaderUI is a paging one, and
+    -- every entry point checks `document_session`, so a v2026.03 route and
+    -- every EPUB behave exactly as they did before any of this existed.
+    self.document_session = nil
+    self.document_stroke = nil
+    self.document_erase_ctx = nil
+    self.document_erase_x, self.document_erase_y = nil, nil
+    self.document_pending_view_repaint = nil
+    self.document_view_refresh_pending = false
+    self.document_page_pending = false
+    self.document_pending_page = nil
+    self.document_backpressure_notified = false
+    self.document_backpressure_notice_pending = false
+    --- What the "Delete all page notes" entry reads, cached: `enabled_func`
+    --- runs on every paint of the menu and a COUNT per paint is exactly the
+    --- query `canExport` exists not to make. Invalidated by everything that
+    --- can add or remove a page's ink.
+    self.document_ink_count = nil
+    --- Left nil in production. The suite's fake buffer has no pixels, so the
+    --- transparent clear an overlay erases through arrives injected, the same
+    --- seam `canvas_repository` is.
+    self.document_cache_opts = nil
 
     -- One controller for the reader's exports, built before the docless
     -- return so both hosts have one. Everything it reads arrives as an
@@ -394,20 +563,75 @@ function JustDraw:onDispatcherRegisterActions()
 end
 
 --[[--
-Start the canvas session, once the document is ready.
+Start whichever surface session this document can have, once it is ready.
 
 Not in `init`: half the book's identity is `partial_md5_checksum`, which
-ReaderUI computes on its way to emitting this event. Only reflowable documents
-get one -- a canvas anchored by xpointer means nothing in a fixed layout, and
-`anchor_kind = 'page'` is reserved for when it does.
+ReaderUI computes on its way to emitting this event.
+
+Exactly one of the two, because ReaderUI is exactly one of the two. A sheet
+anchored by xpointer means nothing in a fixed layout; page ink keyed by page
+number means nothing in a book whose pages move with the font size.
 ]]
 function JustDraw:onReaderReady(config)
-    if self.is_docless or self.session or not self.ui.rolling or not self.ui.document then return end
+    if self.is_docless or not self.ui.document then return end
 
     -- The checksum lives in the document's settings, not on ReaderUI, which
     -- computes it there on its way to emitting this event
     -- (readerui.lua:473 @ v2026.07). Statistics reads it the same way.
     local settings = config or self.ui.doc_settings
+
+    if self.ui.rolling then return self:openCanvasSession(settings) end
+    if self.ui.paging then return self:openDocumentSession(settings) end
+end
+
+--[[--
+The page-ink session for a fixed-layout document.
+
+Gated on `Capture:supportsStylus()`, which is the product gate for every new
+surface (ADR-41): it is the runtime and not the hardware, so a finger-only
+device on v2026.07 gets page ink and a Kindle Scribe on v2026.03 keeps the
+direct-ink route it always had.
+
+The session is published before the page is looked up, because looking one up
+opens a raster whose `on_ready` comes straight back here.
+]]
+function JustDraw:openDocumentSession(settings)
+    if self.document_session or not Capture:supportsStylus() then return end
+
+    local session = DocumentInkSession.new{
+        ui = self.ui,
+        view = self.view,
+        identity = {
+            partial_md5 = settings and settings:readSetting("partial_md5_checksum"),
+            file_size = self:documentSize(),
+        },
+        file = self.ui.document.file,
+        repository = self.canvas_repository,
+        -- The raster is the whole page at zoom, so the budget that refuses a
+        -- zoom is measured in screens (ADR-38).
+        screen = function() return Screen:getWidth(), Screen:getHeight() end,
+        schedule = function(fn) UIManager:nextTick(fn) end,
+        scheduleIn = function(delay, fn) UIManager:scheduleIn(delay, fn) end,
+        unschedule = function(fn) UIManager:unschedule(fn) end,
+        notify = function(text) self:notify(text) end,
+        cache_opts = self.document_cache_opts,
+        on_ready = function() self:onDocumentInkReady() end,
+        on_load_error = function(reason) self:onDocumentInkLoadFailed(reason) end,
+        on_save_error = function(reason) self:onDocumentInkSaveFailed(reason) end,
+        on_save_recovered = function() self:onDocumentInkSaveRecovered() end,
+        on_will_rebuild = function() self:onDocumentInkWillRebuild() end,
+        on_view_refused = function(reason) self:onDocumentInkViewRefused(reason) end,
+    }
+    if not session:open() then return end
+    self.document_session = session
+    self.document_ink_count = nil
+    session:setPage(self:currentPage())
+    session:refreshView()
+    return session
+end
+
+function JustDraw:openCanvasSession(settings)
+    if self.session then return end
 
     self.session = CanvasSession.new{
         document = self.ui.document,
@@ -513,6 +737,12 @@ function JustDraw:teardown()
         self.canvas_open = false
         self.canvas_pending_repaint = nil
     end
+    if self.document_session then
+        self.document_session:close{ force = true }
+        self.document_session = nil
+        self.document_pending_view_repaint = nil
+        self.document_ink_count = nil
+    end
     if self.input_lease then self.input_lease:release() end
     self.input_lease = nil
     self:resetContacts()
@@ -547,6 +777,15 @@ function JustDraw:onSaveSettings()
             -- deduplicated notification; this log makes the lifecycle gate's
             -- failed return explicit without claiming settings were durable.
             logger.warn("JustDraw: SaveSettings canvas flush failed:", save_err)
+        end
+    end
+    if self.document_session then
+        local saved, save_err = self.document_session:flush()
+        -- `unavailable` is the session saying there was never anything here to
+        -- save, not that ink was lost; the reader has already been told about
+        -- everything else, by the queue, when the write failed.
+        if not saved and save_err ~= "unavailable" and save_err ~= "closed" then
+            logger.warn("JustDraw: SaveSettings page ink flush failed:", save_err)
         end
     end
     local explicit_clear = self.direct_ink_clear_all
@@ -603,6 +842,9 @@ function JustDraw:_applyScreenResize()
     else
         self:rebuildBar()
     end
+    -- The page moved under the reader, and every number the page-ink transform
+    -- is built from came from the view that just changed shape.
+    self:scheduleDocumentViewRefresh()
 end
 
 function JustDraw:onScreenResize()
@@ -635,6 +877,7 @@ end
 --- A page turn. Only the marks are recomputed; the index answers from memory.
 function JustDraw:onPageUpdate(page)
     if self.session then self.session:setPage(page or self:currentPage()) end
+    self:scheduleDocumentPage(page)
 end
 
 --[[--
@@ -697,6 +940,163 @@ end
 --- wait for an unrelated PageUpdate before showing its sheet markers.
 function JustDraw:onCanvasIndexReady()
     if self.session then UIManager:setDirty(self.ui, "ui") end
+end
+
+-- --------------------------------------------------- page ink: view events
+
+--[[--
+Re-read the view on the next tick, once, however many events said to.
+
+On the next tick because the host applies the change *after* it broadcasts:
+`state.offset`, `state.zoom` and `visible_area` are the reader's, not ours,
+and reading them from inside the event reads the old ones. Once because a pan
+emits an event per frame and rebuilding a transform per frame would be the
+one allocation a drag can afford least.
+]]
+function JustDraw:scheduleDocumentViewRefresh()
+    if not self.document_session or self.document_view_refresh_pending then return end
+    self.document_view_refresh_pending = true
+    UIManager:nextTick(function()
+        self.document_view_refresh_pending = false
+        self:refreshDocumentView()
+    end)
+end
+
+--- Rebuild the page-ink transform from the live view. A refusal reaches the
+--- reader through `on_view_refused`, once per change of reason, so there is
+--- nothing to say about one here.
+function JustDraw:refreshDocumentView()
+    local session = self.document_session
+    if not session then return end
+    return session:refreshView()
+end
+
+--[[--
+The reader turned to another page.
+
+Deferred and coalesced for the same reason the view refresh is: the page is
+the host's, and a fast page turn emits several before any of them settles.
+The abort belongs on this side of the flush -- an unfinished stroke is in no
+store, and the flush is what frees the raster it was drawn into.
+]]
+function JustDraw:scheduleDocumentPage(page)
+    if not self.document_session then return end
+    self.document_pending_page = page
+    if self.document_page_pending then return end
+    self.document_page_pending = true
+    UIManager:nextTick(function()
+        self.document_page_pending = false
+        local target = self.document_pending_page
+        self.document_pending_page = nil
+        local session = self.document_session
+        if not session then return end
+        self:abortDocumentStroke()
+        -- A refused turn (`flush_failed`) has already been notified by the
+        -- queue that failed, and the session is holding the page for a retry.
+        session:setPage(target or self:currentPage())
+    end)
+end
+
+--- The page was rescaled. The raster follows on `on_will_rebuild`.
+function JustDraw:onZoomUpdate()
+    self:scheduleDocumentViewRefresh()
+end
+
+--- The page moved: `recalculate`, and every pan, emit this.
+function JustDraw:onViewRecalculate()
+    self:scheduleDocumentViewRefresh()
+end
+
+--[[--
+Continuous scrolling on or off.
+
+Scroll mode is the one view the transform cannot describe at all -- one screen
+can hold parts of two pages -- so the surface is put away rather than refused
+per event, and the row stays exactly where it is until the reader comes back
+(ADR-38).
+]]
+function JustDraw:onSetScrollMode(page_scroll)
+    if not self.document_session then return end
+    local scrolling = page_scroll and true or false
+    UIManager:nextTick(function()
+        local session = self.document_session
+        if not session then return end
+        if scrolling then
+            self:abortDocumentStroke()
+            self:setDrawing(false)
+            local ok, err = session:suspend("unsupported_mode")
+            if not ok then
+                self:notify(documentMessage(err))
+                return
+            end
+            self:notify(documentMessage("unsupported_mode"))
+        else
+            local ok, err = session:resume()
+            if not ok then
+                self:notify(documentMessage(err))
+                return
+            end
+            self:refreshDocumentView()
+        end
+    end)
+end
+
+-- ------------------------------------------------ page ink: session events
+
+--[[--
+This page's raster is complete, so the page can show its ink.
+
+Nothing else will ask for that repaint: the reader turned the page, KOReader
+painted it, and the ink finished rasterising afterwards. The toolbar is
+deliberately not touched -- it carries no page-ink state, and an extra refresh
+of it on every page turn is not free on eink.
+]]
+function JustDraw:onDocumentInkReady()
+    UIManager:setDirty(self.ui, "ui")
+end
+
+--- The reason a read or a write failed is the driver's own sentence -- "cannot
+--- commit", a disk error -- so it goes to the log, and the reader gets the one
+--- line that says what state their ink is in. This is what `CanvasSession`
+--- does with the same two callbacks.
+function JustDraw:onDocumentInkLoadFailed(reason)
+    logger.warn("JustDraw: this page's ink could not be read:", reason)
+    self:setDrawing(false)
+    self:notify(DOCUMENT_ERRORS.load_failed)
+end
+
+--- A write failed. The strokes are still in memory and nothing more may be
+--- added until a retry succeeds -- the same bargain the sheet makes.
+function JustDraw:onDocumentInkSaveFailed(reason)
+    logger.warn("JustDraw: page ink write failed:", reason)
+    self:setDrawing(false)
+    self:notify(DOCUMENT_ERRORS.save_failed)
+end
+
+--- The retry went through. Drawing was turned off by the failure and not by
+--- the reader, so it comes back on -- the same bargain the sheet makes.
+function JustDraw:onDocumentInkSaveRecovered()
+    if self.document_session and self.document_session:canDraw() then
+        self:setDrawing(true)
+    end
+end
+
+--[[--
+The raster is about to be replaced, because the scale moved.
+
+This is the last moment the buffer a live stroke drew into is still there to
+repair, which is why the session announces it rather than simply rebuilding.
+]]
+function JustDraw:onDocumentInkWillRebuild()
+    self:abortDocumentStroke()
+end
+
+--- The view can no longer be mapped. Only worth a sentence to somebody who
+--- was drawing; a reader panning in scroll mode is not asking a question.
+function JustDraw:onDocumentInkViewRefused(reason)
+    if not self.drawing then return end
+    self:setDrawing(false)
+    self:notify(documentMessage(reason))
 end
 
 -- ----------------------------------------------------------------- toolbar
@@ -787,34 +1187,50 @@ function JustDraw:notify(text)
     UIManager:show(Notification:new{ text = text })
 end
 
-function JustDraw:notifyCanvasBackpressure()
-    if self.canvas_backpressure_notice_pending then return end
-    self.canvas_backpressure_notice_pending = true
+--[[--
+Say one thing, on the next tick, at most once per pending notice.
+
+Every caller can be reached from inside the stylus callback, where a widget
+must not go up, and every one of them can fire per sample -- so the message is
+deferred to a tick and coalesced behind `flag`. The drawing generation is the
+guard that matters: a notice raised by a lease that has since been replaced
+describes a contact that no longer exists. `still_valid` adds whatever else
+the caller's surface has to still be true.
+]]
+function JustDraw:notifyDeferred(flag, text, still_valid)
+    if self[flag] then return end
+    self[flag] = true
     local generation = self.drawing_generation or 0
+    UIManager:nextTick(function()
+        self[flag] = false
+        if (self.drawing_generation or 0) ~= generation then return end
+        if still_valid and not still_valid() then return end
+        self:notify(text)
+    end)
+end
+
+function JustDraw:notifyCanvasBackpressure()
     local active = self.session and self.session:activeCanvas()
     local canvas_id = active and active.id
-    UIManager:nextTick(function()
-        self.canvas_backpressure_notice_pending = false
-        local current = self.session and self.session:activeCanvas()
-        if (self.drawing_generation or 0) ~= generation
-            or not self.canvas_open or not current or current.id ~= canvas_id then
-            return
-        end
-        self:notify(_("Stroke was not saved because the write queue is busy. Try again."))
-    end)
+    self:notifyDeferred("canvas_backpressure_notice_pending",
+        _("Stroke was not saved because the write queue is busy. Try again."),
+        function()
+            local current = self.session and self.session:activeCanvas()
+            return self.canvas_open and current ~= nil and current.id == canvas_id
+        end)
+end
+
+function JustDraw:notifyDocumentBackpressure()
+    self:notifyDeferred("document_backpressure_notice_pending",
+        _("Stroke was not saved because the write queue is busy. Try again."),
+        function() return self.document_session ~= nil end)
 end
 
 function JustDraw:notifyStrokeBudget()
-    if self.stroke_budget_notice_pending then return end
-    self.stroke_budget_notice_pending = true
-    local generation = self.drawing_generation or 0
-    UIManager:nextTick(function()
-        self.stroke_budget_notice_pending = false
-        if (self.drawing_generation or 0) ~= generation then return end
-        self:notify(_("Stroke stopped because the pen contact did not end. Lift the pen and try again."))
-    end)
-
+    self:notifyDeferred("stroke_budget_notice_pending",
+        _("Stroke stopped because the pen contact did not end. Lift the pen and try again."))
 end
+
 function JustDraw:currentPage()
     return self.view.state.page or 1
 end
@@ -899,6 +1315,17 @@ function JustDraw:setDrawing(on)
         local cache = self.session:cache()
         if not cache or not cache:isReady() then
             self:notify(_("This sheet's ink is still loading"))
+            return
+        end
+    end
+    if on and self.document_session then
+        -- Before the lease, always: acquiring capture and then discovering
+        -- there is nowhere to put the ink leaves the reader drawing into
+        -- nothing, and creating the row is a transaction no contact may be
+        -- live for.
+        local ready, reason = self:prepareDocumentInk()
+        if not ready then
+            self:notify(documentMessage(reason))
             return
         end
     end
@@ -1281,6 +1708,15 @@ proximity — defers to it.
 ]]
 function JustDraw:applyPoint(x, y, tool)
     if self.canvas_open then return self:applyCanvasPoint(x, y, tool) end
+    if self.document_session then
+        -- On a fixed layout Draw means the page-ink surface and nothing else
+        -- (ADR-39). A surface that cannot take this point refuses it here
+        -- rather than letting the contact fall through into the sidecar,
+        -- where the coordinates would be screen pixels nothing can map back
+        -- to the page once the zoom moves.
+        if self:documentInkActive() then return self:applyDocumentPoint(x, y, tool) end
+        return false
+    end
     if tool == Capture.TOOL_ERASER or self.eraser then
         self:eraseAt(x, y)
     elseif self.stroke then
@@ -1857,6 +2293,10 @@ end
 --- what that is depends on whether a sheet is open.
 function JustDraw:endStroke()
     if self.canvas_open then return self:endCanvasStroke() end
+    -- Not an `elseif`: with a page-ink session open the direct route holds
+    -- nothing, and running both is what keeps a session that appeared or went
+    -- away mid-contact from stranding the other one's stroke.
+    if self.document_session then self:endDocumentStroke() end
     self.direct_erase_x, self.direct_erase_y = nil, nil
 
     local s = self.stroke
@@ -1880,6 +2320,7 @@ function JustDraw:abortStroke()
         self.draw_slot = nil
         return self:abortCanvasStroke()
     end
+    if self.document_session then self:abortDocumentStroke() end
     self.direct_erase_x, self.direct_erase_y = nil, nil
     if not self.stroke then
         self.draw_slot = nil
@@ -2226,33 +2667,17 @@ function JustDraw:startCanvasStroke(cx, cy, tr, style)
 end
 
 function JustDraw:addCanvasPoint(cx, cy, tr)
-    local s = self.canvas_stroke
-    local i = s.n * 2
-    local px, py = s[i - 1], s[i]
-    if px == cx and py == cy then return true end
-    if s.n >= (self.max_open_points or Limits.MAX_OPEN_POINTS) then
+    local ok, box = addSurfacePoint(self.canvas_stroke, cx, cy,
+        self.session:cache(),
+        self.max_open_points or Limits.MAX_OPEN_POINTS)
+    if not ok then
         -- See addPoint: the pen route's budget lives in InkStylusSequence.
         self:abortCanvasStroke()
         self.draw_slot = SUSPENDED
         self:notifyStrokeBudget()
         return false
     end
-
-    s[i + 1] = cx
-    s[i + 2] = cy
-    s.n = s.n + 1
-    if cx < s.min_x then s.min_x = cx elseif cx > s.max_x then s.max_x = cx end
-    if cy < s.min_y then s.min_y = cy elseif cy > s.max_y then s.max_y = cy end
-
-    local cache = self.session:cache()
-    if not cache then
-        s.live_raster_complete = false
-        return true
-    end
-    local box, raster_cache, raster_generation =
-        cache:drawSegment(px, py, cx, cy, s.w, Style.colorFor(s.t, nil))
-    updateLiveRasterToken(s, box, raster_cache, raster_generation)
-    self:blitCanvasBox(box, tr)
+    if box then self:blitCanvasBox(box, tr) end
     return true
 end
 
@@ -2328,7 +2753,8 @@ function JustDraw:_flushCanvasPendingRepaint(already_painted)
     if not already_painted then
         local bb = pending.cache:buffer()
         if not bb then return nil, "no_buffer" end
-        Screen.bb:blitFrom(bb, x, y, pending.cache_left, pending.cache_top, w, h)
+        blitCacheBox(pending.cache, bb, Screen.bb, x, y,
+            pending.cache_left, pending.cache_top, w, h)
         pending.overlay:restoreChromeIfIntersecting(Screen.bb,
             { x = x, y = y, w = w, h = h }, 0, 0)
     end
@@ -2366,7 +2792,7 @@ function JustDraw:blitCanvasBox(box, tr)
     end
     self:_flushCanvasPendingRepaint(false)
     local sx, sy = tr:fromCache(box.x, box.y)
-    Screen.bb:blitFrom(bb, sx, sy, box.x, box.y, box.w, box.h)
+    blitCacheBox(cache, bb, Screen.bb, sx, sy, box.x, box.y, box.w, box.h)
     if overlay then
         overlay:restoreChromeIfIntersecting(Screen.bb,
             { x = sx, y = sy, w = box.w, h = box.h }, 0, 0)
@@ -2450,12 +2876,9 @@ function JustDraw:eraseCanvasAt(cx, cy, tr)
     if not self.canvas_erase_ctx then
         self.canvas_erase_ctx = self.session:beginErase()
     end
-    local lx, ly = self.canvas_erase_x, self.canvas_erase_y
-    local threshold = radius / 3
-    if threshold < 1 then threshold = 1 end
-    if lx then
-        local dx, dy = cx - lx, cy - ly
-        if dx * dx + dy * dy < threshold * threshold then return end
+    if not eraseSampleMoved(self.canvas_erase_x, self.canvas_erase_y,
+        cx, cy, radius) then
+        return
     end
     self.canvas_erase_x, self.canvas_erase_y = cx, cy
     local box = self.session:eraseAt(cx, cy, radius, self.canvas_erase_ctx)
@@ -2470,16 +2893,305 @@ function JustDraw:endCanvasErase()
     self.canvas_erase_x, self.canvas_erase_y = nil, nil
 end
 
+-- --------------------------------------------------------------- page ink
+
+--[[--
+Whether this page can take ink right now.
+
+Asked once per accepted point, so it may allocate nothing: `canDraw` answers
+from fields it already has and returns one of a fixed set of reason strings.
+It is the whole predicate on purpose -- a surface that is open but loading,
+read-only, mid-refusal or holding a failed write is not one to add to.
+]]
+function JustDraw:documentInkActive()
+    local session = self.document_session
+    return session ~= nil and session:canDraw()
+end
+
+--[[--
+Draw was pressed: make sure this page has somewhere to put ink.
+
+`refreshView` first, because `ensureSurface` answers the *view's* refusal
+while the view is refused, and a reason built from the view the reader had two
+zooms ago is worse than no reason at all. Then `canDraw`, because a surface
+can exist and still not take a stroke -- a raster still loading is the common
+one, and the reader can act on being told to wait.
+]]
+function JustDraw:prepareDocumentInk()
+    local session = self.document_session
+    if not session then return true end
+    session:refreshView()
+    local ready, reason = session:ensureSurface()
+    if not ready then return nil, reason end
+    -- A row may have just been created, and one COUNT is what the menu reads.
+    self.document_ink_count = nil
+    local can, why = session:canDraw()
+    if not can then return nil, why end
+    return true
+end
+
+--[[--
+Queue one repaired region for a repaint through the reader.
+
+A transparent layer cannot un-paint the framebuffer. What an erase or an undo
+takes off the overlay is still on the screen underneath it, so the page has to
+be drawn again -- `setDirty` with a region does exactly that, repainting the
+reader widget and refreshing only that rectangle. One per tick, unioned, for
+the same reason the sheet unions its fallback repaints: an eraser sweep would
+otherwise ask for one per sample. Gray or not, this is `ui`: there is no fast
+path for a repaint that goes through the view (ADR-36, ADR-38).
+]]
+function JustDraw:queueDocumentViewRepaint(sx, sy, w, h)
+    if not w or not h or w <= 0 or h <= 0 then return end
+    local pending = self.document_pending_view_repaint
+    if pending then
+        if sx < pending.left then pending.left = sx end
+        if sy < pending.top then pending.top = sy end
+        if sx + w > pending.right then pending.right = sx + w end
+        if sy + h > pending.bottom then pending.bottom = sy + h end
+        return
+    end
+    self.document_pending_view_repaint = {
+        left = sx, top = sy, right = sx + w, bottom = sy + h,
+    }
+    UIManager:nextTick(function() self:flushDocumentViewRepaint() end)
+end
+
+function JustDraw:flushDocumentViewRepaint()
+    local pending = self.document_pending_view_repaint
+    self.document_pending_view_repaint = nil
+    if not pending then return end
+    local x, y, w, h = screenBox(pending.left, pending.top,
+        pending.right, pending.bottom)
+    if not x then return end
+    UIManager:setDirty(self.ui, "ui", Geom:new{ x = x, y = y, w = w, h = h })
+end
+
+--- One raster box, in cache coordinates, repainted through the view.
+function JustDraw:repaintDocumentBox(box, tr)
+    if not box or not tr or box.w <= 0 or box.h <= 0 then return end
+    local sx, sy = tr:fromCache(box.x, box.y)
+    self:queueDocumentViewRepaint(sx, sy, box.w, box.h)
+end
+
+--- One raster box copied onto the screen and refreshed: what live ink does,
+--- and the only page-ink path that touches the framebuffer directly.
+function JustDraw:blitDocumentBox(box, tr)
+    if not box or not tr or box.w <= 0 or box.h <= 0 then return end
+    local session = self.document_session
+    local cache = session and session:cache()
+    local bb = cache and cache:buffer()
+    if not bb then return end
+    local sx, sy = tr:fromCache(box.x, box.y)
+    blitCacheBox(cache, bb, Screen.bb, sx, sy, box.x, box.y, box.w, box.h)
+    self:refreshBox(sx, sy, sx + box.w, sy + box.h, cache:hasGrayInk())
+end
+
+--[[--
+One drawing point, in screen pixels, on a fixed-layout page.
+
+The transform gates the margins: ink never starts in the surround, because
+there is no page there to anchor it to. Everything below this point is in the
+page's own units.
+]]
+function JustDraw:applyDocumentPoint(x, y, tool)
+    local session = self.document_session
+    local tr = session and session:transform()
+    if not tr or not tr:contains(x, y) then
+        -- Off the page. End the stroke at the edge rather than clamping it
+        -- into a line along the margin.
+        self:endDocumentStroke()
+        return false
+    end
+    local cx, cy = tr:toCanvas(x, y)
+    if tool == Capture.TOOL_ERASER or self.eraser then
+        self:eraseDocumentAt(cx, cy, tr)
+    else
+        self:endDocumentErase()
+        if self.document_stroke then
+            if not self:addDocumentPoint(cx, cy, tr) then return false end
+        else
+            self:startDocumentStroke(cx, cy, tr,
+                self.contact_style or self:effectiveStyle(tool))
+        end
+    end
+    return true
+end
+
+--- Widths are stored in the page's own units, so a stroke keeps its weight
+--- relative to the page whatever zoom it was drawn at.
+function JustDraw:startDocumentStroke(cx, cy, tr, style)
+    style = Style.normalize(style)
+    self.document_stroke = {
+        n = 1, w = self.pen_width * Style.widthScale(style) / tr.scale,
+        t = style,
+        min_x = cx, min_y = cy, max_x = cx, max_y = cy,
+        cx, cy,
+    }
+end
+
+function JustDraw:addDocumentPoint(cx, cy, tr)
+    local session = self.document_session
+    local ok, box = addSurfacePoint(self.document_stroke, cx, cy,
+        session and session:cache(),
+        self.max_open_points or Limits.MAX_OPEN_POINTS)
+    if not ok then
+        -- See addPoint: the pen route's budget lives in InkStylusSequence.
+        self:abortDocumentStroke()
+        self.draw_slot = SUSPENDED
+        self:notifyStrokeBudget()
+        return false
+    end
+    if box then self:blitDocumentBox(box, tr) end
+    return true
+end
+
+function JustDraw:endDocumentStroke()
+    self:endDocumentErase()
+    local s = self.document_stroke
+    self.document_stroke = nil
+    local session = self.document_session
+    if not s or not session then return end
+
+    local tr = session:transform()
+    if s.n == 1 and tr then
+        -- A dot is never painted live, because there is no segment to paint.
+        local cache = session:cache()
+        if cache then
+            local box, raster_cache, raster_generation =
+                cache:drawSegment(s[1], s[2], s[1], s[2], s.w,
+                    Style.colorFor(s.t, nil))
+            updateLiveRasterToken(s, box, raster_cache, raster_generation)
+            self:blitDocumentBox(box, tr)
+        end
+    end
+
+    local ok, err, painted, left, top, right, bottom =
+        session:addStroke(s, s.n, s.w, s.t or Style.PEN, {
+            raster_cache = s.raster_cache,
+            raster_generation = s.raster_generation,
+            live_raster_complete = s.live_raster_complete == true,
+        })
+    if not ok then
+        logger.warn("JustDraw: page ink stroke not recorded:", err)
+        -- The live segments are already on the raster and on the screen. Take
+        -- them off both rather than showing ink that will not come back.
+        self:repaintDocumentBox(
+            session:repair(s.min_x, s.min_y, s.max_x, s.max_y, s.w), tr)
+        if err == "queue_backpressure" and not self.document_backpressure_notified then
+            self.document_backpressure_notified = true
+            self:notifyDocumentBackpressure()
+        elseif err == "operation_too_large" then
+            self:notifyStrokeBudget()
+        end
+        return nil, err
+    end
+    self.document_backpressure_notified = false
+    if painted and tr then
+        self:blitDocumentBox({
+            x = left, y = top, w = right - left, h = bottom - top,
+        }, tr)
+    end
+    return true
+end
+
+--[[--
+Give up the stroke in progress.
+
+Its segments are in the raster and on the screen, so both have to be undone:
+the raster is rebuilt from what was underneath, and the page is repainted
+through the view, because taking ink off a transparent layer changes nothing
+the reader can see.
+]]
+function JustDraw:abortDocumentStroke()
+    self:endDocumentErase()
+    local s = self.document_stroke
+    self.document_stroke = nil
+    local session = self.document_session
+    if not s or not session then return end
+    self:repaintDocumentBox(
+        session:repair(s.min_x, s.min_y, s.max_x, s.max_y, s.w),
+        session:transform())
+end
+
+function JustDraw:eraseDocumentAt(cx, cy, tr)
+    local session = self.document_session
+    -- The eraser is a fixed size under the reader's hand, so its reach in
+    -- page units grows as the page is zoomed out.
+    local radius = ERASER_RADIUS / tr.scale
+    if not self.document_erase_ctx then
+        self.document_erase_ctx = session:beginErase()
+    end
+    if not eraseSampleMoved(self.document_erase_x, self.document_erase_y,
+        cx, cy, radius) then
+        return
+    end
+    self.document_erase_x, self.document_erase_y = cx, cy
+    self:repaintDocumentBox(
+        session:eraseAt(cx, cy, radius, self.document_erase_ctx), tr)
+end
+
+function JustDraw:endDocumentErase()
+    if self.document_erase_ctx and self.document_session then
+        self.document_session:endErase(self.document_erase_ctx)
+    end
+    self.document_erase_ctx = nil
+    self.document_erase_x, self.document_erase_y = nil, nil
+end
+
+--- Undo on a fixed layout: the page's own ink, never the sidecar's (ADR-39).
+function JustDraw:undoDocumentInk()
+    local session = self.document_session
+    local can, why = session:canDraw()
+    if not can then
+        self:notify(documentMessage(why))
+        return true
+    end
+    local box, err = session:undo()
+    if not box then
+        if err then self:notify(documentMessage(err))
+        else self:notify(_("Nothing to undo on this page")) end
+        return true
+    end
+    if type(box) == "table" then
+        self:repaintDocumentBox(box, session:transform())
+    else
+        UIManager:setDirty(self.ui, "ui")
+    end
+    return true
+end
+
 -- ------------------------------------------------------------------ output
 
 function JustDraw:paintTo(bb, x, y)
     self:paintMarks(bb)
 
     local list = self.store:get(self:currentPage())
-    if not list then return end
-    for i = 1, #list do
-        Render.stroke(bb, list[i], 0, 0, Style.colorFor(list[i].t, INK))
+    if list then
+        for i = 1, #list do
+            Render.stroke(bb, list[i], 0, 0, Style.colorFor(list[i].t, INK))
+        end
     end
+    -- Last, and over the legacy ink: page ink is the current surface, and the
+    -- frozen one belongs underneath it (ADR-39).
+    self:paintDocumentInk(bb)
+end
+
+--[[--
+This page's own ink, composed over the page the reader is looking at.
+
+The transform already carries `view.dimen`'s origin, so the offsets this is
+handed are ignored exactly as the direct ink ignores them. A refused view
+paints nothing at all -- there is no transform, so there is nowhere honest to
+put it, and a page zoomed past the raster budget shows the book alone.
+]]
+function JustDraw:paintDocumentInk(bb)
+    local session = self.document_session
+    if not session or session:viewReason() then return end
+    if not session:transform() then return end
+    local cache = session:cache()
+    if not cache or not cache:isReady() then return end
+    cache:paintTo(bb)
 end
 
 --[[--
@@ -2515,25 +3227,8 @@ end
 --- `partial` -- partial is REAGL, and its completion fence with the pen
 --- reporting overflows evdev and drops input (ADR-26/36, crash (7).log).
 function JustDraw:refreshBox(left, top, right, bottom, grayscale)
-    left, top, right, bottom = tonumber(left), tonumber(top),
-        tonumber(right), tonumber(bottom)
-    if not left or not top or not right or not bottom
-        or left ~= left or top ~= top or right ~= right or bottom ~= bottom
-        or left == math.huge or top == math.huge
-        or right == math.huge or bottom == math.huge
-        or left == -math.huge or top == -math.huge
-        or right == -math.huge or bottom == -math.huge then
-        return
-    end
-    local x, y = math.floor(left), math.floor(top)
-    local edge_x, edge_y = math.ceil(right), math.ceil(bottom)
-    local sw, sh = Screen:getWidth(), Screen:getHeight()
-    if x < 0 then x = 0 end
-    if y < 0 then y = 0 end
-    if edge_x > sw then edge_x = sw end
-    if edge_y > sh then edge_y = sh end
-    local w, h = edge_x - x, edge_y - y
-    if w <= 0 or h <= 0 then return end
+    local x, y, w, h = screenBox(left, top, right, bottom)
+    if not x then return end
 
     if grayscale then
         Screen:refreshUI(x, y, w, h)
@@ -2564,6 +3259,7 @@ function JustDraw:onJustDrawUndo()
         end
         return true
     end
+    if self.document_session then return self:undoDocumentInk() end
 
     local page = self:currentPage()
     if not self.store:pop(page) then
@@ -2976,6 +3672,129 @@ function JustDraw:canvasMenu()
     return items
 end
 
+-- --------------------------------------------------------- page ink: menu
+
+--[[--
+How many pages of this book carry ink, cached until something changes it.
+
+`enabled_func` runs on every paint of the menu, so a COUNT per paint is a
+query the reader pays for by scrolling. The cache is invalidated by every path
+that can create or remove a page's ink, which is Draw, the two deletes and
+opening the book.
+]]
+function JustDraw:documentInkCount()
+    if self.document_ink_count ~= nil then return self.document_ink_count end
+    local session = self.document_session
+    self.document_ink_count = session and session:countSurfaces() or 0
+    return self.document_ink_count
+end
+
+function JustDraw:confirmDeleteDocumentInk()
+    UIManager:show(ConfirmBox:new{
+        text = _("Delete the ink on this page? Drawing sheets and legacy ink are not affected."),
+        ok_text = _("Delete"),
+        ok_callback = function() self:deleteDocumentInk() end,
+    })
+end
+
+function JustDraw:confirmDeleteAllDocumentInk()
+    UIManager:show(ConfirmBox:new{
+        text = _("Delete the ink on every page of this book? Drawing sheets and legacy ink are not affected."),
+        ok_text = _("Delete"),
+        ok_callback = function() self:deleteAllDocumentInk() end,
+    })
+end
+
+--- Delete through the plugin, so the visible state changes with the session:
+--- the session knows nothing about the toolbar or the capture.
+function JustDraw:deleteDocumentInk()
+    local session = self.document_session
+    if not session then return nil, "no_session" end
+    self:abortDocumentStroke()
+    self:setDrawing(false)
+    local ok, err = session:deleteCurrent()
+    if not ok then
+        self:notify(documentMessage(err))
+        return nil, err
+    end
+    self.document_ink_count = nil
+    -- The ink came off a transparent layer: the page under it has to be drawn
+    -- again, and the whole page changed.
+    UIManager:setDirty(self.ui, "ui")
+    return true
+end
+
+function JustDraw:deleteAllDocumentInk()
+    local session = self.document_session
+    if not session then return nil, "no_session" end
+    self:abortDocumentStroke()
+    self:setDrawing(false)
+    local ok, err = session:deleteAll()
+    if not ok then
+        self:notify(documentMessage(err))
+        return nil, err
+    end
+    self.document_ink_count = nil
+    UIManager:setDirty(self.ui, "ui")
+    return true
+end
+
+function JustDraw:retryDocumentInkSave()
+    local session = self.document_session
+    if not session then return nil, "no_session" end
+    -- A success relays `on_save_recovered`, which is where drawing comes back.
+    local ok, err = session:retrySave()
+    if not ok then self:notify(documentMessage(err)) end
+    return ok, err
+end
+
+--[[--
+The page-notes menu, rebuilt every time it is opened.
+
+Built on demand for the reason the sheet menu is: what it can offer depends on
+whether this page has ink, whether the book has any at all, and whether a
+write is waiting to be retried -- and an entry offering to delete something
+that is not there is the failure this feature can least afford.
+]]
+function JustDraw:documentInkMenu()
+    local items = {}
+    local session = self.document_session
+    if not session then return items end
+
+    if session:saveFailed() then
+        -- Editing is refused until this succeeds, so it comes first and says
+        -- what state the ink is in.
+        items[#items + 1] = {
+            text = _("Retry saving ink"),
+            keep_menu_open = true,
+            separator = true,
+            help_text = _([[A write to the page-ink database failed. Nothing has been lost -- the strokes are still in memory -- but they are not durable until this succeeds, and no more can be drawn until it does.]]),
+            callback = function() self:retryDocumentInkSave() end,
+        }
+    end
+
+    items[#items + 1] = {
+        text = _("Delete this page note"),
+        keep_menu_open = true,
+        -- Read through the plugin, not the captured session: a built submenu
+        -- outlives the document it was built for, and this runs on every
+        -- paint of it.
+        enabled_func = function()
+            return self.document_session ~= nil
+                and self.document_session:surface() ~= nil
+        end,
+        callback = function() self:confirmDeleteDocumentInk() end,
+    }
+    items[#items + 1] = {
+        text = _("Delete all page notes"),
+        keep_menu_open = true,
+        enabled_func = function() return self:documentInkCount() > 0 end,
+        help_text = _([[Deletes the ink drawn on the pages of this book. Drawing sheets and ink drawn before this KOReader version are not affected.]]),
+        callback = function() self:confirmDeleteAllDocumentInk() end,
+    }
+    return items
+end
+
 --[[--
 Build the top menu entry.
 
@@ -3159,6 +3978,15 @@ function JustDraw:addToMainMenu(menu_items)
                 end,
                 help_text = _([[Blank sheets anchored to a position in a reflowable book. Not available in PDFs and other fixed layouts, where drawing goes straight onto the page instead.]]),
                 sub_item_table_func = function() return self:canvasMenu() end,
+            },
+            {
+                text = _("Page notes"),
+                separator = true,
+                enabled_func = function()
+                    return self.document_session ~= nil
+                end,
+                help_text = _([[Ink drawn on the pages of a PDF or another fixed layout, stored in the page's own units so it follows zoom and panning. Not available in reflowable books, where a drawing sheet is anchored to the text instead.]]),
+                sub_item_table_func = function() return self:documentInkMenu() end,
             },
             {
                 -- Deliberately closes the menu: the export dialog is a modal,

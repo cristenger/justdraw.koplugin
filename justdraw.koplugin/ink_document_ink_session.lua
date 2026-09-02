@@ -768,6 +768,29 @@ function Session:deleteCurrent()
     return true
 end
 
+--[[--
+How many pages of this book carry ink.
+
+One indexed COUNT, for the entry that offers to delete them all: it has to
+know whether there is anything to delete before it can grey itself out, and
+"page ink exists somewhere in this book" is not a question any other state
+here answers. A book this session could never identify has none, by
+construction -- there is no row to count against.
+]]
+function Session:countSurfaces()
+    if self.closed or not self:isAvailable() then return 0 end
+    if not self.book_id or not self.repository
+        or type(self.repository.countPageInkSurfaces) ~= "function" then
+        return 0
+    end
+    local n, err = self.repository:countPageInkSurfaces(self.book_id)
+    if not n then
+        logger.warn("JustDraw: cannot count this book's page ink:", err)
+        return 0
+    end
+    return tonumber(n) or 0
+end
+
 --- Delete every page's ink in this book, and no sheet: three different things
 --- are deletable and each is confirmed by its own name (ADR-39).
 function Session:deleteAll()
