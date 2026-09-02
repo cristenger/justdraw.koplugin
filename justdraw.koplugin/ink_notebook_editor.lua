@@ -1146,6 +1146,18 @@ function Editor:onDirty(screen_box, kind, session, transform, source_box)
             exact_box.x + exact_box.w, exact_box.y + exact_box.h)
         return
     end
+    if live_kind and self.partial_blocks_input() then
+        -- Live ink with the fast preference turned off, on a device whose
+        -- `partial` fences on completion. The reader answers this the same
+        -- way in `refreshBox`: quality was asked for, but a per-segment REAGL
+        -- fence with the pen reporting overflows evdev, and `ui` renders the
+        -- same sixteen grays without one (ADR-26/43). Below this line only a
+        -- device where `partial` does not block, and the repairs and undos of
+        -- every device, reach it.
+        self.live_refresh:add("ui", exact_box.x, exact_box.y,
+            exact_box.x + exact_box.w, exact_box.y + exact_box.h)
+        return
+    end
 
     local refresh_box = exact_box
     if not live_kind and self:_qualityHasUnion()

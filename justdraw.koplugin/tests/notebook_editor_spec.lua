@@ -717,6 +717,44 @@ return function(ctx)
     (ADR-43). Its timer is not the quality pass's -- both are `UIManager` in
     production, and the cases around this one count the quality one.
     ]]
+    --[[--
+    Quality live ink on a device whose `partial` fences on completion is the
+    one live path that used to reach `partial` per segment: neither the fast
+    branch (the preference is off) nor the gray one (the preference is what
+    decides that) catches it. On MTK that fence with the pen reporting is the
+    thing ADR-26 exists to forbid, and the reader's `refreshBox` answers it
+    the same way.
+    ]]
+    t:case("live ink with fast off rides ui where partial blocks, never partial", function()
+        ctx.reset()
+        local Geom = require("ui/geometry")
+        local transform = {}
+        local cache = { buffer = function() return { w = 1000, h = 1400 } end,
+            hasGrayInk = function() return false end }
+        local runtime = { live_fast = false, active_contact = true }
+        local scheduler = ctx.support.newScheduler()
+        local editor, _, _, _, session = newEditor{
+            transform = transform, cache = cache, runtime = runtime,
+            scheduler = scheduler,
+            quality_clock = function() return scheduler:now() end,
+            partial_blocks_input = function() return true end,
+        }
+        local before = #ctx.env.UIManager.dirty
+        for i = 1, 20 do
+            editor:onDirty(Geom:new{ x = 100 + i, y = 200, w = 10, h = 10 },
+                "ink", session, transform, { x = i, y = 1, w = 10, h = 10 })
+        end
+        scheduler:advance(0.1)
+        ctx.env.UIManager:flush()
+        t:check(#ctx.env.UIManager.dirty > before, "something reached the panel")
+        for i = before + 1, #ctx.env.UIManager.dirty do
+            t:eq(ctx.env.UIManager.dirty[i][2], "ui",
+                "every live box rides ui, never the blocking waveform")
+        end
+        t:check(#ctx.env.UIManager.dirty - before <= 2,
+            "and the twenty segments were coalesced, not sent one by one")
+    end)
+
     t:case("fifty live dirties inside the interval are one queued refresh", function()
         ctx.reset()
         local Geom = require("ui/geometry")
@@ -910,7 +948,7 @@ return function(ctx)
         editor:onDirty(Geom:new{ x = 180, y = 240, w = 20, h = 20 },
             "ink", session, transform, { x = 90, y = 60, w = 20, h = 20 })
         t:eq(ctx.env.UIManager.dirty[#ctx.env.UIManager.dirty][2], "partial",
-            "subsequent live ink is partial")
+            "subsequent live ink is partial where partial does not block")
 
         runtime.live_fast = true
         editor:onEditChanged(session)
