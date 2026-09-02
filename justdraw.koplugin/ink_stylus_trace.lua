@@ -27,6 +27,11 @@ local STATES = {
     suspended = true,
     proximity_wait = true,
     forwarded_wait_lift = true,
+    -- The contact is owned but inking nothing: the kernel dropped frames and
+    -- nothing may be joined across them until the pen reports a boundary
+    -- (ADR-44). Without this token the whole recovery would print as
+    -- `redacted`, which is the one stretch of a trace worth reading.
+    desync_wait = true,
 }
 
 local DECISIONS = {
@@ -91,6 +96,12 @@ local REASONS = {
     axis_x_pending = true,
     axis_y_pending = true,
     axis_both_pending = true,
+    -- Recovery from an evdev overflow (ADR-44): the frames refused while the
+    -- sequence waits, and the two boundaries that end the wait.
+    evdev_desync = true,
+    desync_wait = true,
+    desync_lift = true,
+    desync_proximity = true,
 }
 
 local function positiveInteger(value, fallback)
