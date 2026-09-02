@@ -57,12 +57,60 @@ local SurfaceSession = require("ink_surface_session")
 local Session = {}
 Session.__index = Session
 
-local MESSAGES = {
+--[[--
+Every reason page ink can refuse, as a sentence a reader can act on.
+
+One table for the whole feature, and it lives here because this is the module
+both halves of it can see: the session says some of these itself, and the
+reader wiring turns the rest into a message when a refusal reaches a menu or a
+toolbar. Two tables meant two sentences for `read_only`, two msgids for a
+translator to tell apart, and no way to know which one a reader had been shown.
+
+Reasons come from three places and all three are answered here: this session
+(`unavailable`, `read_only`, `flush_failed`, ...), `ink_document_transform`
+(`unsupported_mode`, `zoom_too_large`, ...) and the surface underneath
+(`loading`, `save_failed`). Several share a sentence on purpose -- `suspended`
+is only ever entered from scroll mode, and a session with no usable database
+answers `unavailable` to everything.
+]]
+Session.MESSAGES = {
+    -- opening the book
     no_identity = _("Page notes are unavailable for this book"),
-    no_repository = _("Page notes need a database this KOReader cannot open"),
-    read_only = _("This page's ink is read-only because it was created by a newer JustDraw version."),
+    no_repository = _("Page notes need a database this KOReader cannot open."),
+    unavailable = _("Page notes need a database this KOReader cannot open."),
+    closed = _("Page notes need a database this KOReader cannot open."),
     database_conflict = _("Both JustDraw and FingerInk notes databases exist. Close KOReader, then move one database together with its matching -wal and -shm files to another directory."),
+    read_only = _("Page notes are read-only because this database was created by a newer JustDraw version."),
+    -- the view the transform could not describe
+    unsupported_mode = _("Turn off continuous scrolling to draw page notes."),
+    suspended = _("Turn off continuous scrolling to draw page notes."),
+    unsupported_reflow = _("Turn off reflow to draw page notes."),
+    unsupported_optimizing = _("Turn off page optimisation to draw page notes."),
+    unsupported_rotation = _("Page notes need the page unrotated."),
+    zoom_too_large = _("Zoom out to see and draw page notes."),
+    no_view = _("Page notes can't be placed on this view."),
+    unsupported_document = _("Page notes can't be placed on this view."),
+    no_page = _("Page notes can't be placed on this view."),
+    bad_page = _("Page notes can't be placed on this view."),
+    -- the page itself
+    page_geometry_changed = _("This page's size changed. Its notes are kept but can't be edited."),
+    bad_geometry = _("This page does not say how big it is, so notes cannot be placed on it."),
+    no_dimensions = _("This page does not say how big it is, so notes cannot be placed on it."),
+    no_surface = _("There are no page notes on this page yet."),
+    -- the surface underneath
+    loading = _("Page notes are still loading. Try again in a moment."),
+    load_failed = _("This page's notes could not be read."),
+    -- The sheet's bargain, word for word: the ink is not lost, it is not
+    -- durable, and one menu entry is what finishes it.
+    flush_failed = _("Could not save ink. It is still here: use Retry saving."),
+    save_failed = _("Could not save ink. It is still here: use Retry saving."),
 }
+
+--- A reason with no line of its own still has to say something the reader can
+--- read; a driver error is the usual way to get here.
+Session.FALLBACK_MESSAGE = _("Page notes are not available here.")
+
+local MESSAGES = Session.MESSAGES
 
 local function finite(v)
     return type(v) == "number" and v == v
@@ -140,6 +188,8 @@ function Session.new(opts)
         pending_page = nil,
         suspended = false,
         notified_read_only = false,
+        holding_save_recovered = false,
+        deferred_save_recovered = false,
         last_state = nil,
         muted = false,
         available = false,
@@ -187,7 +237,7 @@ end
 function Session:_unavailable(reason)
     self.available = false
     self:_closeOwnedRepository()
-    self.notify(MESSAGES[reason] or MESSAGES.no_repository)
+    self.notify(MESSAGES[reason] or Session.FALLBACK_MESSAGE)
     self:_notifyState()
     return nil, reason
 end
@@ -471,6 +521,14 @@ function Session:_openSurfaceSession()
         end,
         on_save_recovered = function()
             if self.surface_session ~= ss then return end
+            -- Held back while `retrySave` still has a page change to apply:
+            -- the owner reads this as "you may draw again", and until the
+            -- held turn has been made that would be an answer about the page
+            -- the reader has already left.
+            if self.holding_save_recovered then
+                self.deferred_save_recovered = true
+                return
+            end
             if self.on_save_recovered then self.on_save_recovered(self) end
         end,
         on_will_rebuild = function()
@@ -489,13 +547,26 @@ function Session:_openSurfaceSession()
     return true
 end
 
---- Close the open surface, keeping the row. Nil plus the queue's reason when
---- the last write could not be made durable -- which is a state this session
---- *is* in, and is therefore announced; a clean close is not, because what
---- replaces the surface has not happened yet.
+--[[--
+Close the open surface. Nil plus the queue's reason when the last write could
+not be made durable -- which is a state this session *is* in, and is therefore
+announced; a clean close is not, because what replaces the surface has not
+happened yet.
+
+The row goes with it when nothing was ever drawn on it. Only `ensureSurface`
+creates one, but Draw stays on across a page turn, so a reader who turns ten
+pages with the pen in their hand would otherwise collect ten empty rows --
+which `countSurfaces` would count as page notes, "Delete all page notes" would
+offer to delete, and the dossier would print as ten blank pages with headers.
+Every page turn, suspend, delete and teardown reaches the surface through
+here, so this is the one place that has to know it.
+]]
 function Session:_closeSurfaceSession(opts)
     local ss = self.surface_session
     if not ss then return true end
+    -- Asked before the close, while the queue and the raster are still there
+    -- to answer it.
+    local drop = self:_surfaceIsEmpty(ss)
     self.muted = true
     local ok, err = ss:close(opts)
     self.muted = false
@@ -504,6 +575,66 @@ function Session:_closeSurfaceSession(opts)
         return nil, err
     end
     self.surface_session = nil
+    if drop then self:_dropEmptySurface() end
+    return true
+end
+
+--[[--
+Whether the open surface holds nothing at all.
+
+Three things have to be true and each is a way to lose ink by getting it
+wrong: nothing may still be waiting in the queue; the last write must not have
+failed, because its strokes are then in memory and not in `strokes()`; and the
+raster must have been able to read the row in the first place -- a listing
+that failed leaves an empty metadata table that says nothing about what is
+stored.
+]]
+function Session:_rasterIsEmpty(ss)
+    if ss:saveFailed() or ss:pendingWrites() ~= 0 then return false end
+    local cache = ss:cache()
+    if not cache or cache:stateName() == "load_failed" then return false end
+    local strokes = cache:strokes()
+    return strokes ~= nil and #strokes == 0
+end
+
+--- Whether this surface may be forgotten: empty, and a row this session is
+--- allowed to delete. A read-only database is somebody else's to tidy.
+function Session:_surfaceIsEmpty(ss)
+    if not self.surface_obj or not self:isWritable() then return false end
+    return self:_rasterIsEmpty(ss)
+end
+
+--[[--
+Whether this page carries ink a reader could delete.
+
+Not the same question as "is there a row": Draw creates one before the first
+stroke, and it is dropped again when the page is left, so between the two
+there is a working surface with nothing on it. Offering to delete that would
+be offering to delete nothing.
+]]
+function Session:hasInk()
+    if not self.surface_obj then return false end
+    local ss = self.surface_session
+    if not ss then return true end
+    return not self:_rasterIsEmpty(ss)
+end
+
+--- Forget an empty row. Best effort by construction: a DELETE that fails
+--- leaves an empty surface the reader will simply meet again, and refusing a
+--- page turn over it would be the wrong trade entirely.
+function Session:_dropEmptySurface()
+    local row = self.surface_obj
+    if not row then return false end
+    local page = row.fixed_page or self.page_no
+    local ok, err = self.repository:deletePageInkSurface(self.book_id, page)
+    if not ok then
+        logger.warn("JustDraw: an empty page-ink row could not be dropped:", err)
+        return false
+    end
+    logger.dbg("JustDraw: dropped the empty page-ink row for page", page)
+    self.surface_obj = nil
+    self.transform_obj = nil
+    self.geometry_ok = false
     return true
 end
 
@@ -723,15 +854,34 @@ function Session:retrySave()
     if self.closed then return nil, "closed" end
     if not self:isAvailable() then return nil, "unavailable" end
     if not self.surface_session then return true end
+    -- The relay is withheld across the write and the page change it was
+    -- holding, and let out at the end: an owner that turns drawing back on
+    -- when it hears this has to hear it about the page it ends up on, not the
+    -- one the failure stranded it against.
+    self.holding_save_recovered = true
+    self.deferred_save_recovered = false
     local ok, err = self.surface_session:retrySave()
     self:_notifyState()
-    if not ok then return nil, err end
+    if not ok then
+        self.holding_save_recovered = false
+        self.deferred_save_recovered = false
+        return nil, err
+    end
+    local applied, apply_err = true, nil
     local pending = self.pending_page
     if pending then
         self.pending_page = nil
-        return self:setPage(pending)
+        applied, apply_err = self:setPage(pending)
     end
-    return true
+    self.holding_save_recovered = false
+    -- Only when the page change it was holding actually happened. Told
+    -- otherwise, the owner turns drawing back on for a page it cannot have,
+    -- and the reader gets two sentences for one press: the failure, and then
+    -- the refusal that follows from acting on the recovery.
+    local relay = self.deferred_save_recovered and applied
+    self.deferred_save_recovered = false
+    if relay and self.on_save_recovered then self.on_save_recovered(self) end
+    return applied, apply_err
 end
 
 --- Read this page's ink again after a failure -- either the raster's own
@@ -805,7 +955,14 @@ function Session:countSurfaces()
         logger.warn("JustDraw: cannot count this book's page ink:", err)
         return 0
     end
-    return tonumber(n) or 0
+    n = tonumber(n) or 0
+    -- The database has counted the open surface since `ensureSurface`
+    -- inserted it, and it will be dropped again when the page is left. Until
+    -- something is drawn on it, it is a working surface and not a page note.
+    if self.surface_session and self:_surfaceIsEmpty(self.surface_session) then
+        n = n - 1
+    end
+    return n > 0 and n or 0
 end
 
 --- Delete every page's ink in this book, and no sheet: three different things
@@ -833,7 +990,9 @@ Put the surface away without forgetting the page.
 
 Scroll mode and anything else the transform cannot describe: the raster is the
 expensive part and there is no point holding one that cannot be painted, but
-the row stays and `resume` brings it back exactly where it was.
+the row stays and `resume` brings it back exactly where it was -- unless
+nothing was ever drawn on it, in which case closing the surface forgets it and
+there is nothing to bring back.
 ]]
 function Session:suspend(reason)
     if self.closed then return nil, "closed" end
