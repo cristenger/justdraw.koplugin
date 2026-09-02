@@ -46,8 +46,13 @@ local YIELD_DELAY = 0.1
 --- The refusal ceiling, sized for a queue that now waits for the lift. One
 --- that drained on the next tick could refuse at nine operations; one that
 --- holds a whole contact has to carry it, and a partial erase is three
---- operations per hit (ADR-32).
-local HARD_OPS = 256
+--- operations per hit (ADR-32). The measured worst case is the 18-second
+--- erase contact of crash.log 2026-09-02: 103 operations inside one
+--- `BTN_TOUCH` bracket. The ceiling is sticky within a contact -- the urgent
+--- timer it arms is deferred by the same gate -- so it is set an order of
+--- magnitude above that rather than a factor of two, and `HARD_BYTES` stays
+--- the bound that actually describes the memory.
+local HARD_OPS = 1024
 local HARD_BYTES = 1024 * 1024
 
 local function monotonicSeconds()
