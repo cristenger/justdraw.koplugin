@@ -232,6 +232,39 @@ do
         ok_shape and string.format("pen tool=%s slot1 tool=%s id=%s", tostring(guarded.ev_slots[4].tool),
             tostring(guarded.ev_slots[1].tool), tostring(guarded.ev_slots[1].id)) or "no handler")
 
+    --[[--
+    The two counters the desync recovery reads (ADR-44). `ink_slot_steer`
+    carries literal evdev codes for a runtime whose cdefs will not load, and
+    a literal that stopped matching the ABI would make the drop invisible and
+    every BTN_TOUCH an edge that never came.
+    ]]
+    claim("the steer's SYN_DROPPED and BTN_TOUCH match this build's evdev ABI",
+        codes_ok,
+        codes_ok and Steer.codes.SYN_DROPPED == tonumber(C.SYN_DROPPED)
+            and Steer.codes.BTN_TOUCH == tonumber(C.BTN_TOUCH)
+            and Steer.codes.EV_SYN == tonumber(C.EV_SYN),
+        codes_ok and string.format("SYN_DROPPED=%s BTN_TOUCH=%s EV_SYN=%s",
+            tostring(Steer.codes.SYN_DROPPED), tostring(Steer.codes.BTN_TOUCH),
+            tostring(Steer.codes.EV_SYN)) or "no cdefs")
+
+    --- Every BTN_TOUCH the pen reports is a boundary, and the real handler
+    --- has to leave the counter alone for it to mean anything.
+    local edged = ok_shape and (function()
+        local state = realState()
+        local steer = Steer.new(state, InputClass.handleTouchEv)
+        steer.active = true
+        run(state, steer, ev(C.EV_KEY, C.BTN_TOOL_PEN, 1))
+        run(state, steer, ev(C.EV_KEY, C.BTN_TOUCH, 1))
+        run(state, steer, ev(C.EV_SYN, C.SYN_DROPPED, 0))
+        run(state, steer, ev(C.EV_KEY, C.BTN_TOUCH, 0))
+        local _pen, _panel, drops, edges = Steer.counts(steer)
+        return { drops = drops, edges = edges }
+    end)()
+    claim("a real down/drop/up sequence counts one drop and two touch edges",
+        ok_shape, edged and edged.drops == 1 and edged.edges == 2,
+        ok_shape and string.format("drops=%s edges=%s",
+            tostring(edged.drops), tostring(edged.edges)) or "no handler")
+
     --- The hook contract the install relies on.
     local chained = {}
     local probe = realState()
