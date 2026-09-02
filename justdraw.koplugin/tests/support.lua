@@ -2431,6 +2431,37 @@ function support.install()
     return env
 end
 
+--[[--
+`newReaderView`'s options with a host's defaults underneath them.
+
+A fixed page has to fit twice over in the suite's 600x800 screen or the raster
+budget refuses it (`zoom_too_large`), and `newReaderView`'s own default zoom of
+2 does not: A4 at 2 is 1191x1684 pixels, twice the budget. Zoom 0.5 puts the
+whole 596x842-point page on screen as 298x421 pixels -- the fit-page case --
+with a surround to its right and below that is nowhere near the toolbar, which
+is where "ink never starts in the margin" has to be checked from.
+
+A caller's own `view` wins field by field, `false` included -- `state = {
+offset = false }` is still the view before its first recalculate.
+]]
+local function pagingViewOpts(over, page)
+    local out = {}
+    for k, v in pairs(over or {}) do out[k] = v end
+    local function under(key, defaults)
+        if out[key] == false then return end
+        local merged = {}
+        for k, v in pairs(defaults) do merged[k] = v end
+        if type(out[key]) == "table" then
+            for k, v in pairs(out[key]) do merged[k] = v end
+        end
+        out[key] = merged
+    end
+    under("state", { zoom = 0.5, page = page or 1 })
+    under("visible_area", { w = 600, h = 800 })
+    under("dimen", { w = 600, h = 800 })
+    return out
+end
+
 --- Build a JustDraw instance wired to fake ui/view objects.
 function support.newPlugin(JustDraw, env, opts)
     opts = opts or {}
@@ -2468,6 +2499,25 @@ function support.newPlugin(JustDraw, env, opts)
         state = { page = opts.page or 1 },
         registerViewModule = function() end,
     }
+    -- The fixed-layout surface: the page-ink route's host. Absent by default
+    -- for the same reason the EPUB one is -- every existing test describes a
+    -- plugin with neither -- and mutually exclusive with it, because ReaderUI
+    -- is one or the other and never both.
+    if opts.paging then
+        local rv = support.newReaderView(pagingViewOpts(opts.view, opts.page))
+        view = rv.view
+        -- ReaderView's plugin-host half, which `newReaderView` has no reason
+        -- to model: JustDraw registers itself as a view module in `init`.
+        view.registerViewModule = function() end
+        ui.paging = true
+        ui.rolling = nil
+        ui.document = rv.ui.document
+        if ui.document then
+            ui.document.file = opts.file or "/books/test.pdf"
+            env.file_sizes[ui.document.file] = opts.file_size or 90210
+        end
+        doc_settings.data.partial_md5_checksum = opts.partial_md5 or "test-md5"
+    end
     -- ReaderUI has to be a real entry in the stack: the bar's forwarding, the
     -- dialogOnTop test and the whole suppression decision are defined relative
     -- to what sits below it.
