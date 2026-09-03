@@ -3694,6 +3694,13 @@ put it, and a page zoomed past the raster budget shows the book alone.
 function JustDraw:paintDocumentInk(bb)
     local session = self.document_session
     if not session or session:viewReason() then return end
+    -- The session's page, not the reader's, is what the raster holds. The two
+    -- part company for a tick on every turn -- the swap is deferred, and
+    -- coalesced, because the page is the host's -- and indefinitely after a
+    -- refused one: a flush that failed keeps the old surface open while the
+    -- reader has already moved (ADR-45). Painting then is the previous page's
+    -- ink over this one.
+    if session:page() ~= self:currentPage() then return end
     if not session:transform() then return end
     local cache = session:cache()
     if not cache or not cache:isReady() then return end

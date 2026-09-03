@@ -1340,4 +1340,64 @@ return function(ctx)
         t:check(store.calls.transaction > transactions, "committed after the lift")
         t:eq(p.document_session:pendingWrites(), 0, "and the queue drained")
     end)
+
+    -- =================================================================
+    t:describe("main / page ink never paints a page the session is not on")
+
+    local function refusedTurn()
+        local p, store = documentPlugin{
+            canvases = { pageRow(1, 1), pageRow(2, 2) },
+            strokes = { [2] = { bar_stroke() } },
+        }
+        startDrawing(p)
+        penDown(p, INK_XY.x, INK_XY.y)
+        penFrame(p, INK_XY.x + 30, INK_XY.y + 30)
+        penLift(p, INK_XY.x + 30, INK_XY.y + 30)
+        store.fail_transaction = "commit"
+        env.UIManager:flush()
+        t:eq(p.document_session:saveFailed(), true,
+            "the page-1 write really failed")
+        p.view.state.page = 2
+        p:onPageUpdate(2)
+        env.UIManager:flush()
+        t:eq(p.document_session:page(), 1, "the session is holding page 1")
+        return p, store
+    end
+
+    t:case("the ordinary deferred-swap window paints no stale page", function()
+        local p = documentPlugin{
+            canvases = { pageRow(1, 1) },
+            strokes = { [1] = { bar_stroke() } },
+        }
+        p.view.state.page = 2
+        p:onPageUpdate(2) -- queues the session swap; do not drain it yet
+        t:eq(p.document_session:page(), 1, "the deferred session is still on 1")
+        local bb = support.newBlitbuffer(600, 800)
+        p:paintTo(bb, 0, 0)
+        t:eq(#bb.blits, 0, "page-1 ink was not composed over page 2")
+    end)
+
+    t:case("a refused turn stops the old page's ink painting over the new one", function()
+        -- A flush that fails keeps the old surface open and refuses the turn,
+        -- but the reader has already moved: without this guard the previous
+        -- page's raster is blitted onto the page now on screen.
+        local p = refusedTurn()
+        local bb = support.newBlitbuffer(600, 800)
+        p:paintTo(bb, 0, 0)
+        t:eq(#bb.blits, 0, "and painted nothing onto page 2")
+    end)
+
+    t:case("painting resumes once the retry lands the turn", function()
+        local p, store = refusedTurn()
+        store.fail_transaction = nil
+        p.document_session:retrySave()
+        env.UIManager:flush()
+        t:eq(p.document_session:page(), 2, "the turn completed")
+        t:eq(p.document_session:surface().fixed_page, 2,
+            "and the loaded raster belongs to page 2")
+        local bb = support.newBlitbuffer(600, 800)
+        p:paintTo(bb, 0, 0)
+        t:eq(#bb.blits, 1, "page 2's preloaded ink is composed again")
+        t:eq(bb.blits[1].alpha, true, "through the alpha path")
+    end)
 end
