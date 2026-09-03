@@ -90,6 +90,8 @@ function Session.new(opts)
         surface_session = nil,
         overlay_widget = nil,
         page = nil,
+        open_placement = nil,
+        open_placement_page = nil,
         marks_here = {},
         available = false,
         closed = false,
@@ -169,6 +171,14 @@ function Session:_indexFailed(reason)
     logger.warn("JustDraw: canvas page index failed:", reason)
     self.index = nil
     self.available = false
+    -- An asynchronous rebuild failure discards the index while a sheet is
+    -- still open. Both the session's answer and the plugin's hot-path cache
+    -- would otherwise go on claiming authority over a place nothing can
+    -- confirm (ADR-45).
+    self:_placeOpenCanvas()
+    if self.plugin and self.plugin.refreshCanvasPlacement then
+        self.plugin:refreshCanvasPlacement()
+    end
     self:_closeOwnedRepository()
     self.notify(MESSAGES.list_failed)
 end
@@ -231,6 +241,7 @@ function Session:close(opts)
         self.queue = nil
         self.surface_session = nil
         self.canvas = nil
+        self:_placeOpenCanvas()
         self.next_seq = nil
         self.edited = false
     end
@@ -253,6 +264,10 @@ function Session:invalidate()
     if not self:isAvailable() then return end
     self.index:invalidate()
     self.marks_here = {}
+    -- The layout moved under the anchor. `Index:_rebuild` has just emptied
+    -- `page_of`, so the number may be gone until the rebuild lands; the
+    -- placement itself is answerable now and must not stay stale.
+    self:_placeOpenCanvas()
 end
 
 -- -------------------------------------------------------------------- pages
@@ -290,6 +305,9 @@ plain book.
 function Session:setPage(page)
     self.page = page
     self.marks_here = {}
+    -- Before the guard: an unavailable session has no sheet placed, and a
+    -- stale answer here would be read as fact by the drawing path.
+    self:_placeOpenCanvas()
     if not self:isAvailable() then return end
 
     for _, canvas in ipairs(self:canvasesHere(page)) do
@@ -307,6 +325,68 @@ end
 --- What to paint in the margin for this view. Precomputed by setPage.
 function Session:marks()
     return self.marks_here
+end
+
+--[[--
+Where the open sheet's anchor sits relative to the view.
+
+"here" while the anchor is on the page being read, "away" once the reader has
+navigated off it, "lost" when it no longer resolves at all, nil with no sheet
+open. The second return is the page the anchor belongs to, for "away" only,
+and nil when the index has not placed it yet.
+
+The overlay deliberately hands gestures above the sheet to the book, so the
+reader can turn the page with a sheet open and the sheet will not follow -- it
+hangs on an xpointer, not on a page. Without this the sheet on screen and the
+page behind it are two unrelated things that look like one, and ink meant for
+what is being read is filed against wherever the sheet was opened (ADR-45).
+
+Computed once per page turn for the same reason the marks are: the answer is
+read from the drawing path, which may not ask the document anything. The cost
+is one `Anchor.resolve` attempt (up to two in-document checks for raw and
+normalized anchors) and one `isXPointerInCurrentPage` for the *open* sheet
+alone, so a book being read with no sheet open pays nothing at all.
+]]
+function Session:openCanvasPlacement()
+    return self.open_placement, self.open_placement_page
+end
+
+--- The open sheet's anchor as an xpointer today's document understands, or
+--- nil. What "Go to this sheet's page" navigates to.
+function Session:openCanvasAnchor()
+    if not (self.canvas and self:isAvailable()) then return nil end
+    return Anchor.resolve(self.document, self.canvas)
+end
+
+--[[--
+Recompute the placement. Called from everything that can move, remove or
+invalidate the anchor relative to the view: a page turn, a rerender, the index
+finishing or failing, opening/closing/deleting a sheet, and forced teardown.
+
+The page number comes from the index's map and never from
+`getPageFromXPointer`: a page turn resolving no xpointers is a property the
+index is built to keep (ADR-42), and a number bought at that price would be
+worth less than saying nothing. An unplaced sheet is "away" with no number,
+and gains one when `on_complete` runs.
+]]
+function Session:_placeOpenCanvas()
+    local canvas = self.canvas
+    if not canvas or not self:isAvailable() then
+        self.open_placement, self.open_placement_page = nil, nil
+        return
+    end
+    local xp = Anchor.resolve(self.document, canvas)
+    if not xp then
+        self.open_placement, self.open_placement_page = "lost", nil
+        return
+    end
+    if self.document.isXPointerInCurrentPage
+        and self.document:isXPointerInCurrentPage(xp) then
+        self.open_placement, self.open_placement_page = "here", nil
+        return
+    end
+    self.open_placement = "away"
+    self.open_placement_page = self.index and self.index:pageOf(canvas.id) or nil
 end
 
 -- ------------------------------------------------------------------ canvases
@@ -361,6 +441,7 @@ function Session:openCanvas(canvas)
     if not transform then return nil, transform_err or "bad_geometry" end
 
     self.canvas = canvas
+    self:_placeOpenCanvas()
     if not self:isWritable() then self.notify(MESSAGES.read_only) end
     self.surface_session = SurfaceSession.new{
         repository = self.repository,
@@ -458,6 +539,7 @@ function Session:closeCanvas()
     self.cache_obj = nil
     self.surface_session = nil
     self.canvas = nil
+    self:_placeOpenCanvas()
     self.next_seq = nil
     return true
 end
@@ -484,6 +566,7 @@ function Session:deleteCanvas(canvas)
         self.queue = nil
         self.surface_session = nil
         self.canvas = nil
+        self:_placeOpenCanvas()
         self.next_seq = nil
         self.edited = false
     end

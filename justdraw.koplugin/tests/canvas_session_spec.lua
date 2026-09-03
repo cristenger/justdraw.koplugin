@@ -39,6 +39,7 @@ return function(ctx)
             pages = pages,
             here = opts.here or "/body/p[1]",
             hash = opts.hash,
+            visible = opts.visible,
         }
         local store = support.newCanvasStore(opts.canvases or {})
         if opts.read_only then
@@ -791,5 +792,128 @@ return function(ctx)
         session:close()
         session:close()
         t:eq(session:isAvailable(), false, "still shut")
+    end)
+
+    -- =================================================================
+    t:describe("canvas session / where the open sheet hangs")
+
+    --- A session with one sheet anchored at `/p1`, which lives on page 3.
+    local function placed(opts)
+        opts = opts or {}
+        local session, store, sched, doc, notes = fixture{
+            canvases = { canvasAt(1, "/p1") },
+            pages = { ["/p1"] = 3, ["/body/p[1]"] = 3 },
+            visible = opts.visible,
+        }
+        session:open()
+        sched:drain()
+        doc.current_page = 3
+        session:setPage(3)
+        if not opts.closed then
+            session:openCanvas(session:canvasById(1))
+            sched:drain()
+        end
+        return session, store, sched, doc, notes
+    end
+
+    t:case("no sheet open, nothing placed", function()
+        local session = placed{ closed = true }
+        local placement, page = session:openCanvasPlacement()
+        t:eq(placement, nil, "there is nothing to place")
+        t:eq(page, nil, "and no page to name")
+    end)
+
+    t:case("an open sheet on the page being read is here", function()
+        local session = placed()
+        local placement, page = session:openCanvasPlacement()
+        t:eq(placement, "here", "the anchor is on this page")
+        t:eq(page, nil, "which needs no number")
+    end)
+
+    t:case("turning off its page makes it away, and names the page", function()
+        local session, _, _, doc = placed()
+        doc.current_page = 5
+        session:setPage(5)
+        local placement, page = session:openCanvasPlacement()
+        t:eq(placement, "away", "the reader has left the anchor behind")
+        t:eq(page, 3, "and the sheet says where it belongs")
+    end)
+
+    t:case("coming back makes it here again", function()
+        local session, _, _, doc = placed()
+        doc.current_page = 5
+        session:setPage(5)
+        doc.current_page = 3
+        session:setPage(3)
+        t:eq(session:openCanvasPlacement(), "here", "back where it hangs")
+    end)
+
+    t:case("either page of a visible spread counts as here", function()
+        local session, _, _, doc = placed{ visible = 2 }
+        doc.current_page = 2               -- pages 2 and 3 are visible
+        session:setPage(2)
+        t:eq(session:openCanvasPlacement(), "here",
+            "the anchor on page 3 is inside the current viewport")
+    end)
+
+    t:case("an anchor the document no longer knows is lost, not away", function()
+        local session, _, _, doc = placed()
+        doc.pages["/p1"] = nil       -- the text it hung on is gone
+        doc.current_page = 5
+        session:setPage(5)
+        local placement, page = session:openCanvasPlacement()
+        t:eq(placement, "lost", "there is no page to go back to")
+        t:eq(page, nil, "so there is no number to give")
+    end)
+
+    t:case("closing the sheet unplaces it", function()
+        local session = placed()
+        session:closeCanvas()
+        t:eq(session:openCanvasPlacement(), nil, "nothing open, nothing placed")
+    end)
+
+    t:case("a forced session close also clears placement", function()
+        local session = placed()
+        session.closeCanvas = function() return nil, "cannot commit" end
+        local ok = session:close{ force = true }
+        t:eq(ok, nil, "the durable close still reports its failure")
+        t:eq(session:openCanvasPlacement(), nil,
+            "forced teardown cannot leave a placed canvas behind")
+    end)
+
+    t:case("an index failure clears placement", function()
+        local session = placed()
+        session:_indexFailed("probe")
+        t:eq(session:openCanvasPlacement(), nil,
+            "an unavailable session cannot report an authoritative place")
+    end)
+
+    t:case("the anchor is available for navigating back to", function()
+        local session, _, _, doc = placed()
+        doc.current_page = 5
+        session:setPage(5)
+        t:eq(session:openCanvasAnchor(), "/p1", "the pointer the sheet hangs on")
+    end)
+
+    t:case("a page turn with no sheet open asks the document nothing extra", function()
+        -- The index's guarantee: turning a page in an annotated book costs
+        -- what turning one in a plain book costs (ADR-42). Placing the open
+        -- sheet must not be paid for by a reader who has none open.
+        local session, _, _, doc = placed{ closed = true }
+        doc.current_page = 9
+        local checks, resolved = doc.in_page_checks, doc.resolutions
+        session:setPage(9)
+        t:eq(doc.in_page_checks, checks, "no in-page check")
+        t:eq(doc.resolutions, resolved, "and no page resolution")
+    end)
+
+    t:case("placing the open sheet costs one in-page check and no resolution", function()
+        local session, _, _, doc = placed()
+        doc.current_page = 9
+        local checks, resolved = doc.in_page_checks, doc.resolutions
+        session:setPage(9)
+        t:eq(doc.in_page_checks - checks, 1, "exactly one, for the open sheet")
+        t:eq(doc.resolutions, resolved,
+            "and the page number comes from the index, not from CREngine")
     end)
 end
