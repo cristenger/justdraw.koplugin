@@ -57,6 +57,13 @@ across the page. *More tools → JustDraw → Stylus diagnostics* reports **Inpu
 events the kernel dropped**; it should read 0. If it does not, the log is the
 useful thing to attach.
 
+**The sheet is showing a note I wrote somewhere else.** A drawing sheet is
+anchored to a position in the book, not to a page, and you can keep reading
+with one open — so the page behind it can change while the sheet stays put.
+When that happens the sheet's top edge says which page it belongs to, and it
+will not take ink until you are back on that page. The JustDraw menu has both
+ways out: **Go to this sheet's page**, or **Open a sheet here instead**.
+
 **Reporting an input problem.** *More tools → JustDraw → Stylus diagnostics*
 records a bounded trace of pen decisions to the local KOReader log. It stops by
 itself. If you also turned KOReader's debug logging on, turn it off again once
