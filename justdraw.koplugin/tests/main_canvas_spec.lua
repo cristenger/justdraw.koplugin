@@ -1943,4 +1943,86 @@ return function(ctx)
         t:check(#(store.strokes[canvas_id] or {}) > before,
             "and it still writes")
     end)
+
+    local function canvasItem(p, label)
+        for _, item in ipairs(p:canvasMenu()) do
+            if item.text == label then return item end
+        end
+    end
+
+    t:case("the menu offers the way back only while the sheet is away", function()
+        local p, _, doc = canvasPlugin()
+        p:openCanvasHere()
+        local here = canvasItem(p, "Go to this sheet's page")
+        t:check(here ~= nil, "the entry is always listed with a sheet open")
+        t:eq(here.enabled_func(), false, "but is not offered on its own page")
+        readAway(p, doc)
+        t:eq(canvasItem(p, "Go to this sheet's page").enabled_func(), true,
+            "and is offered once it is away")
+    end)
+
+    t:case("taking it sends the reader to the sheet's anchor", function()
+        local p, _, doc = canvasPlugin()
+        p:openCanvasHere()
+        readAway(p, doc)
+        local event
+        p.ui.handleEvent = function(_, sent)
+            event = sent
+            return true
+        end
+        p:goToCanvasAnchor()
+        t:eq(event.handler, "onGotoXPointer",
+            "the same event ReaderToc and ReaderLink use")
+        t:eq(event.args[1], "/body/p[7]", "the destination is the anchor")
+        t:eq(event.args[2], "/body/p[7]", "the marker points there too")
+    end)
+
+    t:case("a lost sheet has nowhere to go and says so", function()
+        local p, _, doc = canvasPlugin()
+        p:openCanvasHere()
+        doc.pages["/body/p[7]"] = nil
+        readAway(p, doc)
+        env.reader_events = {}
+        env.notifications = {}
+        local ok = p:goToCanvasAnchor()
+        t:eq(ok, nil, "refused")
+        t:eq(#env.reader_events, 0, "and the reader was not moved")
+        t:eq(#env.notifications, 1, "with a sentence for it")
+    end)
+
+    t:case("the menu opens a distinct sheet at the current anchor", function()
+        local p, store, doc = canvasPlugin()
+        p:openCanvasHere()
+        local old_id = p.session:activeCanvas().id
+        readAway(p, doc)
+        local found = canvasItem(p, "Open a sheet here instead")
+        t:check(found ~= nil, "the refusal names it, so it has to be there")
+        t:eq(found.enabled_func(), true, "the transition is currently possible")
+        found.callback()
+        local opened = p.session:activeCanvas()
+        t:check(opened.id ~= old_id, "the old sheet was left behind")
+        t:eq(opened.anchor_raw, "/body/p[4]", "the new sheet hangs here")
+        t:eq(p.session:openCanvasPlacement(), "here", "and accepts ink here")
+        t:eq(p.canvas_off_page, false, "the hot-path cache followed the switch")
+        t:eq(#store.canvases, 2, "exactly one replacement row was created")
+    end)
+
+    t:case("a failed preflight creates no replacement sheet", function()
+        local p, store, doc = canvasPlugin()
+        openForPen(p)
+        local old = p.session:activeCanvas()
+        penDown(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 40, SHEET.y + 40)
+        penLift(p, SHEET.x + 40, SHEET.y + 40)
+        readAway(p, doc)
+        local before = #store.canvases
+        store.fail_transaction = "commit"
+        canvasItem(p, "Open a sheet here instead").callback()
+        t:eq(#store.canvases, before, "no blank destination row was created")
+        t:eq(p.session:activeCanvas().id, old.id, "the old sheet stayed open")
+        t:eq(p.canvas_off_page, true, "its placement was not forged")
+        t:eq(p.session:saveFailed(), true, "Retry remains the recovery path")
+        t:eq(canvasItem(p, "Open a sheet here instead").enabled_func(), false,
+            "the menu now directs the reader to Retry")
+    end)
 end

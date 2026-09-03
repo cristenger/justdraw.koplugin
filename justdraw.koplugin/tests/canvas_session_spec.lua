@@ -916,4 +916,24 @@ return function(ctx)
         t:eq(doc.resolutions, resolved,
             "and the page number comes from the index, not from CREngine")
     end)
+
+    t:case("an invalid destination does not close the active sheet", function()
+        local session, _, sched = fixture{
+            canvases = { canvasAt(1, "/p1") },
+            pages = { ["/p1"] = 1 },
+        }
+        session:open()
+        sched:drain()
+        session:openCanvas(session:canvasById(1))
+        sched:drain()
+        local old_canvas = session:activeCanvas()
+        local old_overlay = session:overlay()
+        local bad = canvasAt(2, "/p2")
+        bad.logical_w = 0
+        local opened, err = session:openCanvas(bad)
+        t:eq(opened, nil, "bad geometry was refused")
+        t:eq(err, "bad_geometry", "with the specific reason")
+        t:eq(session:activeCanvas(), old_canvas, "the source stayed active")
+        t:eq(session:overlay(), old_overlay, "and its window stayed alive")
+    end)
 end

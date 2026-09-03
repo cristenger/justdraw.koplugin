@@ -18,6 +18,7 @@ local ButtonDialog = require("ui/widget/buttondialog")
 local ConfirmBox = require("ui/widget/confirmbox")
 local Device = require("device")
 local Dispatcher = require("dispatcher")
+local Event = require("ui/event")
 local Geom = require("ui/geometry")
 local InfoMessage = require("ui/widget/infomessage")
 local Notification = require("ui/widget/notification")
@@ -3201,6 +3202,54 @@ function JustDraw:openCanvasHere()
 end
 
 --[[--
+Go back to where the open sheet hangs.
+
+`GotoXPointer` is what ReaderLink, ReaderToc, ReaderHighlight and KOSync all
+use to move a rolling document to an xpointer; in page mode ReaderRolling
+resolves the pointer to a page and goes there (`readerrolling.lua:772` and
+`_gotoXPointer` @ v2026.07.2). That emits the `PageUpdate` this plugin already
+listens for, so the placement comes back to "here" through the ordinary path
+and nothing here has to say so itself.
+
+The pointer is passed twice on purpose: the second argument requests KOReader's
+own marker beside the anchored line. Its lifetime follows the reader's
+`followed_link_marker` setting -- absent defaults to one second, `false`
+suppresses it, `true` keeps it, a number is the removal delay -- and
+navigation itself does not depend on that setting.
+
+Reached only from a menu callback, so there is no live contact and this is a
+lifecycle tick (ADR-26).
+]]
+function JustDraw:goToCanvasAnchor()
+    local xp = self.session and self.session:openCanvasAnchor()
+    if not xp then
+        self:notify(_("This sheet's place in the book is missing"))
+        return nil, "lost"
+    end
+    self.ui:handleEvent(Event:new("GotoXPointer", xp, xp))
+    return true
+end
+
+--[[--
+Leave the away sheet behind and open the sheet at the position being read.
+
+Flush before `openCanvasHere`: that function may create a database row before
+`openCanvas` asks the session to close the old sheet. If durability then
+refused the switch, the row would remain as a blank sheet the reader never
+successfully opened. A failed preflight changes nothing and leaves Retry
+available on the existing sheet (ADR-45).
+]]
+function JustDraw:openCanvasHereInstead()
+    if not (self.session and self.canvas_open
+        and self.session:openCanvasPlacement() == "away") then
+        return nil, "not_away"
+    end
+    local durable, err = self.session:flush()
+    if not durable then return nil, err end
+    return self:openCanvasHere()
+end
+
+--[[--
 The Dispatcher route to the sheet: the same calls the menu makes.
 
 A gesture has no `enabled_func`, so the refusal the menu greys out has to be
@@ -4062,6 +4111,28 @@ function JustDraw:canvasMenu()
         items[#items + 1] = {
             text = _("Close sheet"),
             callback = function() self:closeCanvas() end,
+        }
+        items[#items + 1] = {
+            text = _("Go to this sheet's page"),
+            enabled_func = function()
+                return self.session:openCanvasPlacement() == "away"
+            end,
+            callback = function() self:goToCanvasAnchor() end,
+            help_text = _([[The sheet stays open while you read on, and it does not follow the page: it hangs on a position in the text. This goes back to that position, which is the only place it will take ink.]]),
+        }
+        items[#items + 1] = {
+            -- The refusal names this, so it has to be one action from here.
+            -- Closes the menu, like "Open sheet here": opening a sheet turns
+            -- drawing on, and an open menu is unusable once the pen is inking.
+            text = _("Open a sheet here instead"),
+            enabled_func = function()
+                if self.session:openCanvasPlacement() ~= "away" then return false end
+                if self.session:isIndexing() then return false end
+                if self.session:saveFailed() then return false end
+                return self.session:isWritable()
+                    or #self.session:canvasesHere(self:currentPage()) > 0
+            end,
+            callback = function() self:openCanvasHereInstead() end,
         }
         items[#items + 1] = {
             text = _("Delete this sheet"),

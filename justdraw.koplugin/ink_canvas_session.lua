@@ -434,11 +434,16 @@ freed -- because loading the next one takes the memory the last one was using.
 function Session:openCanvas(canvas)
     if not canvas or not self:isAvailable() then return nil end
     if self.canvas and self.canvas.id == canvas.id then return self.overlay_widget end
-    local closed, close_err = self:closeCanvas()
-    if not closed then return nil, close_err end
 
+    -- Pure destination validation comes before the durability boundary. A row
+    -- whose stored geometry cannot make a transform must not cost the reader
+    -- the good sheet they are already using: closing first and refusing after
+    -- leaves them with no sheet at all and nothing to retry (ADR-45).
     local transform, transform_err = self:_transform(canvas, 0)
     if not transform then return nil, transform_err or "bad_geometry" end
+
+    local closed, close_err = self:closeCanvas()
+    if not closed then return nil, close_err end
 
     self.canvas = canvas
     self:_placeOpenCanvas()
