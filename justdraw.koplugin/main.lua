@@ -139,6 +139,19 @@ local function documentMessage(reason)
 end
 
 --[[--
+Why a sheet the reader has read away from will not take ink.
+
+Both ways out are named because both are one action from here: the menu's
+"Go to this sheet's page", and its "Open a sheet here instead" (ADR-45).
+]]
+local function canvasAwayMessage(page)
+    if page then
+        return T(_("This sheet belongs to page %1. Go back to it, or open a sheet here."), page)
+    end
+    return _("This sheet belongs to another place in the book. Go back to it, or open a sheet here.")
+end
+
+--[[--
 Copy one box of a raster onto the screen, composed if the raster is an overlay.
 
 A page-ink raster is `TYPE_BB8A` and mostly transparent, and `blitFrom` copies
@@ -608,6 +621,8 @@ function JustDraw:init()
     self.document_backpressure_notice_pending = false
     self.document_refusal_notice_pending = false
     self.document_refusal_notified = false
+    self.canvas_off_page_notice_pending = false
+    self.canvas_refusal_notified = false
     self.document_pending_capture_stop = false
     --- Whether a failed write, and not the reader, is what stopped Draw. A
     --- retry gives it back only to somebody who had it.
@@ -1647,10 +1662,29 @@ function JustDraw:notifyDocumentRefusal(reason)
         function() return self.document_session ~= nil end)
 end
 
---- A new contact may be told again why it is being refused. Called from both
---- routes' contact-down, which is the only place that means "a new one".
-function JustDraw:armDocumentRefusalNotice()
+--[[--
+Why a point on an off-page sheet went nowhere.
+
+Latched per contact, exactly like the page-ink refusal above and for the same
+reason: `notifyDeferred`'s own latch coalesces one tick, and a contact spans
+many.
+]]
+function JustDraw:notifyCanvasOffPage()
+    if self.canvas_refusal_notified then return end
+    self.canvas_refusal_notified = true
+    local _placement, page = self.session:openCanvasPlacement()
+    self:notifyDeferred("canvas_off_page_notice_pending",
+        canvasAwayMessage(page),
+        function() return self.canvas_open and self.canvas_off_page end)
+end
+
+--- A new contact may be told again why it is being refused. Called from every
+--- contact-down on both routes and both surfaces, which is the only place
+--- that means "a new one". One function rather than two, so a contact-down
+--- added later cannot arm half of it.
+function JustDraw:armRefusalNotices()
     self.document_refusal_notified = false
+    self.canvas_refusal_notified = false
 end
 
 function JustDraw:notifyStrokeBudget()
@@ -1735,6 +1769,11 @@ function JustDraw:setDrawing(on)
         return
     end
     if on and self.canvas_open and self.session then
+        if self.canvas_off_page then
+            local _placement, page = self.session:openCanvasPlacement()
+            self:notify(canvasAwayMessage(page))
+            return
+        end
         if self.session:saveFailed() then
             self:notify(_("Could not save ink. Use Retry saving before drawing again."))
             return
@@ -2156,7 +2195,7 @@ function JustDraw:onContactPoint(slot, raw_x, raw_y, tool)
             self:abortStroke()
             return
         end
-        self:armDocumentRefusalNotice()
+        self:armRefusalNotices()
         self.draw_slot = slot
     elseif self.draw_slot ~= slot then
         return
@@ -2312,7 +2351,7 @@ end
 
 function JustDraw:onStylusContactStart()
     self.stylus_budget_notified = false
-    self:armDocumentRefusalNotice()
+    self:armRefusalNotices()
     -- Latch here, not at the first drawable point: the geometry policy can
     -- withhold several frames proving a coherent pair, and a manual style
     -- change in that window must not reach a contact already under way.
@@ -2745,6 +2784,7 @@ function JustDraw:routeCanvasFinger(slots)
             local dest = router:touchContact(slot, sx, sy)
             if dest == "canvas" then
                 if self.draw_slot == nil then
+                    self:armRefusalNotices()
                     self.draw_slot = slot
                 elseif self.draw_slot ~= slot then
                     self:abortCanvasStroke()
@@ -3227,6 +3267,13 @@ end
 
 --- One drawing point, in screen coordinates, while a sheet is open.
 function JustDraw:applyCanvasPoint(x, y, tool)
+    -- One field read per point. The answer is recomputed on the events that
+    -- can change it and never here: this is the draw path, and it may not ask
+    -- the document anything (ADR-45).
+    if self.canvas_off_page then
+        self:notifyCanvasOffPage()
+        return false
+    end
     return applySurfacePoint(self, CANVAS_ROUTE, x, y, tool)
 end
 
@@ -3672,6 +3719,15 @@ end
 
 function JustDraw:onJustDrawUndo()
     if self.canvas_open then
+        -- Undo takes the newest stroke off the *open* sheet, which is not the
+        -- one on screen. Refused with the same sentence the pen gets, so it
+        -- cannot quietly delete work from a page the reader has left
+        -- (ADR-45).
+        if self.canvas_off_page then
+            local _placement, page = self.session:openCanvasPlacement()
+            self:notify(canvasAwayMessage(page))
+            return true
+        end
         local box, err = self.session:undo()
         if not box then
             if err == "read_only" then self:notify(_("This sheet is read-only"))

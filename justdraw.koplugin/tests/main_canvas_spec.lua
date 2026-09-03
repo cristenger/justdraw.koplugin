@@ -538,12 +538,18 @@ return function(ctx)
             anchor_raw = "/body/p[8]", anchor_normalized = "/body/p[8]",
             anchor_dom_version = 20240114, logical_w = SW, logical_h = SH,
         }
-        local p, store = canvasPlugin{
+        local p, store, doc = canvasPlugin{
             canvases = { first, second },
             pages = { ["/body/p[7]"] = 1, ["/body/p[8]"] = 2 },
         }
         p:openCanvas(first)
         store.fail_stroke_list = "read failed"
+        -- The second sheet hangs on page 2. Read to it first: this case is
+        -- about recovering an unreadable raster, and a sheet opened from
+        -- another page is refused ink for an unrelated reason (ADR-45).
+        doc.current_page = 2
+        p.view.state.page = 2
+        p:onPageUpdate(2)
         local opened = p:openCanvas(second)
         t:check(opened ~= nil, "the unreadable target presents its recovery surface")
         t:eq(p.session:activeCanvas().id, second.id, "session retains the target")
@@ -1822,5 +1828,119 @@ return function(ctx)
         local p, _, doc = canvasPlugin()
         readAway(p, doc)
         t:eq(p.canvas_off_page, false, "there is nothing to be away")
+    end)
+
+    t:case("a point on an off-page sheet inks nothing", function()
+        local p, store, doc = canvasPlugin()
+        openForPen(p)
+        readAway(p, doc)
+        local canvas_id = p.session:activeCanvas().id
+        penDown(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 40, SHEET.y + 40)
+        penLift(p, SHEET.x + 40, SHEET.y + 40)
+        env.UIManager:flush()
+        t:eq(#(store.strokes[canvas_id] or {}), 0, "no stroke was written")
+        t:eq(p.session:pendingWrites(), 0, "nothing was even queued")
+        t:eq(p.canvas_stroke, nil, "no live stroke survived the refusal")
+    end)
+
+    t:case("and says why, once for the whole contact", function()
+        local p, _, doc = canvasPlugin()
+        openForPen(p)
+        readAway(p, doc)
+        env.notifications = {}
+        penDown(p, SHEET.x, SHEET.y)
+        for i = 1, 20 do penFrame(p, SHEET.x + i, SHEET.y + i) end
+        penLift(p, SHEET.x + 20, SHEET.y + 20)
+        env.UIManager:flush()
+        t:eq(#env.notifications, 1, "one sentence, not twenty")
+        t:eq(env.notifications[1],
+            "This sheet belongs to page 1. Go back to it, or open a sheet here.",
+            "and it names the page and the way out")
+    end)
+
+    t:case("a second contact is told again", function()
+        local p, _, doc = canvasPlugin()
+        openForPen(p)
+        readAway(p, doc)
+        penDown(p, SHEET.x, SHEET.y)
+        penLift(p, SHEET.x, SHEET.y)
+        env.UIManager:flush()
+        env.notifications = {}
+        penDown(p, SHEET.x, SHEET.y)
+        penLift(p, SHEET.x, SHEET.y)
+        env.UIManager:flush()
+        t:eq(#env.notifications, 1, "a new contact is a new question")
+    end)
+
+    t:case("coming back lets ink through again", function()
+        local p, store, doc = canvasPlugin()
+        openForPen(p)
+        readAway(p, doc)
+        doc.current_page = 1
+        doc.here = "/body/p[7]"
+        p.view.state.page = 1
+        p:onPageUpdate(1)
+        local canvas_id = p.session:activeCanvas().id
+        local before = #(store.strokes[canvas_id] or {})
+        penDown(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 40, SHEET.y + 40)
+        penLift(p, SHEET.x + 40, SHEET.y + 40)
+        env.UIManager:flush()
+        t:check(#(store.strokes[canvas_id] or {}) > before,
+            "the stroke was written")
+    end)
+
+    t:case("Draw cannot be armed onto an off-page sheet", function()
+        local p, _, doc = canvasPlugin()
+        p:openCanvasHere()
+        p:setDrawing(false)
+        readAway(p, doc)
+        env.notifications = {}
+        p:setDrawing(true)
+        t:eq(p.drawing, false, "refused")
+        t:eq(#env.notifications, 1, "with the reason said out loud")
+    end)
+
+    t:case("undo on an off-page sheet is refused, not applied elsewhere", function()
+        local p, store, doc = canvasPlugin()
+        openForPen(p)
+        local canvas_id = p.session:activeCanvas().id
+        penDown(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 40, SHEET.y + 40)
+        penLift(p, SHEET.x + 40, SHEET.y + 40)
+        env.UIManager:flush()
+        local before = #(store.strokes[canvas_id] or {})
+        readAway(p, doc)
+        env.notifications = {}
+        p:onJustDrawUndo()
+        env.UIManager:flush()
+        t:eq(#env.notifications, 1, "refused with a sentence")
+        t:eq(env.notifications[1],
+            "This sheet belongs to page 1. Go back to it, or open a sheet here.",
+            "the same sentence the pen gets")
+        t:eq(#(store.strokes[canvas_id] or {}), before,
+            "the persisted stroke was not deleted")
+        t:eq(p.session:pendingWrites(), 0, "undo queued no delete")
+    end)
+
+    t:case("a lost sheet still takes ink", function()
+        -- An orphan has no page to be away from, and "Lost sheets" is a
+        -- deliberate way in. Naming it in the handle is information; refusing
+        -- it would be a capability taken away.
+        local p, store, doc = canvasPlugin()
+        openForPen(p)
+        doc.pages["/body/p[7]"] = nil
+        readAway(p, doc)
+        t:eq(p.session:openCanvasPlacement(), "lost", "the anchor is gone")
+        t:eq(p.canvas_off_page, false, "which is not the same as away")
+        local canvas_id = p.session:activeCanvas().id
+        local before = #(store.strokes[canvas_id] or {})
+        penDown(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 40, SHEET.y + 40)
+        penLift(p, SHEET.x + 40, SHEET.y + 40)
+        env.UIManager:flush()
+        t:check(#(store.strokes[canvas_id] or {}) > before,
+            "and it still writes")
     end)
 end
