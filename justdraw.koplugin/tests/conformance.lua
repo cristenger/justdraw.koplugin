@@ -2432,6 +2432,123 @@ do
         tostring(band_height) .. " of " .. Header.BAND_PX .. " pixels")
 end
 
+-- =====================================================================
+-- The sheet handle's placement label, against the real widget
+--
+-- The label lands in `InkCanvasOverlay:paintChromeTo`, which live ink reaches
+-- once per segment, so it is fitted and rasterized once into a transparent
+-- BB8A and only alpha-blitted thereafter (ADR-45). The shared fake has no
+-- FreeType metrics and its `paintTo` is a no-op, so the unit suite can state
+-- the caching but not the fit. These are the parts only a real runtime knows:
+-- that the fitted face really is shorter than the strip it was fitted to, that
+-- a label too long for the strip is cut inside `max_width` rather than
+-- overrunning it, and that a BB8A the widget painted into composes onto what
+-- is underneath.
+--
+-- Both ends of the strip are checked. `handleHeight()` is 3% of the screen
+-- clamped to 16..48, so this runtime builds one particular height -- and 16 is
+-- the floor any device can present. The fit is measured with padding zero at
+-- both, because that is what the overlay passes: the strip centres the raster
+-- itself, and paying for that gap twice walks the fitter down to its floor.
+-- =====================================================================
+do
+    local Blitbuffer = require("ffi/blitbuffer")
+    local Font = require("ui/font")
+    local Size = require("ui/size")
+    local Screen = Device.screen
+    local widget_ok, TextWidget = pcall(require, "ui/widget/textwidget")
+    local _ = require("gettext")
+    local T = require("ffi/util").template
+
+    local max_width = Screen:getWidth() - 2 * Size.padding.small
+    local raw = math.floor(Screen:getHeight() * 0.03)
+    local here = raw < 16 and 16 or (raw > 48 and 48 or raw)
+
+    --- One label, measured, painted into a transparent BB8A and composed onto
+    --- a screen-like BB8 -- the whole path the overlay uses, in order.
+    local function probe(text, font_size)
+        local made, widget = pcall(TextWidget.new, TextWidget, {
+            text = text,
+            face = Font:getFace("smallinfofont", font_size),
+            padding = 0,
+            max_width = max_width,
+        })
+        if not made or not widget then return nil end
+        local sized, size = pcall(widget.getSize, widget)
+        if not sized or not size then pcall(widget.free, widget) ; return nil end
+        local truncated = select(2, pcall(widget.isTruncated, widget))
+        local label = Blitbuffer.new(size.w, size.h, Blitbuffer.TYPE_BB8A)
+        local painted = pcall(widget.paintTo, widget, label, 0, 0)
+        local page = Blitbuffer.new(size.w + 8, size.h + 8, Blitbuffer.TYPE_BB8)
+        page:fill(Blitbuffer.COLOR_WHITE)
+        local composed = pcall(page.alphablitFrom, page, label, 4, 4, 0, 0,
+            size.w, size.h)
+        label:free()
+        page:free()
+        pcall(widget.free, widget)
+        return { w = size.w, h = size.h, painted = painted,
+            composed = composed, truncated = truncated }
+    end
+
+    -- The three strings the overlay can actually show, plus a probe long
+    -- enough that no locale's translation of the others could be longer. One
+    -- emulator locale proves nothing about every translation; the forced-long
+    -- string is what owns the width bound.
+    local labels = {
+        T(_("Sheet from page %1"), 10),
+        _("Sheet from elsewhere in this book"),
+        _("This sheet's place in the book is missing"),
+    }
+    local long = string.rep("Hoja de la página 10 ", 40)
+
+    for _, handle in ipairs({ here, 16 }) do
+        local room = handle - Size.border.window
+        local fit_ok, fitted
+        if widget_ok then
+            fit_ok, fitted = pcall(TextWidget.getFontSizeToFitHeight,
+                TextWidget, "smallinfofont", room, 0)
+        end
+        local font_size = (fit_ok and type(fitted) == "number")
+            and math.min(16, fitted) or nil
+        local name = handle == here and "this runtime's handle" or "a 16px handle"
+
+        -- Below 2 the fitter has bottomed out rather than chosen, and the
+        -- overlay keeps its grip instead of painting a smear. Proving it does
+        -- not bottom out here is what says the label is reachable at all.
+        claim("smallinfofont fits " .. name .. " without bottoming out",
+            widget_ok and fit_ok == true and font_size ~= nil,
+            font_size ~= nil and font_size >= 2,
+            "fitted " .. tostring(fitted) .. " into " .. room
+                .. "px, capped to " .. tostring(font_size))
+
+        local fits, detail = font_size ~= nil, {}
+        if font_size then
+            for _, text in ipairs(labels) do
+                local r = probe(text, font_size)
+                if not (r and r.painted and r.composed
+                    and r.h <= room and r.w <= max_width) then
+                    fits = false
+                end
+                detail[#detail + 1] = r and (r.w .. "x" .. r.h) or "not built"
+            end
+        end
+        claim("every placement label fits, paints and composes in " .. name,
+            widget_ok and font_size ~= nil,
+            fits, table.concat(detail, ", ") .. " in " .. room .. "px x "
+                .. max_width)
+
+        local cut = font_size and probe(long, font_size)
+        claim("an overlong placement label is cut inside " .. name
+            .. "'s max_width",
+            widget_ok and cut ~= nil,
+            cut ~= nil and cut.truncated == true and cut.w <= max_width
+                and cut.h <= room and cut.painted and cut.composed,
+            cut and ("w=" .. cut.w .. " of " .. max_width .. ", h=" .. cut.h
+                .. " of " .. room .. ", truncated=" .. tostring(cut.truncated))
+                or "widget not built")
+    end
+end
+
 for _, r in ipairs(rows) do
     io.write(string.format("%-12s %-56s %s\n", r[1], r[2], r[3]))
 end

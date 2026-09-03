@@ -24,10 +24,15 @@ and Stop was the only way back to the book.
 
 local Blitbuffer = require("ffi/blitbuffer")
 local Device = require("device")
+local Font = require("ui/font")
 local Geom = require("ui/geometry")
+local logger = require("logger")
 local Size = require("ui/size")
+local TextWidget = require("ui/widget/textwidget")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local _ = require("gettext")
+local T = require("ffi/util").template
 
 local InkBar = require("ink_bar")
 local Compat = require("ink_compat")
@@ -48,6 +53,14 @@ local InkCanvasOverlay = WidgetContainer:extend{
     canvas = nil,      -- the canvas row
     height_pct = nil,
     bar_side = "right",
+    --- "here" | "away" | "lost" | nil, and the page an "away" sheet belongs
+    --- to. Pushed in by the plugin; see InkCanvasOverlay:setPlacement.
+    placement = nil,
+    placement_page = nil,
+    placement_text = nil,
+    placement_label_bb = nil,
+    placement_label_w = 0,
+    placement_label_h = 0,
 }
 
 -- ------------------------------------------------------------------ geometry
@@ -140,6 +153,8 @@ function InkCanvasOverlay:_rebuild()
     local right = sheet.x + sheet.w
     if bar.x + bar.w > right then right = bar.x + bar.w end
     self.dimen = Geom:new{ x = left, y = top, w = right - left, h = sh - top }
+    -- The handle's width or height may have changed; both constrain the label.
+    self:_rebuildPlacementLabel()
 end
 
 function InkCanvasOverlay:setBarSide(side)
@@ -157,6 +172,108 @@ end
 function InkCanvasOverlay:handleRect()
     local sheet = self.transform:sheetRect()
     return { x = sheet.x, y = sheet.y, w = sheet.w, h = handleHeight() }
+end
+
+--[[--
+Say which page this sheet belongs to, when it is not this one.
+
+The overlay declines the region above the sheet on purpose, so reading on with
+a sheet open is a supported thing to do -- but a sheet gives no other sign of
+where it hangs. Its margin mark is painted for the page being read and
+disappears the moment the anchor leaves it, so a reader who turns the page is
+left looking at a note with nothing at all to say it is not this page's
+(ADR-45).
+
+Returns whether the state actually changed, so a caller that runs on every
+page turn does not refresh the panel for nothing.
+]]
+function InkCanvasOverlay:setPlacement(kind, page)
+    if kind == self.placement and page == self.placement_page then
+        return false
+    end
+    self.placement, self.placement_page = kind, page
+    self:_rebuildPlacementLabel()
+    local h = self:handleRect()
+    UIManager:setDirty(self, "ui",
+        Geom:new{ x = h.x, y = h.y, w = h.w, h = h.h })
+    return true
+end
+
+function InkCanvasOverlay:_freePlacementLabel()
+    if self.placement_label_bb then
+        self.placement_label_bb:free()
+        self.placement_label_bb = nil
+    end
+    self.placement_text = nil
+    self.placement_label_w, self.placement_label_h = 0, 0
+end
+
+--[[--
+Build the handle's label, or clear it.
+
+Built, measured and rasterized here rather than in `paintChromeTo` because that
+is reached from `restoreChromeIfIntersecting`, which live ink calls once per
+segment, and nothing in the draw path may allocate or shape text. Width and
+height come from the handle, so a geometry rebuild has to rebuild it too.
+
+Fallible on purpose: a face that cannot be loaded or a buffer that cannot be
+allocated is a cosmetic failure, and it arrives inside a page-turn event. It
+must cost the reader the words and nothing else -- the refusal itself is the
+plugin's cached placement, not this raster.
+]]
+function InkCanvasOverlay:_rebuildPlacementLabel()
+    self:_freePlacementLabel()
+    local text
+    if self.placement == "away" then
+        text = self.placement_page
+            and T(_("Sheet from page %1"), self.placement_page)
+            or _("Sheet from elsewhere in this book")
+    elseif self.placement == "lost" then
+        text = _("This sheet's place in the book is missing")
+    end
+    if not text then return end
+    local h = self:handleRect()
+    local room = h.h - Size.border.window
+    local widget, label
+    local ok, w, height_or_err = pcall(function()
+        -- Padding zero on both the fit and the widget. The strip centres the
+        -- raster in whatever room is left, so the widget's own vertical
+        -- padding would be the same gap counted twice -- and counted twice it
+        -- takes more than half of a short strip's budget, which walks
+        -- KOReader's fitter all the way down to its floor and leaves a line
+        -- of one-pixel glyphs where the words should be.
+        local font_size = math.min(16,
+            TextWidget:getFontSizeToFitHeight("smallinfofont", room, 0))
+        -- The fitter counts down and stops at 1 when nothing fits at all.
+        -- A strip that cannot hold a line of text keeps its grip: the pen's
+        -- refusal still says the sentence, and a smear says less than the
+        -- grip did.
+        if font_size < 2 then return nil end
+        widget = TextWidget:new{
+            text = text,
+            face = Font:getFace("smallinfofont", font_size),
+            padding = 0,
+            max_width = h.w - 2 * Size.padding.small,
+        }
+        local size = widget:getSize()
+        if size.h > room then return nil end
+        -- A fresh BB8A is calloc-zeroed, hence transparent. Paint the glyphs
+        -- once and retain no TextWidget on the live chrome path.
+        label = Blitbuffer.new(size.w, size.h, Blitbuffer.TYPE_BB8A)
+        widget:paintTo(label, 0, 0)
+        return size.w, size.h
+    end)
+    if widget then widget:free() end
+    if not ok or not w then
+        if label then label:free() end
+        if not ok then
+            logger.warn("JustDraw: could not render sheet placement label:", w)
+        end
+        return
+    end
+    self.placement_text = text
+    self.placement_label_bb = label
+    self.placement_label_w, self.placement_label_h = w, height_or_err
 end
 
 function InkCanvasOverlay:inSheet(x, y)
@@ -213,9 +330,24 @@ function InkCanvasOverlay:paintChromeTo(bb, x, y)
     local h = self:handleRect()
     local rule = Size.border.window
     bb:paintRect(h.x, h.y, h.w, rule, Blitbuffer.COLOR_BLACK)
-    local grip_w = floor(h.w / 6)
-    bb:paintRect(h.x + floor((h.w - grip_w) / 2), h.y + floor(h.h / 2),
-        grip_w, rule, Blitbuffer.COLOR_BLACK)
+    local label = self.placement_label_bb
+    if label then
+        -- The label takes the grip's place rather than sharing the strip.
+        -- A strip with words on it is no less obviously grabbable, and a
+        -- sheet that is not on this page has something to say that a mark in
+        -- the middle of a line does not (ADR-45).
+        local top = h.y + rule
+        local slack = h.h - rule - self.placement_label_h
+        if slack < 0 then slack = 0 end
+        bb:alphablitFrom(label,
+            h.x + floor((h.w - self.placement_label_w) / 2),
+            top + floor(slack / 2), 0, 0,
+            self.placement_label_w, self.placement_label_h)
+    else
+        local grip_w = floor(h.w / 6)
+        bb:paintRect(h.x + floor((h.w - grip_w) / 2), h.y + floor(h.h / 2),
+            grip_w, rule, Blitbuffer.COLOR_BLACK)
+    end
 
     -- Last, so it is on top of everything the canvas painted.
     self.bar:paintTo(bb, x or 0, y or 0)
@@ -323,5 +455,12 @@ function InkCanvasOverlay:onScreenResize()
 end
 
 InkCanvasOverlay.onSetRotationMode = InkCanvasOverlay.onScreenResize
+
+--- The prerendered label owns a BB8A allocation. `UIManager:close` broadcasts
+--- CloseWidget before removing the window, so this is where it is released.
+--- Deliberately returns nothing: `WidgetContainer` must go on propagating.
+function InkCanvasOverlay:onCloseWidget()
+    self:_freePlacementLabel()
+end
 
 return InkCanvasOverlay

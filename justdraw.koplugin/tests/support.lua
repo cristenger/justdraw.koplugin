@@ -2264,6 +2264,22 @@ function support.install()
     end
     function TextWidget:paintTo() end
     function TextWidget:free() end
+    --[[--
+    The official pre-instantiation fitting helper, as a deterministic model.
+
+    The real one (frontend/ui/widget/textwidget.lua @ v2026.07) counts down
+    from `height_px` asking FreeType for each face's real height plus twice the
+    padding. This fake has no metrics and paints no glyphs, so what it can
+    honestly model is the one property a caller depends on: a size that leaves
+    room for the padding on both sides and is never a degenerate face. Whether
+    a real face at that size actually fits a real handle is a conformance
+    claim, not something this can answer.
+    ]]
+    function TextWidget:getFontSizeToFitHeight(font_name, height_px, padding)
+        local size = (height_px or 0) - 2 * (padding or 0)
+        if size < 2 then return 2 end
+        return math.floor(size)
+    end
     package.preload["ui/widget/textwidget"] = function() return TextWidget end
 
     local VerticalSpan = {}

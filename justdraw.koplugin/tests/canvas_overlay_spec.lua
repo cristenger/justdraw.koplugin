@@ -349,4 +349,117 @@ return function(ctx)
         t:eq(cache.transform, overlay.transform, "one transform, shared")
         Screen.w, Screen.h = SW, SH
     end)
+
+    -- =================================================================
+    t:describe("canvas overlay / the handle names an absent page")
+
+    t:case("a sheet on this page shows the grip and no words", function()
+        local overlay = fixture()
+        t:eq(overlay.placement_label_bb, nil, "nothing to say")
+        overlay:setPlacement("here", nil)
+        t:eq(overlay.placement_label_bb, nil, "still nothing to say")
+    end)
+
+    t:case("a sheet the reader has left behind names its page", function()
+        local overlay = fixture()
+        t:eq(overlay:setPlacement("away", 10), true, "the state changed")
+        t:eq(overlay.placement_text, "Sheet from page 10",
+            "the reader can see which note this is")
+    end)
+
+    t:case("a sheet the index has not placed says so without a number", function()
+        local overlay = fixture()
+        overlay:setPlacement("away", nil)
+        t:eq(overlay.placement_text, "Sheet from elsewhere in this book",
+            "a number it does not have is not invented")
+    end)
+
+    t:case("a lost anchor says its place is missing", function()
+        local overlay = fixture()
+        overlay:setPlacement("lost", nil)
+        t:eq(overlay.placement_text,
+            "This sheet's place in the book is missing", "and not a page")
+    end)
+
+    t:case("coming back takes the words away again", function()
+        local overlay = fixture()
+        overlay:setPlacement("away", 10)
+        t:eq(overlay:setPlacement("here", nil), true, "the state changed back")
+        t:eq(overlay.placement_label_bb, nil, "and the grip is back")
+    end)
+
+    t:case("setting the same placement twice is not a change", function()
+        local overlay = fixture()
+        overlay:setPlacement("away", 10)
+        t:eq(overlay:setPlacement("away", 10), false,
+            "so nothing refreshes the panel for nothing")
+    end)
+
+    t:case("changing the label frees the previous raster", function()
+        local overlay = fixture()
+        overlay:setPlacement("away", 10)
+        local old = overlay.placement_label_bb
+        overlay:setPlacement("away", 11)
+        t:eq(old.freed, true, "the replaced BB8A did not leak")
+        t:check(not rawequal(overlay.placement_label_bb, old),
+            "and the new text has a new raster")
+    end)
+
+    t:case("chrome paints alpha-blit one prerendered label", function()
+        -- paintChromeTo is reached from restoreChromeIfIntersecting, which
+        -- live ink calls per segment. This feature may add no repeated
+        -- construction, measurement or text shaping there.
+        local overlay = fixture()
+        overlay:setPlacement("away", 10)
+        local built = overlay.placement_label_bb
+        local bb = support.newBlitbuffer(SW, SH)
+        for _ = 1, 50 do overlay:paintChromeTo(bb, 0, 0) end
+        t:check(rawequal(overlay.placement_label_bb, built),
+            "the same raster, fifty paints later")
+        local label_blits = 0
+        for _, blit in ipairs(bb.blits) do
+            if blit.src == built and blit.alpha then
+                label_blits = label_blits + 1
+            end
+        end
+        t:eq(label_blits, 50, "each paint reused the transparent label")
+    end)
+
+    t:case("the cached label fits vertically inside the handle", function()
+        local overlay = fixture()
+        overlay:setPlacement("lost", nil)
+        local handle = overlay:handleRect()
+        t:check(overlay.placement_label_h < handle.h,
+            "the fitted face cannot clip through the strip")
+    end)
+
+    t:case("closing frees the prerendered label", function()
+        local overlay = fixture()
+        overlay:setPlacement("away", 10)
+        local built = overlay.placement_label_bb
+        overlay:onCloseWidget()
+        t:eq(built.freed, true, "the BB8A was released")
+        t:eq(overlay.placement_label_bb, nil, "and cannot be painted again")
+    end)
+
+    t:case("a label render failure falls back without escaping", function()
+        local TextWidget = require("ui/widget/textwidget")
+        local BB = require("ffi/blitbuffer")
+        local paintTo = TextWidget.paintTo
+        local newBB = BB.new
+        local made
+        BB.new = function(...)
+            made = newBB(...)
+            return made
+        end
+        TextWidget.paintTo = function() error("cannot render label") end
+        local overlay = fixture()
+        local ok = pcall(overlay.setPlacement, overlay, "away", 10)
+        TextWidget.paintTo = paintTo
+        BB.new = newBB
+        t:eq(ok, true, "a cosmetic failure did not break the page event")
+        t:eq(made.freed, true, "the temporary BB8A was released")
+        t:eq(overlay.placement_label_bb, nil, "the failed buffer was freed")
+        t:eq(overlay.placement, "away", "the ink refusal remains authoritative")
+    end)
 end
