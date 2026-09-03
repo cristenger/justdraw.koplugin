@@ -434,6 +434,11 @@ return function(ctx)
                 return true
             end,
             close = function() return true end,
+            -- `closeCanvas` on the plugin refreshes the sheet's placement,
+            -- so a session stub has to answer these two the way a real one
+            -- does with nothing open (ADR-45).
+            openCanvasPlacement = function() return nil, nil end,
+            overlay = function() return nil end,
         }
         local controller = plugin:notebookController()
         controller.repository = support.newNotebookStore()

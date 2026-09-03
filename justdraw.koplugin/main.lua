@@ -555,6 +555,10 @@ function JustDraw:init()
     self.session = nil
     self.router = nil
     self.canvas_open = false
+    --- Whether the open sheet's anchor is off the page being read. One
+    --- boolean because `applyCanvasPoint` reads it per pen sample and the
+    --- draw path may not ask the document anything (ADR-45).
+    self.canvas_off_page = false
     self.canvas_erase_ctx = nil
     self.canvas_erase_x, self.canvas_erase_y = nil, nil
     self.direct_erase_x, self.direct_erase_y = nil, nil
@@ -1192,7 +1196,10 @@ end
 
 --- A page turn. Only the marks are recomputed; the index answers from memory.
 function JustDraw:onPageUpdate(page)
-    if self.session then self.session:setPage(page or self:currentPage()) end
+    if self.session then
+        self.session:setPage(page or self:currentPage())
+        self:refreshCanvasPlacement()
+    end
     self:scheduleDocumentPage(page)
 end
 
@@ -1209,7 +1216,10 @@ end
 --- Font, margin or line-height change. The page index is rebuilt; not one
 --- stroke is read, written or moved.
 function JustDraw:onDocumentRerendered()
-    if self.session then self.session:invalidate() end
+    if self.session then
+        self.session:invalidate()
+        self:refreshCanvasPlacement()
+    end
     self:abandonBlindContact("document_rerendered")
 end
 
@@ -1255,7 +1265,33 @@ end
 --- already recomputed `marks_here`; repaint so the first visible page does not
 --- wait for an unrelated PageUpdate before showing its sheet markers.
 function JustDraw:onCanvasIndexReady()
+    -- The index has just placed the anchors, so an "away" sheet that had no
+    -- number to show may have one now.
+    self:refreshCanvasPlacement()
     if self.session then UIManager:setDirty(self.ui, "ui") end
+end
+
+--[[--
+Re-read where the open sheet hangs, and tell everything that shows it.
+
+Called from every event that can move, remove or invalidate the anchor relative
+to the view: page turn, rerender, index completion/failure, open, close and
+delete. The answer is cached as one boolean because `applyCanvasPoint` reads it
+per drawing point, and the draw path may not ask the document anything
+(ADR-45).
+
+Only "away" refuses ink. A "lost" sheet has no page to be away from, "Lost
+sheets" is a deliberate way in, and taking a reader's orphaned notes read-only
+is not this change's business -- it gets the handle's label and nothing else.
+]]
+function JustDraw:refreshCanvasPlacement()
+    local placement, page
+    if self.session then
+        placement, page = self.session:openCanvasPlacement()
+    end
+    self.canvas_off_page = placement == "away"
+    local overlay = self.session and self.session:overlay()
+    if overlay then overlay:setPlacement(placement, page) end
 end
 
 -- --------------------------------------------------- page ink: view events
@@ -2946,6 +2982,8 @@ function JustDraw:openCanvas(canvas)
     self.canvas_pending_repaint = nil
     self.bar = overlay.bar
     self.canvas_open = true
+    -- Before setDrawing below, which refuses an off-page sheet (ADR-45).
+    self:refreshCanvasPlacement()
     if self.router then self.router:reset() end
     if self.session:isWritable() and self.session:cache():isReady() then
         self:setDrawing(true)
@@ -3159,6 +3197,7 @@ function JustDraw:closeCanvas()
     if not ok then return nil, err end
     self.canvas_pending_repaint = nil
     self.canvas_open = false
+    self:refreshCanvasPlacement()
     self.bar = nil
     if self.bar_restore then self:setBarShown(true) end
     -- The sheet uncovered a page of text; a partial refresh would leave it
@@ -3937,6 +3976,10 @@ function JustDraw:deleteCanvas(canvas)
     if active then
         self.canvas_pending_repaint = nil
         self.canvas_open = false
+        -- The session has already cleared its active canvas; leaving this
+        -- boolean true would have later draw and menu code reading state from
+        -- a sheet that no longer exists.
+        self:refreshCanvasPlacement()
         self.bar = nil
         if self.router then self.router:reset() end
         if self.bar_restore then self:setBarShown(true) end

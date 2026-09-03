@@ -56,6 +56,8 @@ return function(ctx)
         local doc = support.newDocument{
             here = "/body/p[7]",
             pages = opts.pages or { ["/body/p[7]"] = 1 },
+            current_page = opts.current_page,
+            visible = opts.visible,
         }
         local store = support.newCanvasStore(opts.canvases or {})
         for _, entry in ipairs(opts.strokes or {}) do
@@ -1737,5 +1739,88 @@ return function(ctx)
         end
         t:eq(found, true,
             "the overlay's own full ui refresh, not only the toolbar's region")
+    end)
+
+    -- =================================================================
+    t:describe("main / a sheet the reader has read away from")
+
+    --- The plugin with a sheet open, anchored on page 1, and the reader on
+    --- page 4. `pages` maps the fixture's own xpointer, so the sheet the
+    --- plugin creates is the one that goes out of view.
+    local function readAway(p, doc, page)
+        local target = page or 4
+        local xp = "/body/p[" .. tostring(target) .. "]"
+        doc.current_page = target
+        doc.here = xp
+        doc.pages[xp] = target
+        p.view.state.page = target
+        p:onPageUpdate(target)
+        return p
+    end
+
+    t:case("an open sheet on its own page is not off-page", function()
+        local p = canvasPlugin()
+        p:openCanvasHere()
+        t:eq(p.canvas_off_page, false, "the anchor is right here")
+    end)
+
+    t:case("turning the page marks the open sheet off-page", function()
+        local p, _, doc = canvasPlugin()
+        p:openCanvasHere()
+        readAway(p, doc)
+        t:eq(p.canvas_off_page, true, "the reader has left it behind")
+    end)
+
+    t:case("and the overlay is told, so the handle can say so", function()
+        local p, _, doc = canvasPlugin()
+        p:openCanvasHere()
+        readAway(p, doc)
+        local overlay = p.session:overlay()
+        t:eq(overlay.placement, "away", "the overlay knows")
+        t:eq(overlay.placement_page, 1, "and which page it belongs to")
+    end)
+
+    t:case("coming back clears it", function()
+        local p, _, doc = canvasPlugin()
+        p:openCanvasHere()
+        readAway(p, doc)
+        doc.current_page = 1
+        p:onPageUpdate(1)
+        t:eq(p.canvas_off_page, false, "back on its own page")
+        t:eq(p.session:overlay().placement, "here", "and the label is gone")
+    end)
+
+    t:case("closing the sheet clears it too", function()
+        local p, _, doc = canvasPlugin()
+        p:openCanvasHere()
+        readAway(p, doc)
+        p:closeCanvas()
+        t:eq(p.canvas_off_page, false, "nothing open is not off-page")
+    end)
+
+    t:case("deleting the open away sheet clears the plugin cache", function()
+        local p, _, doc = canvasPlugin()
+        p:openCanvasHere()
+        readAway(p, doc)
+        local active = p.session:activeCanvas()
+        p:deleteCanvas(active)
+        t:eq(p.canvas_off_page, false, "nothing deleted remains off-page")
+        t:eq(p.session:openCanvasPlacement(), nil, "the session agrees")
+    end)
+
+    t:case("an index failure clears the plugin and overlay state", function()
+        local p, _, doc = canvasPlugin()
+        p:openCanvasHere()
+        readAway(p, doc)
+        local overlay = p.session:overlay()
+        p.session:_indexFailed("probe")
+        t:eq(p.canvas_off_page, false, "unavailable is not away")
+        t:eq(overlay.placement, nil, "the stale label was removed")
+    end)
+
+    t:case("a book with no sheet open is never off-page", function()
+        local p, _, doc = canvasPlugin()
+        readAway(p, doc)
+        t:eq(p.canvas_off_page, false, "there is nothing to be away")
     end)
 end
