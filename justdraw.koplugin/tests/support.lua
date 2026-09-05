@@ -2167,6 +2167,7 @@ function support.install()
 
     local Button = {}
     Button.__index = Button
+    Button.text_font_size = 20
     -- The class constant the real Button appends for `checked_func` labels
     -- (button.lua `checkmark`). ink_bar borrows the glyph for its own
     -- label-carried tool check; conformance.lua states the constant exists.
@@ -2176,8 +2177,20 @@ function support.install()
         o.texts = { o.text }
         o.seen = {}
         if o.enabled == nil then o.enabled = true end
-        o.frame = { invert = false }
+        o:init()
         return o
+    end
+    function Button:init()
+        self.init_count = (self.init_count or 0) + 1
+        self.frame = { invert = false }
+        if self.texts[#self.texts] ~= self.text then
+            self.texts[#self.texts + 1] = self.text
+        end
+        local label = { height = self.height or 30, width = self.width or 60 }
+        function label:getSize() return { w = self.width, h = self.height } end
+        function label:free() self.freed = true end
+        function label:setText(text) self.text = text end
+        self.label_widget = label
     end
     --- Records the offer and declines it. The stub has no hit rectangle of its
     --- own, so it cannot decide a tap; what it can prove is that KOReader would

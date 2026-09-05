@@ -30,6 +30,7 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local _ = require("gettext")
 
 local Stack = require("ink_stack")
+local PenDialog = require("ink_pen_dialog")
 
 local Screen = Device.screen
 
@@ -66,8 +67,14 @@ function InkBar:init()
         end
     end)
     self.pen_btn = self:mkButton(_("Pen"), w, function()
-        p:setEraser(false)
+        if not p.eraser and p.drawing then p:showPenSettingsDialog()
+        else p:setEraser(false) end
     end)
+    -- Keep the existing outer geometry when the longer state label is fitted.
+    self.pen_btn.height = self.draw_btn.label_widget:getSize().h
+    self.pen_font_size = self.pen_btn.text_font_size
+    self.pen_btn.avoid_text_truncation = true
+    self.pen_btn.help_text = _("Tap the selected pen to change its style and width.")
     self.eraser_btn = self:mkButton(_("Eraser"), w, function()
         p:setEraser(true)
     end)
@@ -137,8 +144,16 @@ function InkBar:update(refresh)
     -- also flips from outside the bar -- the menu, or a bound eraser gesture.
     -- setText is the relabel path every other state change here already uses.
     local mark = Button.checkmark
-    self.pen_btn:setText(p.eraser and _("Pen") or _("Pen") .. mark,
-        self.pen_btn.width)
+    local pen_text = PenDialog.label(p:effectiveStyle(), p.pen_width)
+        .. (p.eraser and "" or mark)
+    if pen_text ~= self.pen_btn.text then
+        -- setText's same-width shortcut skips fitting a newly long label.
+        self.pen_btn.label_widget:free()
+        self.pen_btn.text = pen_text
+        self.pen_btn.text_font_size = self.pen_font_size
+        self.pen_btn:init()
+        PenDialog.fitButton(self.pen_btn)
+    end
     self.eraser_btn:setText(p.eraser and _("Eraser") .. mark or _("Eraser"),
         self.eraser_btn.width)
     if refresh then

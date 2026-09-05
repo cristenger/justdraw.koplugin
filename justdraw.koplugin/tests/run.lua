@@ -2117,7 +2117,7 @@ end)
 local function dialogButton(dialog, text)
     for _, row in ipairs(dialog and dialog.buttons or {}) do
         for _, btn in ipairs(row) do
-            if btn.text == text then return btn end
+            if btn.text == text or btn.text == text .. require("ui/widget/button").checkmark then return btn end
         end
     end
     return nil
@@ -2129,7 +2129,7 @@ t:case("More opens the settings dialog for the reader", function()
     bar.more_btn.callback()
     t:eq(#env.dialogs, before + 1, "one dialog opened")
     local dialog = env.dialogs[#env.dialogs]
-    t:check(dialogButton(dialog, "Pen width") ~= nil, "pen width is reachable")
+    t:check(dialogButton(dialog, "Pen settings") ~= nil, "pen width is reachable")
     t:check(dialogButton(dialog, "Input mode") ~= nil, "input mode is reachable")
     t:check(dialogButton(dialog, "Export…") ~= nil, "export is reachable")
     t:eq(dialogButton(dialog, "Export…").enabled, false,
@@ -2152,11 +2152,11 @@ end)
 t:case("pen width is set from the dialog and remembered", function()
     local p, bar = realBarPlugin()
     bar.more_btn.callback()
-    dialogButton(env.dialogs[#env.dialogs], "Pen width").callback()
+    dialogButton(env.dialogs[#env.dialogs], "Pen settings").callback()
     local widths = env.dialogs[#env.dialogs]
-    t:eq(dialogButton(widths, "Medium").checked_func(), true,
+    t:eq(dialogButton(widths, "Ink pen · Medium").text, "Ink pen · Medium" .. require("ui/widget/button").checkmark,
         "the current width is the marked one")
-    dialogButton(widths, "Thick").callback()
+    dialogButton(widths, "Ink pen · Thick").callback()
     t:eq(p.pen_width, 7, "the plugin took the width")
     t:eq(_G.G_reader_settings.data.justdraw_pen_width, 7, "and it is saved")
 end)
@@ -2189,6 +2189,59 @@ t:case("Drawing refresh is selected in the reader, applied live, and remembered 
         "reopening marks the selected value")
     dialogButton(env.dialogs[#env.dialogs], "100 ms (default)").callback()
     t:eq(p.live_refresh.slow_interval, 0.10, "the default is one selection away")
+end)
+
+t:case("the selected pen opens its palette without changing drawing ownership", function()
+    local p, bar = realBarPlugin()
+    p:setDrawing(false)
+    local before = #env.dialogs
+    bar.pen_btn.callback()
+    t:eq(p.drawing, false, "idle Pen still does not start drawing")
+    t:eq(#env.dialogs, before, "idle Pen does not open settings")
+    p:setDrawing(true)
+    bar = p.bar
+    local lease = p.input_lease
+    bar.pen_btn.callback()
+    local palette = env.dialogs[#env.dialogs]
+    t:eq(palette.title, "Pen settings", "active Pen opens settings")
+    t:eq(p.input_lease, lease, "opening keeps capture ownership")
+    local label_before = bar.pen_btn.label_widget
+    palette.buttons[2][3].callback()
+    t:eq(p.pen_style, 65, "graphite selected")
+    t:eq(p.pen_width, 7, "width selected with it")
+    t:eq(bar.pen_btn.text, "Graphite · Thick" .. require("ui/widget/button").checkmark,
+        "bar shows manual selection")
+    t:eq(label_before.freed, true, "previous label released for refitting")
+    t:eq(p.drawing, true, "selection does not stop drawing")
+    local init_count = bar.pen_btn.init_count
+    bar:update(false)
+    t:eq(bar.pen_btn.init_count, init_count, "unchanged label is reused")
+    p:onJustDrawMarker()
+    t:check(bar.pen_btn.text:find("Ink pen", 1, true) ~= nil,
+        "legacy marker fallback reflected after Dispatcher")
+end)
+
+t:case("pen settings rechecks contacts and rejects stale reader callbacks", function()
+    local p = realBarPlugin()
+    p.input_lease = { hasActiveContact = function() return true end }
+    local before = #env.dialogs
+    t:eq(p:showPenSettingsDialog(), nil, "refused before constructing a dialog")
+    t:eq(#env.dialogs, before, "no allocation under contact")
+    p.input_lease = nil
+    local palette = p:showPenSettingsDialog()
+    p.input_lease = { hasActiveContact = function() return true end }
+    palette.buttons[2][3].callback()
+    t:eq(p.pen_width, 4, "contact at selection blocks writes")
+    t:eq(p.reader_modals[palette], true, "rejected selection keeps dialog")
+    p.input_lease = nil
+    p:closeReaderModal(palette)
+    palette.buttons[2][3].callback()
+    t:eq(p.pen_width, 4, "closed callback is inert")
+    palette = p:showPenWidthDialog()
+    p.document_session = {}
+    palette.buttons[2][3].callback()
+    t:eq(p.pen_width, 4, "replaced host rejects the old callback")
+    p:closeReaderModal(palette)
 end)
 
 t:case("an invalid saved refresh interval cannot disable the limiter", function()
@@ -2240,12 +2293,12 @@ end)
 t:case("the More dialog offers Pen style with the marker gated on a sheet", function()
     local p, bar = realBarPlugin()
     bar.more_btn.callback()
-    dialogButton(env.dialogs[#env.dialogs], "Pen style").callback()
+    dialogButton(env.dialogs[#env.dialogs], "Pen settings").callback()
     local styles = env.dialogs[#env.dialogs]
-    t:eq(dialogButton(styles, "Ink pen").checked_func(), true, "pen is current")
-    t:eq(dialogButton(styles, "Marker").enabled, false,
+    t:eq(dialogButton(styles, "Ink pen · Medium").text, "Ink pen · Medium" .. require("ui/widget/button").checkmark, "pen is current")
+    t:eq(dialogButton(styles, "Marker · Medium").enabled, false,
         "no sheet under the reader: marker has nowhere honest to draw")
-    dialogButton(styles, "Graphite").callback()
+    dialogButton(styles, "Graphite · Medium").callback()
     t:eq(p.pen_style, 65, "the choice reached the plugin")
 end)
 
@@ -2345,6 +2398,7 @@ for _, spec in ipairs({
     "input_controller_spec",
     "canvas_queue_spec",
     "live_refresh_spec",
+    "pen_dialog_spec",
     "surface_session_spec",
     "canvas_session_spec",
     "document_ink_session_spec",

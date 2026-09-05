@@ -27,6 +27,7 @@ local ExportSource = require("ink_export_source")
 local LiveRefresh = require("ink_live_refresh")
 local NotebookLayout = require("ink_notebook_layout")
 local RefreshDialog = require("ink_refresh_dialog")
+local PenDialog = require("ink_pen_dialog")
 local Stack = require("ink_stack")
 local Style = require("ink_style")
 
@@ -931,9 +932,15 @@ function Editor:_rebuildControls()
     local rects = self:_railRects()
     local exit = self:_button(_("Exit notebook"), snapshot.can_close,
         function() self:requestClose() end, rects.exit)
-    local pen = self:_button(_("Pen"), snapshot.can_ink,
-        function() self.set_eraser(false); self:_rebuildControls(); self:_dirtyRail() end,
-        rects.pen, nil, function() return not self.get_eraser() end)
+    local pen_label = PenDialog.label(Style.resolve(self.get_raw_pen_style(), nil, true),
+        self.get_pen_width())
+    local pen = self:_button(pen_label .. (self.get_eraser() and "" or Button.checkmark),
+        snapshot.can_ink, function()
+            if not self.get_eraser() then self:showPenSettings()
+            else self.set_eraser(false); self:onPenSettingsChanged() end
+        end, rects.pen, pen_label .. "\n"
+            .. _("Tap the selected pen to change its style and width."))
+    PenDialog.fitButton(pen)
     local eraser = self:_button(_("Eraser"), snapshot.can_ink,
         function() self.set_eraser(true); self:_rebuildControls(); self:_dirtyRail() end,
         rects.eraser, nil, function() return self.get_eraser() end)
@@ -1625,32 +1632,22 @@ function Editor:showMore()
         buttons = {
             {{ text = _("Go to page…"), enabled = self.snapshot.can_navigate,
                 callback = function() self:_closeModal(dialog); self:showGoToPage() end }},
-            {{ text = _("Rename notebook"), enabled = writable, callback = function()
-                self:_closeModal(dialog); self:showRename()
+            {{ text = _("Pen settings"), callback = function()
+                self:_closeModal(dialog); self:showPenSettings()
             end }},
             {{ text = _("Paper for this page"), enabled = writable, callback = function()
                 self:_closeModal(dialog); self:showPaperStyle()
             end }},
-            {{ text = _("Delete page"), enabled = writable and self.snapshot.page_count > 1,
-                callback = function() self:_closeModal(dialog); self:confirmDeletePage() end }},
-            {{ text = _("Delete notebook"), enabled = writable, callback = function()
-                self:_closeModal(dialog); self:confirmDeleteNotebook()
-            end }},
             {{ text = _("Export…"), enabled = self.snapshot.state ~= "loading",
-                callback = function()
-                    self:_closeModal(dialog); self:showExport()
-                end }},
-            {{ text = _("Input mode"), callback = function()
-                self:_closeModal(dialog); self:showInputMode()
-            end }},
-            {{ text = _("Pen style"), enabled = writable, callback = function()
-                self:_closeModal(dialog); self:_showPenStyleDialog()
-            end }},
-            {{ text = _("Pen width"), callback = function()
-                self:_closeModal(dialog); self:showPenWidth()
+                callback = function() self:_closeModal(dialog); self:showExport() end }},
+            {{ text = _("Rename notebook"), enabled = writable, callback = function()
+                self:_closeModal(dialog); self:showRename()
             end }},
             {{ text = _("Drawing refresh"), callback = function()
                 self:_closeModal(dialog); self:showDrawingRefresh()
+            end }},
+            {{ text = _("Input mode"), callback = function()
+                self:_closeModal(dialog); self:showInputMode()
             end }},
             {{ text = _("Rail side"), callback = function()
                 self.set_rail_side(self.get_rail_side() == "left" and "right" or "left")
@@ -1660,6 +1657,11 @@ function Editor:showMore()
             {{ text = _("Stylus diagnostics"), callback = function()
                 self:_closeModal(dialog)
                 self.show_stylus_diagnostics()
+            end }},
+            {{ text = _("Delete page"), enabled = writable and self.snapshot.page_count > 1,
+                callback = function() self:_closeModal(dialog); self:confirmDeletePage() end }},
+            {{ text = _("Delete notebook"), enabled = writable, callback = function()
+                self:_closeModal(dialog); self:confirmDeleteNotebook()
             end }},
             {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }},
         },
@@ -1780,50 +1782,44 @@ function Editor:showInputMode()
     return self:showModalSafely(dialog)
 end
 
--- Marker is always enabled here: unlike the reader bar, this surface is
--- always the notebook's own page, so it is always the plugin's to fill.
-function Editor:_showPenStyleDialog()
+function Editor:onPenSettingsChanged()
+    if self.closed then return end
+    self:_rebuildControls()
+    self:_dirtyRail()
+end
+
+function Editor:showPenSettings()
+    if self.closed then return nil, "closed" end
+    if self.has_active_contact() then return nil, "contact_active" end
+    local session = self:_currentSession()
     local dialog
-    local function choose(value)
-        self.set_pen_style(value)
-        self:_closeModal(dialog)
-    end
-    local current = self.get_raw_pen_style()
-    dialog = ButtonDialog:new{
-        title = _("Pen style"),
-        buttons = {
-            {{ text = _("Ink pen"), no_refresh_checkmark = true, checked_func = function() return current == Style.PEN end,
-                callback = function() choose(Style.PEN) end }},
-            {{ text = _("Graphite"), no_refresh_checkmark = true, checked_func = function() return current == Style.GRAPHITE end,
-                callback = function() choose(Style.GRAPHITE) end }},
-            {{ text = _("Marker"), no_refresh_checkmark = true, checked_func = function() return current == Style.MARKER end,
-                callback = function() choose(Style.MARKER) end }},
-            {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }},
-        },
+    return PenDialog.show{
+        get_style = self.get_raw_pen_style,
+        get_width = self.get_pen_width,
+        marker_allowed = function() return true end,
+        set_choice = function(style, width)
+            if self.closed or self:_currentSession() ~= session
+                or not self.modal_widgets[dialog] then return nil, "stale_dialog" end
+            if self.has_active_contact() then return nil, "contact_active" end
+            self.set_pen_style(style)
+            self.set_pen_width(width)
+            self:onPenSettingsChanged()
+            return true
+        end,
+        show_modal = function(widget)
+            dialog = widget
+            return self:showModalSafely(widget)
+        end,
+        close_modal = function(widget) return self:_closeModal(widget) end,
     }
-    return self:showModalSafely(dialog)
+end
+
+function Editor:_showPenStyleDialog()
+    return self:showPenSettings()
 end
 
 function Editor:showPenWidth()
-    local dialog
-    local function choose(value)
-        self.set_pen_width(value)
-        self:_closeModal(dialog)
-    end
-    local current = self.get_pen_width()
-    dialog = ButtonDialog:new{
-        title = _("Pen width"),
-        buttons = {
-            {{ text = _("Thin"), no_refresh_checkmark = true, checked_func = function() return current == 2 end,
-                callback = function() choose(2) end }},
-            {{ text = _("Medium"), no_refresh_checkmark = true, checked_func = function() return current == 4 end,
-                callback = function() choose(4) end }},
-            {{ text = _("Thick"), no_refresh_checkmark = true, checked_func = function() return current == 7 end,
-                callback = function() choose(7) end }},
-            {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }},
-        },
-    }
-    return self:showModalSafely(dialog)
+    return self:showPenSettings()
 end
 
 --[[--

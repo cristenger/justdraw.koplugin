@@ -436,11 +436,11 @@ return function(ctx)
             return nil
         end
         p.bar.more_btn.callback()
-        row(env.dialogs[#env.dialogs], "Pen style").callback()
+        row(env.dialogs[#env.dialogs], "Pen settings").callback()
         local styles = env.dialogs[#env.dialogs]
-        t:eq(row(styles, "Marker").enabled, true,
+        t:eq(row(styles, "Marker · Thin").enabled, true,
             "a sheet is ours to fill, so the marker has somewhere honest to draw")
-        row(styles, "Marker").callback()
+        row(styles, "Marker · Thin").callback()
         t:eq(p.pen_style, 3, "the choice reached the plugin")
     end)
 
@@ -462,7 +462,7 @@ return function(ctx)
             local checked = 0
             for _, r in ipairs(dlg.buttons) do
                 for _, btn in ipairs(r) do
-                    if btn.checked_func then
+                    if btn.checked_func or btn.no_refresh_checkmark then
                         checked = checked + 1
                         t:eq(btn.no_refresh_checkmark, true, open[1] .. " / "
                             .. tostring(btn.text)

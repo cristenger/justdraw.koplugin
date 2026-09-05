@@ -62,6 +62,8 @@ return function(ctx)
             set_eraser = function() end,
             get_raw_pen_style = overrides.get_raw_pen_style,
             set_pen_style = overrides.set_pen_style,
+            get_pen_width = overrides.get_pen_width,
+            set_pen_width = overrides.set_pen_width,
             get_drawing_refresh_ms = overrides.get_drawing_refresh_ms,
             set_drawing_refresh_ms = overrides.set_drawing_refresh_ms,
             get_live_fast = function() return runtime.live_fast end,
@@ -245,22 +247,23 @@ return function(ctx)
         t:eq(editor.modal_widget, nil, "the chooser closed")
     end)
 
-    t:case("More offers Pen style, and picks reach the injected seam", function()
+    t:case("More offers Pen settings, and pairs reach the injected seam", function()
         ctx.reset()
-        local picked
+        local picked, picked_width
         local editor = newEditor{
             get_raw_pen_style = function() return 1 end,
             set_pen_style = function(value) picked = value end,
+            set_pen_width = function(value) picked_width = value end,
         }
         editor:onStateChanged()
         local more = editor:showMore()
         local entry
         for i = 1, #more.buttons do
             local button = more.buttons[i][1]
-            if button.text == "Pen style" then entry = button end
+            if button.text == "Pen settings" then entry = button end
         end
-        t:check(entry ~= nil, "Pen style is reachable from More")
-        t:eq(entry.enabled, true, "and enabled on a writable notebook")
+        t:check(entry ~= nil, "Pen settings is reachable from More")
+        t:check(entry.enabled ~= false, "preferences are available")
         entry.callback()
         local chooser = editor.modal_widget
         t:check(chooser ~= nil and chooser ~= more, "More closed before it opened")
@@ -269,16 +272,50 @@ return function(ctx)
         for i = 1, #chooser.buttons do
             labels[#labels + 1] = chooser.buttons[i][1].text
         end
-        t:eq(table.concat(labels, "|"), "Ink pen|Graphite|Marker|Close",
+        t:eq(table.concat(labels, "|"), "Ink pen · Thin|Graphite · Thin|Marker · Thin|Close",
             "every style, in English")
 
         for i = 1, #chooser.buttons do
-            if chooser.buttons[i][1].text == "Marker" then
+            if chooser.buttons[i][1].text == "Marker · Thin" then
                 chooser.buttons[i][1].callback()
             end
         end
         t:eq(picked, 3, "the choice reaches the injected seam")
+        t:eq(picked_width, 2, "style and width chosen together")
         t:eq(editor.modal_widget, nil, "and the chooser closed")
+    end)
+
+    t:case("pen preferences update the rail and refuse stale or live-contact choices", function()
+        ctx.reset()
+        local style, width = 1, 4
+        local editor, controller, _, _, _, runtime = newEditor{
+            get_raw_pen_style = function() return style end,
+            get_pen_width = function() return width end,
+            set_pen_style = function(value) style = value end,
+            set_pen_width = function(value) width = value end,
+        }
+        editor:onStateChanged()
+        local paper = editor.layout_geometry.paper_rect
+        runtime.active_contact = true
+        t:eq(editor:showPenSettings(), nil, "no panel under a live contact")
+        runtime.active_contact = false
+        local dialog = editor:showPenSettings()
+        runtime.active_contact = true
+        dialog.buttons[2][3].callback()
+        t:eq(width, 4, "selection rechecks contact")
+        t:eq(editor.modal_widgets[dialog], true, "rejected panel retained")
+        runtime.active_contact = false
+        dialog.buttons[2][3].callback()
+        t:eq(style, 65, "graphite preference")
+        t:eq(width, 7, "thick preference")
+        t:eq(editor.layout[2][1].text,
+            "Graphite · Thick" .. require("ui/widget/button").checkmark, "rail reflects pair")
+        t:eq(editor.layout_geometry.paper_rect, paper, "paper geometry not rebuilt")
+        dialog = editor:showPenWidth()
+        controller.activeSession = function() return {} end
+        dialog.buttons[1][1].callback()
+        t:eq(width, 7, "old session cannot apply a preference")
+        editor:_closeModal(dialog)
     end)
 
     --[[--
@@ -366,7 +403,7 @@ return function(ctx)
             local checked = 0
             for _, r in ipairs(dlg.buttons) do
                 for _, btn in ipairs(r) do
-                    if btn.checked_func then
+                    if btn.checked_func or btn.no_refresh_checkmark then
                         checked = checked + 1
                         t:eq(btn.no_refresh_checkmark, true, open[1] .. " / "
                             .. tostring(btn.text)

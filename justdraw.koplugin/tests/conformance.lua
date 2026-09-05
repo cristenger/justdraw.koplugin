@@ -2630,6 +2630,80 @@ do
     library:free()
 end
 
+-- Long tool labels must fit without moving the document bar or its hitboxes.
+do
+    local Bar = require("ink_bar")
+    local PenDialog = require("ink_pen_dialog")
+    local Style = require("ink_style")
+    local Button = require("ui/widget/button")
+    local plugin = { pen_style = Style.PEN, pen_width = 4, eraser = false }
+    function plugin:effectiveStyle() return self.pen_style end
+    local bar = Bar:new{ plugin = plugin }
+    local before = bar.pen_btn:getSize()
+    local fits, min_font = true, math.huge
+    for _, style in ipairs({ Style.PEN, Style.GRAPHITE, Style.MARKER }) do
+        for _, width in ipairs({ 2, 4, 7 }) do
+            for _, eraser in ipairs({ false, true }) do
+                plugin.pen_style, plugin.pen_width, plugin.eraser = style, width, eraser
+                bar:update(false)
+                local size, label = bar.pen_btn:getSize(), bar.pen_btn.label_widget
+                fits = fits and size.w == before.w and size.h == before.h
+                    and label:getSize().h <= bar.pen_btn.height
+                    and label.line_with_ellipsis == nil
+                if label.isTruncated then fits = fits and not label:isTruncated() end
+                if label.face then min_font = math.min(min_font, label.face.orig_size) end
+            end
+        end
+    end
+    claim("document pen labels preserve real Button geometry and fit all nine choices",
+        true, fits, before.w .. "x" .. before.h .. "; minimum font " .. min_font)
+
+    -- Real notebook button sizing, including longer localized labels. The
+    -- full ReaderUI smoke checks that the editor wires this fitting in.
+    local Editor = require("ink_notebook_editor")
+    local Layout = require("ink_notebook_layout")
+    local layout = assert(Layout.compute{ logical_w = 1184, logical_h = 1680 })
+    local host = { control_entries = {} }
+    local rect = { w = layout.rail_rect.w, h = layout.target_size }
+    local notebook_fits, notebook_font = true, math.huge
+    for _, style in ipairs({ "Ink pen", "Graphite", "Marker", "Pluma de tinta", "Grafito", "Marcador" }) do
+        for _, width in ipairs({ "Thin", "Medium", "Thick", "Fino", "Mediano", "Grueso", "Custom (5.5)" }) do
+            local button = Editor._button(host, style .. " · " .. width .. Button.checkmark,
+                true, function() end, rect)
+            PenDialog.fitButton(button)
+            local size, label = button:getSize(), button.label_widget
+            notebook_fits = notebook_fits and size.w == rect.w and size.h == rect.h
+                and label:getSize().h <= button.height and label.line_with_ellipsis == nil
+            if label.isTruncated then notebook_fits = notebook_fits and not label:isTruncated() end
+            if label.face then notebook_font = math.min(notebook_font, label.face.orig_size) end
+            button:free()
+        end
+    end
+    claim("notebook pen labels fit English, Spanish and custom widths without ellipsis",
+        true, notebook_fits, rect.w .. "x" .. rect.h .. "; minimum font " .. notebook_font)
+    local palette = PenDialog.show{
+        get_style = function() return Style.GRAPHITE end,
+        get_width = function() return 4 end,
+        marker_allowed = function() return true end,
+        set_choice = function() return true end,
+        show_modal = function(dialog) return dialog end,
+        close_modal = function() end,
+    }
+    local relayed, marks = true, 0
+    for row = 1, 3 do
+        for column = 1, 3 do
+            local button = palette.layout[row][column]
+            relayed = relayed and button.checked_func == nil
+                and button.no_refresh_checkmark == true
+            if button.text:find(Button.checkmark, 1, true) then marks = marks + 1 end
+        end
+    end
+    claim("pen palette carries one text mark and no post-callback check refresh",
+        true, relayed and marks == 1)
+    palette:free()
+    bar:free()
+end
+
 for _, r in ipairs(rows) do
     io.write(string.format("%-12s %-56s %s\n", r[1], r[2], r[3]))
 end

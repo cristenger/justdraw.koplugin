@@ -49,6 +49,7 @@ local Limits = require("ink_limits")
 local LiveRefresh = require("ink_live_refresh")
 local Render = require("ink_render")
 local RefreshDialog = require("ink_refresh_dialog")
+local PenDialog = require("ink_pen_dialog")
 local Router = require("ink_contact_router")
 local Stack = require("ink_stack")
 local Store = require("ink_store")
@@ -3829,12 +3830,20 @@ end
 function JustDraw:setPenWidth(w)
     self.pen_width = w
     Compat.saveSetting(G_reader_settings, "pen_width", w)
+    self:refreshPenControls()
 end
 
 function JustDraw:setPenStyle(style)
     style = Style.normalize(style)
     self.pen_style = style
     Compat.saveSetting(G_reader_settings, "pen_style", style)
+    self:refreshPenControls()
+end
+
+function JustDraw:refreshPenControls()
+    if self.bar then self.bar:update(true) end
+    local editor = self.notebook_ui and self.notebook_ui.editor
+    if editor and not editor.closed then editor:onPenSettingsChanged() end
 end
 
 function JustDraw:getDrawingRefreshInterval()
@@ -3952,36 +3961,44 @@ function JustDraw:showBarChoices(title, options)
     return self:showReaderModal(dialog)
 end
 
+function JustDraw:showPenSettingsDialog()
+    local lease = self.input_lease
+    if lease and lease:hasActiveContact() then return nil, "contact_active" end
+    local session, document_session, bar = self.session, self.document_session, self.bar
+    local canvas_open = self.canvas_open
+    local dialog
+    return PenDialog.show{
+        get_style = function() return self.pen_style end,
+        get_width = function() return self.pen_width end,
+        marker_allowed = function() return self:markerAvailable() end,
+        set_choice = function(style, width)
+            local current_lease = self.input_lease
+            if current_lease and current_lease:hasActiveContact() then
+                return nil, "contact_active"
+            end
+            if not self.reader_modals or not self.reader_modals[dialog]
+                or self.session ~= session or self.document_session ~= document_session
+                or self.bar ~= bar or self.canvas_open ~= canvas_open then
+                return nil, "stale_dialog"
+            end
+            self:setPenStyle(style)
+            self:setPenWidth(width)
+            return true
+        end,
+        show_modal = function(widget)
+            dialog = widget
+            return self:showReaderModal(widget)
+        end,
+        close_modal = function(widget) return self:closeReaderModal(widget) end,
+    }
+end
+
 function JustDraw:showPenStyleDialog()
-    local function style(text, value, enabled)
-        return {
-            text = text,
-            enabled = enabled ~= false,
-            checked_func = function() return self.pen_style == value end,
-            callback = function() self:setPenStyle(value) end,
-        }
-    end
-    return self:showBarChoices(_("Pen style"), {
-        style(_("Ink pen"), Style.PEN),
-        style(_("Graphite"), Style.GRAPHITE),
-        -- The book's page is not ours to fill; the marker needs a sheet.
-        style(_("Marker"), Style.MARKER, self:markerAvailable()),
-    })
+    return self:showPenSettingsDialog()
 end
 
 function JustDraw:showPenWidthDialog()
-    local function width(text, w)
-        return {
-            text = text,
-            checked_func = function() return self.pen_width == w end,
-            callback = function() self:setPenWidth(w) end,
-        }
-    end
-    return self:showBarChoices(_("Pen width"), {
-        width(_("Thin"), PEN_THIN),
-        width(_("Medium"), PEN_MEDIUM),
-        width(_("Thick"), PEN_THICK),
-    })
+    return self:showPenSettingsDialog()
 end
 
 function JustDraw:showDrawingRefreshDialog()
@@ -4033,10 +4050,8 @@ function JustDraw:showBarMenu()
         end
     end
     local rows = {
-        { { text = _("Pen style"),
-            callback = pick(function() self:showPenStyleDialog() end) } },
-        { { text = _("Pen width"),
-            callback = pick(function() self:showPenWidthDialog() end) } },
+        { { text = _("Pen settings"),
+            callback = pick(function() self:showPenSettingsDialog() end) } },
         { { text = _("Drawing refresh"),
             callback = pick(function() self:showDrawingRefreshDialog() end) } },
         { { text = _("Input mode"),

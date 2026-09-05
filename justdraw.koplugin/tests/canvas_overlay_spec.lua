@@ -41,7 +41,9 @@ return function(ctx)
     --- A plugin stand-in: the toolbar's four callbacks and the two flags its
     --- labels read.
     local function stubPlugin()
-        local p = { drawing = true, eraser = false, calls = {} }
+        local p = { drawing = true, eraser = false, pen_width = 4, calls = {} }
+        function p:effectiveStyle() return 1 end
+        function p:showPenSettingsDialog() self.calls[#self.calls + 1] = "pen_settings" end
         function p:setDrawing(on) self.calls[#self.calls + 1] = "draw" ; self.drawing = on end
         function p:setEraser(on) self.calls[#self.calls + 1] = "eraser" ; self.eraser = on end
         function p:onJustDrawUndo() self.calls[#self.calls + 1] = "undo" end

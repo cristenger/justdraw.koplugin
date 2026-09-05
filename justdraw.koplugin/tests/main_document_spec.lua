@@ -1003,10 +1003,20 @@ return function(ctx)
             "a page's ink layer is a surface this plugin owns end to end")
         t:eq(p:diagnosticSource(), "page_ink",
             "and a trace taken here is not labelled direct ink")
+        local palette = p:showPenSettingsDialog()
+        for _, cell in ipairs(palette.buttons[3]) do
+            t:eq(cell.enabled, true, "PDF palette offers the marker at every width")
+        end
+        p:closeReaderModal(palette)
         local plain = documentPlugin{ stylus_api = false }
         t:eq(plain:markerAvailable(), false,
             "the framebuffer of the v2026.03 route still is not ours to fill")
         t:eq(plain:diagnosticSource(), "direct", "and it is direct ink")
+        palette = plain:showPenSettingsDialog()
+        for _, cell in ipairs(palette.buttons[3]) do
+            t:eq(cell.enabled, false, "legacy palette preserves the capability gate")
+        end
+        plain:closeReaderModal(palette)
     end)
 
     -- =================================================================
