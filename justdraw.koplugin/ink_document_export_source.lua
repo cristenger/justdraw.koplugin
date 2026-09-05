@@ -33,9 +33,9 @@ long book exports its first hundred pages and reports success. The cursor is
 checked for progress too, because a repository that answered the same last row
 twice would otherwise spin here forever.
 
-What this is not: a reconstruction of the book. The pages of the document
-itself are not here and cannot be (ADR-40) -- a CREngine page cannot be
-rendered without emitting `PageUpdate`, and an export is a read.
+Document content has separate renderers: MuPDF pages use their own draw
+context, while full EPUB conversion runs CREngine in an isolated process.
+This module remains responsible for the notes dossier.
 ]]
 
 local Blitbuffer = require("ffi/blitbuffer")
@@ -46,74 +46,13 @@ local Raster = require("ink_export_raster")
 local Render = require("ink_render")
 local Style = require("ink_style")
 
-local T = require("ffi/util").template
-local _ = require("gettext")
-
 local DocumentSource = {}
 
---- What each kind is called in the header band. Short, because it shares one
---- line with the book's name and the location.
-function DocumentSource.kindLabel(kind)
-    if kind == "page_ink" then return _("Page note") end
-    if kind == "legacy_page" then return _("Legacy ink") end
-    return _("Drawing sheet")
-end
-
---[[--
-Where a note sits, in words.
-
-Three answers rather than two: a page number, a page number that is only what
-the sidecar recorded, and an admission. "Stored page" is not pedantry -- the
-sidecar's page number is the only thing about legacy ink that survived, and
-the geometry around it did not (ADR-40).
-]]
-function DocumentSource.locationLabel(kind, page)
-    if not page then return _("Location unavailable") end
-    if kind == "legacy_page" then return T(_("Stored page %1"), page) end
-    return T(_("Page %1"), page)
-end
-
-local function descriptor(spec)
-    return {
-        kind = spec.kind,
-        page = spec.page,
-        surface = spec.surface,
-        repository = spec.repository,
-        logical_w = spec.logical_w,
-        logical_h = spec.logical_h,
-        units = spec.units,
-        location_label = DocumentSource.locationLabel(spec.kind, spec.page),
-        legacy = spec.kind == "legacy_page",
-    }
-end
-
---- The tie-break inside one page, and the whole order among orphans. A row id
---- for a surface, the page itself for legacy ink -- which is unique, because
---- the sidecar is keyed by page.
-local function idOf(item)
-    if item.surface and tonumber(item.surface.id) then
-        return tonumber(item.surface.id)
-    end
-    return tonumber(item.page) or 0
-end
-
---[[--
-The dossier's order: page, then legacy first, then id.
-
-`table.sort` is not stable in Lua, so this has to be a total order or the
-answer depends on the sort's internals. Every branch ends in a comparison that
-cannot tie except for an item with itself.
-]]
-local function byLocation(a, b)
-    if a.page and b.page then
-        if a.page ~= b.page then return a.page < b.page end
-        if a.legacy ~= b.legacy then return a.legacy end
-        return idOf(a) < idOf(b)
-    end
-    if a.page then return true end      -- placed before orphaned
-    if b.page then return false end
-    return idOf(a) < idOf(b)
-end
+local Note = require("ink_document_note")
+DocumentSource.kindLabel = Note.kindLabel
+DocumentSource.locationLabel = Note.locationLabel
+local descriptor = Note.new
+local byLocation = Note.before
 
 local function positive(v)
     return type(v) == "number" and v == v and v > 0 and v ~= math.huge
@@ -247,8 +186,10 @@ function DocumentSource.documentNotes(opts)
     ok, err = legacyPages(opts, items, max_pages)
     if not ok then return nil, err end
 
+    for _,item in ipairs(opts.native or {}) do items[#items+1]=item end
     if #items == 0 then return nil, "empty" end
     if #items > max_pages then return nil, "too_many_pages" end
+    if opts.memberships then items=Note.group(items,opts.memberships) end
     table.sort(items, byLocation)
     return items
 end
@@ -417,6 +358,9 @@ function DocumentSource.renderer(opts)
     local legacy_render = legacyRenderer(opts)
     return function(item, index, done)
         done = withHeader(opts.header, item, done)
+        if item.native then
+            return opts.schedule(function() done(require("ink_native_text").render(item)) end)
+        end
         if item.kind == "legacy_page" then
             return legacy_render(item, index, done)
         end

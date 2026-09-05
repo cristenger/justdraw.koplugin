@@ -126,11 +126,72 @@ stored. The proposed file name carries the page number when you are exporting
 a single page, and you can change it. If the folder looks too full you are
 asked before anything is written, and if an earlier export was interrupted
 you are offered its leftovers to delete. The PDF is a raster: the ink is a
-picture, not editable vectors. Exporting the book's own pages with the notes
-on them, and exporting a page of a reflowable book directly, are not
-implemented.
+picture, not editable vectors.
+
+**Browse document notes.** Open **JustDraw → Document notes** or the drawing
+toolbar's **More → Document notes**. The list brings together this book's
+drawing sheets, page notes, legacy ink and KOReader's typed notes, highlights
+and bookmarks. Each entry shows its location and
+chapter when available. Tap an entry to read it with zoom and pan, move to the
+previous or next note, or go to its position in the document. Reopening the
+list preserves the list page, filter, order and selection for that document.
+Notes whose EPUB anchor no longer resolves remain readable and exportable.
+
+Filter by chapter, page range, note type or missing location, and sort by
+document position or last change. **Select** marks individual notes;
+**Export…** also offers selection of the current list page or all filtered
+results. Export all notes, filtered results or the exact selection as a
+dossier. Search typed annotation text, read it in a text viewer, or choose
+**Edit in KOReader** to open that annotation's native details. KOReader keeps
+ownership of native annotations; JustDraw reads them without copying them into
+its database. Long typed notes continue across as many output pages as needed.
+
+A drawing note can contain multiple sheets. From its detail, use **Actions →
+Add sheet at end** to extend it, or **Organize sheets** to move any sheet to a
+numbered position. Previous/next sheet controls follow that order; **Edit in
+document** opens the sheet being viewed. Selecting a note exports all its
+sheets. Existing sheets retain their ink and anchors. Canvas schema v4 adds
+group membership and sheet order, with a backup before upgrading v3.
+
+For PDF documents, the same export menu offers **Annotated pages as images**
+and **Complete document as images**. The latter includes every source page,
+even pages without notes. Choose 150 or 300 dpi; large pages are reduced to
+fit an 8 megapixel raster budget. The output is grayscale and loses selectable
+text and links. Legacy ink is appended separately because its original
+position cannot be reconstructed. Native annotations follow as text pages
+in the appendix. Export writes independent files without navigating the reader.
+
+For EPUB, **Complete EPUB with notes appendix** converts the entire book to
+A5 grayscale pages at 150 or 300 dpi, followed by drawing sheets and native
+annotations. Appendix headers identify both the source location and the page
+in the exported layout. A separate CREngine process handles layout and page
+rendering; the reader retains its position and layout. Output is PDF, PNG or
+JPEG, with raster text and no interactive links. It does not create a new EPUB.
+
+The list loads metadata in batches and creates widgets only for the visible
+rows. One note raster is held for detail reading. PDF output is committed
+only after the entire job succeeds; cancelling an image sequence keeps any
+images already completed. Each export supports at most 5,000 output pages,
+including continuation sheets and the appendix.
 
 ## Development
+
+The notes browser's native integration check runs in a KOReader build with
+a fresh temporary profile. It exercises real ReaderUI, SQLite, PDF and EPUB,
+portrait/landscape widgets, full PDF export, orphan notes and cancellation:
+
+```sh
+# From <koreader-build>/koreader:
+KO_HOME=$(mktemp -d /tmp/justdraw-notes.XXXXXX) ./luajit /path/to/justdraw/justdraw.koplugin/tests/document_notes_native_check.lua
+```
+
+The focused preview regression drives KOReader's actual window stack and deferred
+repaint queue, including closing before first paint and native Find/keyboard
+stacking. It runs separately from the pure LuaJIT suite because it needs SDL:
+
+```sh
+KO_HOME=$(mktemp -d /tmp/justdraw-modal.XXXXXX) EMULATE_READER_W=400 EMULATE_READER_H=600 ./luajit /path/to/justdraw/justdraw.koplugin/tests/document_notes_modal_native.lua
+```
 
 Run the test suite from the repository root:
 

@@ -127,11 +127,12 @@ in it is owed "not yet" (ADR-42) rather than a missing option.
 function Controller:notesScope()
     local legacy = self.legacy and self.legacy()
     local has_legacy = legacy ~= nil and not legacy:isEmpty()
+    local has_native = self.ui.annotation and #self.ui.annotation.annotations > 0
     local session = self.session()
     if session and session:isAvailable() then
         local _repository, index = session:exportSources()
         local sheets = (index and index:count()) or 0
-        if sheets == 0 and not has_legacy then return nil end
+        if sheets == 0 and not has_legacy and not has_native then return nil end
         if not index or not index:isComplete() then
             return { value = "notes", label = _("Document notes"),
                 enabled = false, reason = "index_incomplete" }
@@ -143,7 +144,7 @@ function Controller:notesScope()
     if document and document:isAvailable() then
         notes = document:countSurfaces()
     end
-    if notes == 0 and not has_legacy then return nil end
+    if notes == 0 and not has_legacy and not has_native then return nil end
     return { value = "notes", label = _("Document notes") }
 end
 
@@ -157,6 +158,7 @@ actually chosen.
 ]]
 function Controller:canExport()
     if self.docless then return false end
+    if self.ui.annotation and #self.ui.annotation.annotations > 0 then return true end
     if ExportReader.supports(self.ui, self.view) then return true end
     -- The sidecar is a note like any other now (ADR-40), and asking it is one
     -- `next` over a table. Without this the dossier would be unreachable in
@@ -265,6 +267,7 @@ index, a fixed layout has page-ink rows and a book id. Legacy ink is on both.
 ]]
 function Controller:notesSource()
     local spec = {
+        native = require("ink_native_annotations").snapshot(self.ui),
         legacy = self.legacy and self.legacy(),
         screen = self:screenSize(),
     }
@@ -285,6 +288,11 @@ function Controller:notesSource()
         local canvases, list_err = session:allCanvases()
         if not canvases then return nil, list_err or "list_failed" end
         spec.repository, spec.index, spec.canvases = repository, index, canvases
+        if repository._select and session.book_id then
+            local memberships,err=require("ink_note_repository").new(repository):memberships(session.book_id)
+            if not memberships then return nil,err end
+            spec.memberships=memberships
+        end
         return spec
     end
     local document = self.document_session and self.document_session()
@@ -448,33 +456,7 @@ function Controller:build(scope)
         if not spec then return nil, spec_err end
         local items, items_err = DocumentSource.documentNotes(spec)
         if not items then return nil, items_err end
-        local tracker = {}
-        return {
-            items = items,
-            pixels = DocumentSource.totalPixels(items),
-            flush = function() return self:flushSurfaces() end,
-            render = DocumentSource.renderer{
-                schedule = self.schedule,
-                legacy = spec.legacy,
-                ink = self.ink,
-                track = function(job) tracker.job = job end,
-                header = {
-                    -- The book, not the file name: the name is the reader's
-                    -- and carries a timestamp, and a timestamp on every page
-                    -- of forty says nothing about which page this is.
-                    title = self:bookName(),
-                    paint_text = ExportHeader.textPainter(),
-                },
-            },
-            finish = function()
-                if tracker.job then tracker.job:close() end
-            end,
-            cancel = function()
-                if tracker.job then tracker.job:close() end
-            end,
-            confirm_warning = DocumentSource.includesLegacy(items)
-                and Controller.LEGACY_WARNING or nil,
-        }
+        return self:buildNotes(items, "notes")
     end
 
     local session = self.session()
@@ -518,6 +500,63 @@ function Controller:build(scope)
             if tracker.job then tracker.job:close() end
         end,
     }
+end
+
+--- Browser supplies a frozen selection of descriptors, never just visible rows.
+function Controller:buildNotes(notes, mode, dpi)
+    local lease = self.lease()
+    if lease and lease:hasActiveContact() then return nil, "contact_active" end
+    local items = {}
+    for _, item in ipairs(notes) do
+        for _, leaf in ipairs(item.sheets or {item}) do
+            local pages={leaf}
+            if leaf.native and not leaf.text_chunk then
+                local ok,value=pcall(require("ink_native_text").pages,leaf)
+                if not ok then return nil,value end
+                pages=value
+            end
+            for _,page in ipairs(pages)do items[#items+1]=page end
+            if #items>ExportSource.MAX_PAGES then return nil,"too_many_pages" end
+        end
+    end
+    local tracker = {}
+    local function close()
+        tracker.closed = true
+        if tracker.job then tracker.job:close(); tracker.job = nil end
+        if tracker.release then tracker.release(); tracker.release = nil end
+    end
+    local opts = {
+        schedule = self.schedule, legacy = self.legacy and self.legacy(), ink = self.ink,
+        track = function(job) tracker.job = job end,
+        tracker = tracker, document = self.ui.document, dpi = dpi or 150,
+        header = {title = self:bookName(), paint_text = ExportHeader.textPainter()},
+    }
+    local render, warning, pixels
+    if mode == "full" or mode == "context" then
+        if dpi and dpi ~= 150 and dpi ~= 300 then return nil, "bad_quality" end
+        local Full = require("ink_document_export_full")
+        if not Full.supports(self.ui) then return nil, "unsupported_document" end
+        local err
+        items, err = Full.items(self.ui.document:getPageCount(), items, mode == "context")
+        if not items then return nil, err end
+        render = Full.renderer(opts)
+        warning = _("This creates document pages as grayscale images. Text will not be selectable and links will not be preserved. Native annotations are included as text pages in an appendix.")
+        if DocumentSource.includesLegacy(notes) then
+            warning = warning .. "\n\n" .. _("Legacy ink is included separately after the document pages, because its original position cannot be reconstructed.")
+        end
+        -- A conservative upper bound avoids measuring every page before the job.
+        pixels = #items * ExportRaster.MAX_PIXELS
+    else
+        if #items == 0 then return nil, "empty" end
+        render = DocumentSource.renderer(opts)
+        pixels = DocumentSource.totalPixels(items)
+        warning = DocumentSource.includesLegacy(items) and Controller.LEGACY_WARNING or nil
+    end
+    if #items > ExportSource.MAX_PAGES then return nil, "too_many_pages" end
+    return {items = items, pixels = pixels, render = render,
+        flush = function() return self:flushSurfaces() end,
+        finish = close, cancel = close, confirm_warning = warning,
+        progress_interval = (mode == "full" or mode == "context") and 5 or nil}
 end
 
 function Controller:showDialog()

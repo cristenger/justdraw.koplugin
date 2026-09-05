@@ -75,7 +75,10 @@ local function messages()
         unsupported_document = _("This document can’t be exported yet. Only fixed-layout documents, such as PDFs, can."),
         unsupported_mode = _("Turn off continuous scrolling to export the page you’re reading."),
         too_large = _("This page is too large to export."),
-        too_many_pages = _("This notebook has too many pages to export at once."),
+        too_many_pages = _("This selection has too many pages to export at once. Export a smaller range."),
+        page_size_changed = _("A note’s page size no longer matches the document. Export the notes separately."),
+        bad_surface = _("This note’s saved data cannot be read. Nothing was exported."),
+        epub_worker_failed = _("The EPUB conversion stopped. The original document was not changed."),
         bad_geometry = _("This page’s size can’t be used for an export."),
         contact_active = _("Lift the pen and try again."),
         rename_failed = _("The exported file couldn’t be put in place. Check the folder and try again."),
@@ -231,6 +234,15 @@ notebook that cannot be enumerated or a sheet index that is still building
 stops here with a sentence rather than halfway through a file.
 ]]
 function Dialog.run(opts)
+    if opts.build_async then
+        opts.build_async(function(built,err)
+            if not built then return opts.notify(Dialog.reason(err)) end
+            local prepared={};for k,v in pairs(opts)do prepared[k]=v end
+            prepared.build_async=nil;prepared.build=function()return built end
+            Dialog.run(prepared)
+        end)
+        return
+    end
     local built, build_err = opts.build(opts.scope)
     if not built then
         opts.notify(Dialog.reason(build_err))
@@ -238,7 +250,7 @@ function Dialog.run(opts)
     end
 
     local zlib_ok, zlib = pcall(require, "ffi/zlib")
-    local progress
+    local progress, last_progress = nil, 0
     local function closeProgress()
         if progress then
             opts.close_modal(progress)
@@ -273,6 +285,15 @@ function Dialog.run(opts)
             token = opts.token,
             schedule = opts.schedule or function(fn) UIManager:nextTick(fn) end,
             compress = zlib_ok and zlib.zlib_compress or nil,
+            on_progress = built.progress_interval and function(index, total)
+                -- Long document exports need feedback, capped to avoid a flash per page.
+                local now = os.time()
+                if progress and now - last_progress >= built.progress_interval then
+                    last_progress = now
+                    progress:setTitle(T(_("Exporting… %1 / %2 pages"), index, total))
+                    UIManager:setDirty(progress, "ui")
+                end
+            end or nil,
             on_done = function(result)
                 closeProgress()
                 if built.finish then pcall(built.finish, result) end
@@ -467,6 +488,7 @@ function Dialog.show(opts)
         Compat.saveSetting(settings, Dialog.SETTING_FORMAT, state.format)
         Dialog.run{
             build = opts.build,
+            build_async = opts.build_async,
             scope = state.scope,
             format = state.format,
             dir = state.dir,

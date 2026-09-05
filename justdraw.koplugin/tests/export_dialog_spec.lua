@@ -46,7 +46,7 @@ return function(ctx)
             "rename_failed", "encode_failed", "pdf_failed", "write_failed",
             "render_failed", "bad_raster", "no_repository", "list_failed",
             "flush_failed", "export_busy", "internal_error", "unavailable",
-            "sweep_failed",
+            "sweep_failed", "page_size_changed", "bad_surface", "epub_worker_failed",
         }
         -- The list is the claim, so it has to be the whole of `Dialog.reason`.
         -- Anything the module defines and this misses is a code that could

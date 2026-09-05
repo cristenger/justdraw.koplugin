@@ -607,7 +607,7 @@ return function(ctx)
         t:check(delivered ~= nil, "delivered: " .. tostring(reason))
         t:eq(delivered.bb:getHeight(), 800 + Header.BAND_PX,
             "the note grew by the band")
-        t:eq(rec.calls[1].text, "Moby Dick · Legacy ink · Stored page 3",
+        t:eq(rec.calls[1].text, "Moby Dick · Legacy ink\nStored page 3",
             "which says what this page is")
         delivered.release()
     end)
@@ -632,7 +632,7 @@ return function(ctx)
         sched:drain()
         t:check(delivered ~= nil, "delivered: " .. tostring(reason))
         t:eq(delivered.bb:getHeight(), 200 + Header.BAND_PX, "with its band")
-        t:eq(rec.calls[1].text, "Moby Dick · Drawing sheet · Page 2",
+        t:eq(rec.calls[1].text, "Moby Dick · Drawing sheet\nPage 2",
             "named for what it is")
         -- The band adds points as well as pixels, or the PDF would squeeze
         -- the whole composed page into the note's own height.

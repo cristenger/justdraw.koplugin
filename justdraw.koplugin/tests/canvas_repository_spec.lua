@@ -874,8 +874,10 @@ CREATE INDEX strokes_by_canvas ON strokes(canvas_id, seq);
         return repo, driver, backups, err
     end
 
-    t:case("the schema version is 2 and the fresh schema declares both surfaces", function()
-        t:eq(Repository.SCHEMA_VERSION, 2, "version 2")
+    t:case("the current schema declares both surfaces and visual order", function()
+        t:eq(Repository.SCHEMA_VERSION, 4, "version 4")
+        t:check(Repository.SCHEMA:find("paint_seq    INTEGER", 1, true) ~= nil,
+            "visual order is independent of the unique edit sequence")
         local schema = squash(Repository.SCHEMA)
         t:check(schema:find(squash([[surface_role TEXT NOT NULL DEFAULT 'sheet']]), 1, true) ~= nil,
             "surface_role defaults to sheet, so every existing row stays one")
@@ -941,18 +943,19 @@ CREATE INDEX strokes_by_canvas ON strokes(canvas_id, seq);
     t:case("a v1 database is migrated by the real ladder, backup first", function()
         local repo, driver, backups = realMigratingRepo()
         t:check(repo ~= nil, "opened")
-        t:eq(repo.version, 2, "at version 2")
+        t:eq(repo.version, 4, "at version 4")
         local conn = driver.last()
         local begin_at = conn:indexOf("BEGIN")
         local role_at = conn:indexOf("ADD COLUMN surface_role")
         local space_at = conn:indexOf("ADD COLUMN coordinate_space")
         local index_at = conn:indexOf("CREATE INDEX canvases_by_book_role_page")
-        local stamp_at = conn:indexOf("PRAGMA user_version=2")
+        local order_at = conn:indexOf("ALTER TABLE strokes ADD COLUMN paint_seq")
+        local stamp_at = conn:indexOf("PRAGMA user_version=4")
         local commit_at = conn:indexOf("COMMIT")
-        t:check(begin_at and role_at and space_at and index_at and stamp_at and commit_at,
+        t:check(begin_at and role_at and space_at and index_at and order_at and stamp_at and commit_at,
             "every step ran")
         t:check(begin_at < role_at and role_at < space_at and space_at < index_at
-            and index_at < stamp_at and stamp_at < commit_at, "in that order")
+            and index_at < order_at and order_at < stamp_at and stamp_at < commit_at, "in that order")
         t:eq(conn:saw("UPDATE canvases"), false, "no row was rewritten to fill the columns in")
         t:eq(#backups, 1, "exactly one backup")
         t:eq(backups[1].dest, PATH .. ".backup-v1", "named for the version it holds")

@@ -863,6 +863,10 @@ function JustDraw:onDispatcherRegisterActions()
         category = "none", event = "JustDrawNotebooks", general = true,
         title = _("JustDraw: open notebooks"),
     })
+    Dispatcher:registerAction("justdraw_document_notes", {
+        category = "none", event = "ShowDocumentNotes", reader = true,
+        title = _("JustDraw: browse document notes"),
+    })
     -- Also post-rename, so no legacy identity. A sheet exists only over a
     -- document, and this was `reader` at first for that reason -- but on
     -- device that buried the action at the bottom of the gesture manager's
@@ -1018,6 +1022,7 @@ function JustDraw:onSuspend()
     -- that is still reading through them; and the reader cannot answer a
     -- progress modal that is no longer on screen.
     Export.cancelRunning()
+    if self.notes_controller then self.notes_controller:close() end
     if self.notebooks then self.notebooks:onSuspend() end
     if not self.is_docless then self:setDrawing(false) end
 end
@@ -1040,6 +1045,7 @@ function JustDraw:teardown()
     -- Closing the document takes its repository with it, and a raster still
     -- replaying through that connection would be reading a closed one.
     Export.cancelRunning()
+    if self.notes_controller then self.notes_controller:close() end
     -- The screen this was refreshing is going away; a timer holding a box of
     -- it must not outlive the plugin instance (ADR-43).
     if self.live_refresh then self.live_refresh:close() end
@@ -1184,6 +1190,7 @@ function JustDraw:_applyScreenResize()
     -- The page moved under the reader, and every number the page-ink transform
     -- is built from came from the view that just changed shape.
     self:scheduleDocumentViewRefresh()
+    if self.notes_controller then self.notes_controller:onScreenResize() end
 end
 
 function JustDraw:onScreenResize()
@@ -1235,11 +1242,25 @@ end
 --- Font, margin or line-height change. The page index is rebuilt; not one
 --- stroke is read, written or moved.
 function JustDraw:onDocumentRerendered()
+    if self.notes_controller and self.notes_controller.browser then
+        self.notes_controller:close()
+    end
     if self.session then
         self.session:invalidate()
         self:refreshCanvasPlacement()
     end
     self:abandonBlindContact("document_rerendered")
+end
+
+function JustDraw:onAnnotationsModified()
+    local notes=self.notes_controller
+    if not notes or not notes.browser then return end
+    local document=self.ui.document
+    notes:close()
+    local generation=notes.generation
+    UIManager:nextTick(function()
+        if self.ui.document==document and notes.generation==generation then notes:open()end
+    end)
 end
 
 --[[--
@@ -4050,6 +4071,8 @@ function JustDraw:showBarMenu()
         end
     end
     local rows = {
+        { { text = _("Document notes"),
+            callback = pick(function() self:onShowDocumentNotes() end) } },
         { { text = _("Pen settings"),
             callback = pick(function() self:showPenSettingsDialog() end) } },
         { { text = _("Drawing refresh"),
@@ -4513,6 +4536,14 @@ function JustDraw:showExportDialog()
     return self.export_controller:showDialog()
 end
 
+function JustDraw:onShowDocumentNotes()
+    if self.is_docless then return false end
+    if not self.notes_controller then
+        self.notes_controller = require("ink_document_notes_controller").new(self)
+    end
+    return self.notes_controller:open()
+end
+
 function JustDraw:addToMainMenu(menu_items)
     if self.is_docless then
         menu_items.justdraw_notebooks = {
@@ -4539,6 +4570,11 @@ function JustDraw:addToMainMenu(menu_items)
         text = MENU_JUSTDRAW,
         sorting_hint = "tools",
         sub_item_table = {
+            {
+                text = _("Document notes"),
+                help_text = _("Browse every JustDraw note in this book, read it at full size, go to its location, or export a selection."),
+                callback = function() self:onShowDocumentNotes() end,
+            },
             {
                 text = _("Notebooks"),
                 callback = function() self:openNotebookLibrary() end,

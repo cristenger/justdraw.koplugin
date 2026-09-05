@@ -43,7 +43,7 @@ Repository.__index = Repository
 
 --- Bumped when the schema changes. Every bump needs a MIGRATIONS entry for the
 --- version below it, or opening an older database refuses rather than guesses.
-Repository.SCHEMA_VERSION = 2
+Repository.SCHEMA_VERSION = 4
 
 --- `MIGRATIONS[v]` upgrades a database at version v to version v + 1. A step is
 --- DDL and nothing else: `_migrate` owns the checkpoint, the backup copy, the
@@ -119,6 +119,7 @@ CREATE TABLE strokes (
     max_x        REAL    NOT NULL,
     max_y        REAL    NOT NULL,
     created_at   INTEGER NOT NULL,
+    paint_seq    INTEGER,
     UNIQUE(canvas_id, seq)
 );
 CREATE TABLE stroke_chunks (
@@ -155,6 +156,30 @@ Repository.MIGRATIONS[1] = function(conn)
     conn:exec(
         "CREATE INDEX canvases_by_book_role_page ON canvases(book_id, surface_role, fixed_page, id);")
 end
+
+-- Existing strokes keep their original visual order without rewriting rows.
+-- The outer migration owns backup, transaction and version stamp (ADR-46).
+Repository.MIGRATIONS[2] = function(conn)
+    conn:exec("ALTER TABLE strokes ADD COLUMN paint_seq INTEGER;")
+end
+
+-- Existing sheets stay independent until the reader adds another sheet.
+-- Their strokes and anchor keys are untouched by this metadata-only migration.
+local NOTE_SCHEMA = [[
+CREATE TABLE document_notes (
+    id INTEGER PRIMARY KEY,
+    book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE
+);
+CREATE TABLE document_note_sheets (
+    canvas_id INTEGER PRIMARY KEY REFERENCES canvases(id) ON DELETE CASCADE,
+    note_id INTEGER NOT NULL REFERENCES document_notes(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    UNIQUE(note_id, position)
+);
+CREATE INDEX document_notes_by_book ON document_notes(book_id);
+]]
+Repository.SCHEMA = Repository.SCHEMA .. NOTE_SCHEMA
+Repository.MIGRATIONS[3] = function(conn) conn:exec(NOTE_SCHEMA) end
 
 -- ------------------------------------------------------------------ helpers
 
@@ -955,14 +980,18 @@ function Repository:addStroke(canvas, stroke)
         seq = self:nextSeq(canvas.id)
         if not seq then return nil, "no_seq" end
     end
+    local paint_seq = stroke.paint_seq or seq
+    if not finite(paint_seq) or paint_seq < 1 or paint_seq ~= math.floor(paint_seq) then
+        return nil, "bad_stroke"
+    end
 
     return self:transaction(function()
         local ok, err = self:_run([[
             INSERT INTO strokes (canvas_id, seq, width, tool, codec, point_count,
-                                 min_x, min_y, max_x, max_y, created_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11);]],
+                                 min_x, min_y, max_x, max_y, created_at, paint_seq)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12);]],
             { canvas.id, seq, stroke.width, stroke.tool, Codec.VERSION, n,
-              min_x, min_y, max_x, max_y, self.now() })
+              min_x, min_y, max_x, max_y, self.now(), paint_seq })
         if not ok then return nil, err end
 
         local id, ierr = self:_lastId()
@@ -985,12 +1014,13 @@ function Repository:addStroke(canvas, stroke)
     end)
 end
 
---- Metadata for every stroke of a canvas, in drawing order. No points.
+--- Metadata in edit order. Raster consumers sort by paint_seq, then seq. No points.
 function Repository:listStrokes(canvas_id)
     local ready, reason = self:_ready(false)
     if not ready then return nil, reason end
     return self:_select([[
-        SELECT id, seq, width, tool, codec, point_count, min_x, min_y, max_x, max_y
+        SELECT id, seq, width, tool, codec, point_count, min_x, min_y, max_x, max_y,
+               COALESCE(paint_seq, seq)
           FROM strokes WHERE canvas_id = ?1 ORDER BY seq;]],
         { canvas_id },
         function(row)
@@ -1005,6 +1035,7 @@ function Repository:listStrokes(canvas_id)
                 min_y       = num(row[8]),
                 max_x       = num(row[9]),
                 max_y       = num(row[10]),
+                paint_seq   = num(row[11]) or num(row[2]),
             }
         end)
 end

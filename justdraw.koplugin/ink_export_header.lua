@@ -153,7 +153,7 @@ function Header.compose(opts)
     bb:paintRect(0, Header.BAND_PX - 1, w, 1, BB.COLOR_GRAY)
 
     local text = tostring(opts.title or "") .. " · "
-        .. tostring(opts.kind_label or "") .. " · "
+        .. tostring(opts.kind_label or "") .. "\n"
         .. tostring(opts.location_label or "")
     local max_width = w - 2 * Header.PAD_PX
     if type(opts.paint_text) == "function" and max_width > 0 then
@@ -199,7 +199,7 @@ actually stop fitting, which is not something the caller can compute.
 function Header.textPainter(opts)
     opts = opts or {}
     local box = tonumber(opts.box) or Header.TEXT_BOX_PX
-    local TextWidget, Font, face
+    local TextWidget, Font, faces
 
     -- Resolved at the first line painted rather than here: a painter is built
     -- for every dossier, including in a host that has no widget layer at all,
@@ -210,14 +210,14 @@ function Header.textPainter(opts)
         Font = opts.Font or require("ui/font")
     end
 
-    local function measuredFace()
+    local function measuredFace(line_box, text, max_width)
         local size = tonumber(opts.start_size) or Header.START_SIZE
         while size > Header.MIN_SIZE do
             local candidate = Font:getFace("cfont", size)
-            local probe = TextWidget:new{ text = "Hgy", face = candidate }
-            local height = probe:getSize().h
+            local probe = TextWidget:new{ text = text or "Hgy", face = candidate }
+            local dimensions = probe:getSize()
             probe:free()
-            if height <= box then return candidate end
+            if dimensions.h <= line_box and (not max_width or dimensions.w<=max_width) then return candidate end
             size = size - 1
         end
         return Font:getFace("cfont", Header.MIN_SIZE)
@@ -225,14 +225,20 @@ function Header.textPainter(opts)
 
     return function(bb, x, y, text, max_width)
         if not TextWidget then widgets() end
-        if not face then face = measuredFace() end
-        local widget = TextWidget:new{
-            text = text, face = face, max_width = max_width,
-            truncate_with_ellipsis = true,
-        }
-        local height = widget:getSize().h
-        widget:paintTo(bb, x, y)
-        widget:free()
+        local lines={};for line in (text.."\n"):gmatch("(.-)\n")do lines[#lines+1]=line end
+        local line_box=floor(box/#lines)
+        faces=faces or {}
+        if not faces[#lines] then faces[#lines]=measuredFace(line_box) end
+        local height=0
+        for i,line in ipairs(lines)do
+            -- Reserve a separate line for the location; shrink it to fit so a
+            -- long book title cannot hide source page or continuation numbers.
+            local face=i==#lines and #lines>1 and measuredFace(line_box,line,max_width) or faces[#lines]
+            local widget=TextWidget:new{text=line,face=face,max_width=max_width,truncate_with_ellipsis=true}
+            widget:paintTo(bb,x,y+height)
+            height=height+widget:getSize().h
+            widget:free()
+        end
         return height
     end
 end

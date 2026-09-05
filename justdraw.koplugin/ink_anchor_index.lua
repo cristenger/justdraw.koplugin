@@ -232,6 +232,15 @@ function Index:pageOf(canvas_id)
     return self.page_of[canvas_id]
 end
 
+--- Borrow a bounded window of metadata; no queries and no point payloads.
+function Index:metadataBatch(offset, limit)
+    local rows = {}
+    for i = offset + 1, math.min(#self.canvases, offset + limit) do
+        rows[#rows + 1] = self.canvases[i]
+    end
+    return rows, self:isComplete()
+end
+
 --[[--
 Take in a canvas that has just been created.
 

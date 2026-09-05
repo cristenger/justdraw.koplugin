@@ -2421,6 +2421,7 @@ for _, spec in ipairs({
     "export_job_spec",
     "export_reader_spec",
     "export_enumeration_spec",
+    "document_notes_spec",
     "export_header_spec",
     "export_dialog_spec",
 }) do

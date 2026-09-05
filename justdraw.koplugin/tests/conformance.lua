@@ -941,15 +941,15 @@ else
         now = function() return 1000 end,
     }
 
-    claim("canvas database: the v2 schema is accepted by SQLite",
+    claim("canvas database: the v4 schema is accepted by SQLite",
         true, repo ~= nil, tostring(open_err or db_path))
 
     if repo then
         local conn = repo.conn
 
-        claim("canvas database: user_version is stamped at 2",
-            true, tonumber(conn:rowexec("PRAGMA user_version;")) == 2
-                and Repository.SCHEMA_VERSION == 2,
+        claim("canvas database: user_version is stamped at 4",
+            true, tonumber(conn:rowexec("PRAGMA user_version;")) == 4
+                and Repository.SCHEMA_VERSION == 4,
             "user_version = " .. tostring(conn:rowexec("PRAGMA user_version;")))
 
         claim("canvas database: foreign keys are actually enforced",
@@ -1213,7 +1213,7 @@ else
     os.remove(db_path .. "-shm")
 
     -- -----------------------------------------------------------------
-    -- v1 to v2, against a file this plugin's previous release could have
+    -- v1 to v4, against a file this plugin's previous release could have
     -- written.
     --
     -- The v1 schema is frozen here, copied out of the module before the
@@ -1326,7 +1326,7 @@ CREATE INDEX strokes_by_canvas ON strokes(canvas_id, seq);
         local listed = migrated_v1:listCanvases(1)
         local backup = io.open(v1_path .. ".backup-v1", "rb")
         if backup then backup:close() end
-        v1_ok = version == 2 and role == "sheet" and space == "surface"
+        v1_ok = version == 4 and role == "sheet" and space == "surface"
             and count("books") == 1 and count("canvases") == 1
             and count("strokes") == 1 and count("stroke_chunks") == 1
             and count("canvas_layout_cache") == 1
@@ -1338,7 +1338,7 @@ CREATE INDEX strokes_by_canvas ON strokes(canvas_id, seq);
             .. ", backup " .. (backup and "kept" or "missing")
         migrated_v1:close()
     end
-    claim("canvas database: a v1 file migrates to v2 keeping its rows",
+    claim("canvas database: a v1 file migrates to v4 keeping its rows",
         true, v1_ok, v1_detail)
     os.remove(v1_path)
     os.remove(v1_path .. ".backup-v1")
@@ -1354,8 +1354,10 @@ CREATE INDEX strokes_by_canvas ON strokes(canvas_id, seq);
     local refused, refused_err = Repository.open{
         path = rollback_path, driver = SQ3, wal = false,
         migrations = {
-            [1] = function(conn)
-                Repository.MIGRATIONS[1](conn)
+            [1] = Repository.MIGRATIONS[1],
+            [2] = Repository.MIGRATIONS[2],
+            [3] = function(conn)
+                Repository.MIGRATIONS[3](conn)
                 error("conformance: a migration step that fails", 0)
             end,
         },

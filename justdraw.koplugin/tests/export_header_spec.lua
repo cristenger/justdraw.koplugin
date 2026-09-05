@@ -137,7 +137,7 @@ return function(ctx)
             paint_text = rec.paint,
         }
         t:eq(#rec.calls, 1, "one line")
-        t:eq(rec.calls[1].text, "Moby Dick · Legacy ink · Stored page 12",
+        t:eq(rec.calls[1].text, "Moby Dick · Legacy ink\nStored page 12",
             "title, kind, location")
         t:eq(rec.calls[1].x, Header.PAD_PX, "inside the margin")
         t:eq(rec.calls[1].max_width, 400 - 2 * Header.PAD_PX,
