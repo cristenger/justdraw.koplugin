@@ -96,6 +96,20 @@ koreader/plugins/justdraw.koplugin/main.lua
 Open **More tools → JustDraw** while reading. Standalone notebooks are also
 available under **File manager → More tools → Notebooks**.
 
+**Pen controls.** Open **More → Pen settings** to choose a style and width
+together: Ink pen, Graphite or Marker, each in Thin, Medium or Thick. The
+toolbar shows the selected combination. Tap the already selected pen to open
+the same palette; in document panels, drawing must be running for this
+shortcut. Tapping Pen while the eraser is selected returns to the pen.
+Preferences are shared between notebooks and documents.
+
+**Notebooks.** Choose a name, paper size and paper style when creating a
+notebook. The paper options scroll when the virtual keyboard leaves little
+room; rotating the screen keeps the name and choices. The editor shows
+**Page N of M**. Use **More → Go to page…** to jump to a page by its current
+number. **Add page at end** appends a page; **More → Paper for this page**
+changes the current page's background.
+
 Back up KOReader's settings before using or upgrading the plugin. Sync is not
 implemented.
 
