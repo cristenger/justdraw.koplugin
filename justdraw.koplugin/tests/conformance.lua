@@ -2617,8 +2617,8 @@ do
     local available = dialog:getAddedWidgetAvailableWidth()
     local widths = {}
     local fits = true
-    for _, container in ipairs(dialog._added_widgets or {}) do
-        local width = container[1]:getSize().w
+    for _, widget in ipairs(dialog.paper_options) do
+        local width = widget:getSize().w
         widths[#widths + 1] = tostring(width)
         if width > available then fits = false end
     end
@@ -2626,6 +2626,17 @@ do
         true, fits and #widths == 2,
         table.concat(widths, ", ") .. " <= " .. available
             .. " on " .. Device.screen:getWidth() .. "x" .. Device.screen:getHeight())
+    dialog:onShowKeyboard()
+    dialog:paintTo(Device.screen.bb, 0, 0)
+    local keyboard_h = dialog._input_widget:getKeyboardDimen().h
+    local frame = dialog.dialog_frame.dimen
+    claim("notebook creation keeps its frame above the real virtual keyboard",
+        true, dialog:isKeyboardVisible() and frame.y >= 0
+            and frame.y + frame.h <= Device.screen:getHeight() - keyboard_h,
+        frame.h .. "px form, " .. keyboard_h .. "px keyboard")
+    local crop = dialog.cropping_widget
+    claim("notebook creation never needs horizontal scrolling for its options",
+        true, crop._max_scroll_offset_x == 0)
     library:shutdown()
     library:free()
 end

@@ -14,6 +14,7 @@ local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
 local RadioButtonTable = require("ui/widget/radiobuttontable")
+local ScrollableContainer = require("ui/widget/container/scrollablecontainer")
 local Size = require("ui/size")
 local TitleBar = require("ui/widget/titlebar")
 local UIManager = require("ui/uimanager")
@@ -415,17 +416,18 @@ function Library:paintTo(bb, x, y)
     FocusManager.paintTo(self, bb, x, y)
 end
 
-function Library:showCreateDialog()
+function Library:showCreateDialog(previous)
     if not self.batch or not self.batch.writable then return nil, "read_only" end
-    local selected = "a5_portrait"
-    local style = "blank"
+    local selected = previous and previous.preset or "a5_portrait"
+    local style = previous and previous.paper or "blank"
     local dialog
     dialog = MultiInputDialog:new{
         title = _("New notebook"),
-        fields = {{ description = _("Notebook name"), text = "" }},
+        fields = {{ description = _("Notebook name"), text = previous and previous.title or "" }},
         buttons = {{
             { text = _("Cancel"), id = "close", callback = function() self:_closeModal(dialog) end },
             { text = _("Create"), callback = function()
+                if self.closed or not self.modal_widgets[dialog] then return end
                 local fields = dialog:getFields()
                 local title, validation = validTitle(fields[1])
                 if not title then
@@ -456,43 +458,99 @@ function Library:showCreateDialog()
     local width = dialog.getAddedWidgetAvailableWidth
         and dialog:getAddedWidgetAvailableWidth()
         or math.floor(math.min(Screen:getWidth(), Screen:getHeight()) * 0.72)
+    local option_width = width - ScrollableContainer:getScrollbarWidth()
     local radio = RadioButtonTable:new{
-        width = width,
+        width = option_width,
         parent = dialog,
         show_parent = dialog,
         radio_buttons = {
         {{ text = _("Paper size"), enabled = false, checkable = false }},
         {
-            { text = _("A5 portrait"), checked = true, value = "a5_portrait" },
-            { text = _("Letter portrait"), value = "letter_portrait" },
-            { text = _("A5 landscape"), value = "a5_landscape" },
+            { text = _("A5 portrait"), checked = selected == "a5_portrait", value = "a5_portrait" },
+            { text = _("Letter portrait"), checked = selected == "letter_portrait", value = "letter_portrait" },
+        },
+        {
+            { text = _("A5 landscape"), checked = selected == "a5_landscape", value = "a5_landscape" },
         }},
         button_select_callback = function(entry) selected = entry.value end,
     }
-    dialog:addWidget(radio)
     -- Its own table, so it is its own radio group: RadioButtonTable keeps one
     -- checked button per widget, across as many rows as it is given. Two by
     -- two rather than four across, because four labels do not survive the
     -- narrowest screen this runs on with the keyboard up.
     local style_radio = RadioButtonTable:new{
-        width = width,
+        width = option_width,
         parent = dialog,
         show_parent = dialog,
         radio_buttons = {
         {{ text = _("Paper style"), enabled = false, checkable = false }},
         {
-            { text = _("Blank"), checked = true, value = "blank" },
-            { text = _("Ruled"), value = "ruled" },
+            { text = _("Blank"), checked = style == "blank", value = "blank" },
+            { text = _("Ruled"), checked = style == "ruled", value = "ruled" },
         },
         {
-            { text = _("Squared"), value = "grid" },
-            { text = _("Dotted"), value = "dots" },
+            { text = _("Squared"), checked = style == "grid", value = "grid" },
+            { text = _("Dotted"), checked = style == "dots", value = "dots" },
         }},
         button_select_callback = function(entry) style = entry.value end,
     }
-    dialog:addWidget(style_radio)
+    dialog.paper_options = { radio, style_radio }
+    local content = VerticalGroup:new{ align = "left", radio, style_radio }
+    local base_height = dialog.dialog_frame:getSize().h
+    local viewport = ScrollableContainer:new{
+        dimen = Geom:new{ w = width, h = content:getSize().h },
+        show_parent = dialog,
+        content,
+    }
+    -- UIManager uses this owner to crop a radio button's tap feedback too.
+    dialog.cropping_widget = viewport
+    dialog:addWidget(viewport)
+    -- Measuring the empty frame cached its group's offsets before addWidget.
+    dialog.dialog_frame[1]:resetLayout()
+    local function fitOptions()
+        if dialog.closing or dialog.reflowing then return end
+        local keyboard_h = dialog:isKeyboardVisible() and dialog._input_widget:getKeyboardDimen().h or 0
+        local height = math.max(1, math.min(content:getSize().h,
+            Screen:getHeight() - keyboard_h - base_height - 2 * Size.padding.default))
+        if viewport.dimen.h ~= height then
+            viewport.dimen.h = height
+            viewport:reset()
+            dialog._added_widgets[1].dimen.h = height
+            dialog.dialog_frame[1]:resetLayout()
+        end
+        dialog[1].dimen.h = Screen:getHeight() - keyboard_h
+        UIManager:setDirty(dialog, "ui")
+    end
+    local show_keyboard, close_keyboard = dialog.onShowKeyboard, dialog.onCloseKeyboard
+    dialog.onShowKeyboard = function(widget, ...)
+        show_keyboard(widget, ...)
+        fitOptions()
+    end
+    dialog.onCloseKeyboard = function(widget, ...)
+        close_keyboard(widget, ...)
+        fitOptions()
+    end
+    local keyboard_changed = dialog.onKeyboardHeightChanged
+    dialog.onKeyboardHeightChanged = function(widget, ...)
+        widget.reflowing = true
+        keyboard_changed(widget, ...)
+        widget.reflowing = false
+        fitOptions()
+    end
+    local on_close = dialog.onCloseWidget
+    dialog.onCloseWidget = function(widget, ...)
+        widget.closing = true
+        if self.create_dialog == widget then self.create_dialog = nil end
+        if on_close then on_close(widget, ...) end
+    end
+    dialog.creationState = function(widget)
+        return { title = widget:getFields()[1], preset = selected, paper = style,
+            keyboard_visible = widget:isKeyboardVisible() }
+    end
+    self.create_dialog = dialog
     self:_showModal(dialog)
-    if dialog.onShowKeyboard then dialog:onShowKeyboard() end
+    if previous and not previous.keyboard_visible then dialog:onCloseKeyboard()
+    else dialog:onShowKeyboard() end
     return dialog
 end
 
@@ -637,6 +695,14 @@ function Library:onSetDimensions()
     if self:usesCurrentScreenLayout() then return true end
     self:_rebuild()
     self:_registerEvents()
+    -- MultiInputDialog does not reposition its keyboard or form on rotation.
+    -- Rebuild this one dialog from its unsaved choices after the host resized.
+    local create = self.create_dialog
+    if create and self.modal_widgets[create] then
+        local state = create:creationState()
+        self:_closeModal(create)
+        self:showCreateDialog(state)
+    end
     return true
 end
 

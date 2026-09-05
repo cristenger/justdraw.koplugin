@@ -2238,6 +2238,7 @@ function support.install()
             return { w = w, h = h }
         end
         function C:paintTo() end
+        function C:resetLayout() end
         --- FrameContainer and VerticalGroup are WidgetContainers on the device,
         --- so they propagate to their children. Without this the buttons are
         --- unreachable in the fake and the bar looks like it swallows
@@ -2255,6 +2256,11 @@ function support.install()
     end
     package.preload["ui/widget/container/framecontainer"] = function() return sizedContainer("frame") end
     package.preload["ui/widget/verticalgroup"] = function() return sizedContainer("vgroup") end
+    local ScrollableContainer = sizedContainer("scroll")
+    function ScrollableContainer:getSize() return self.dimen end
+    function ScrollableContainer:getScrollbarWidth() return 18 end
+    function ScrollableContainer:reset() self.resets = (self.resets or 0) + 1 end
+    package.preload["ui/widget/container/scrollablecontainer"] = function() return ScrollableContainer end
 
     local HorizontalGroup = sizedContainer("hgroup")
     function HorizontalGroup:getSize()
@@ -2375,6 +2381,7 @@ function support.install()
                 if not keep then self._edited = false end
             end
             function field:isTextEdited() return self._edited end
+            function field:getKeyboardDimen() return { h = env.Device.screen.keyboard_height or 400 } end
             --- What the keyboard does, so a spec can say "the reader typed
             --- here" without inventing an event.
             function field:typeText(text)
@@ -2384,9 +2391,20 @@ function support.install()
             o.input_fields[i] = field
         end
         function o:getFields() return self._values end
+        o._input_widget = o.input_fields[1]
+        o[1] = { dimen = { w = env.Device.screen:getWidth(), h = env.Device.screen:getHeight() } }
+        o.dialog_frame = { sizedContainer("vgroup"):new{} }
+        function o.dialog_frame:getSize() return { w = 400, h = 100 } end
+        function o:isKeyboardVisible() return self._keyboard_visible == true end
+        function o:onShowKeyboard() self._keyboard_visible = true end
+        function o:onCloseKeyboard() self._keyboard_visible = false end
+        function o:onKeyboardHeightChanged() end
+        function o:onCloseWidget() self:onCloseKeyboard() end
         o.added_widgets = {}
+        o._added_widgets = {}
         function o:addWidget(widget)
             self.added_widgets[#self.added_widgets + 1] = widget
+            self._added_widgets[#self._added_widgets + 1] = { dimen = { h = widget:getSize().h }, widget }
             self.added_widget = widget
         end
         function o:handleEvent() return true end

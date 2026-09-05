@@ -307,7 +307,7 @@ return function(ctx)
         library:markShown(); library:startLoading(); ctx.env.UIManager:flush()
         local dialog = library:showCreateDialog()
         t:check(#dialog.added_widgets >= 1, "the dialog carries added widgets")
-        for i, widget in ipairs(dialog.added_widgets) do
+        for i, widget in ipairs(dialog.paper_options) do
             t:eq(widget.parent, dialog,
                 "widget " .. i .. " inherits dialog parent")
             t:eq(widget.show_parent, dialog,
@@ -337,9 +337,9 @@ return function(ctx)
                 return dialog
             end
             local dialog = library:showCreateDialog()
-            t:eq(#dialog.added_widgets, 2, "both radio groups remain")
-            for _, widget in ipairs(dialog.added_widgets) do
-                t:eq(widget.width, available or math.floor(1072 * 0.72),
+            t:eq(#dialog.paper_options, 2, "both radio groups remain")
+            for _, widget in ipairs(dialog.paper_options) do
+                t:eq(widget.width, (available or math.floor(1072 * 0.72)) - 18,
                     "option group fits the dialog in landscape")
             end
             library:_closeModal(dialog)
@@ -347,6 +347,59 @@ return function(ctx)
         MultiInputDialog.new = original
         screen.w, screen.h = old_w, old_h
         library:shutdown()
+    end)
+
+    t:case("create options shrink for the keyboard and survive rotation without an extra creation", function()
+        ctx.reset()
+        local screen = ctx.env.Device.screen
+        local old_w, old_h, old_keyboard = screen.w, screen.h, screen.keyboard_height
+        screen.w, screen.h = 1448, 1072
+        screen.keyboard_height = screen.h - 150
+        local writes = 0
+        local controller = {}
+        function controller:listNotebookBatch()
+            return { items = {}, has_more = false, writable = true }
+        end
+        function controller:createNotebook()
+            writes = writes + 1
+            return { id = 1 }
+        end
+        local library = Library:new{ controller = controller }
+        library:markShown(); library:startLoading(); ctx.env.UIManager:flush()
+        local dialog = library:showCreateDialog()
+        dialog._values[1] = "A long unsaved notebook name"
+        dialog.paper_options[1]:select("letter_portrait")
+        dialog.paper_options[2]:select("dots")
+        local viewport = dialog.cropping_widget
+        local full_h = viewport[1]:getSize().h
+        t:check(viewport:getSize().h < full_h, "options scroll above the keyboard")
+        t:eq(viewport.show_parent, dialog, "scroll feedback uses the modal owner")
+        dialog:onCloseKeyboard()
+        t:eq(viewport:getSize().h, full_h, "hiding keyboard reveals all options")
+        dialog:onShowKeyboard()
+        t:check(viewport:getSize().h < full_h, "showing it again recomputes the budget")
+        screen.keyboard_height = 0
+        dialog:onKeyboardHeightChanged()
+        t:eq(viewport:getSize().h, full_h, "a new keyboard layout recomputes the budget")
+        dialog:onCloseKeyboard()
+        screen.w, screen.h = 1072, 1448
+        library:onSetDimensions()
+        local rotated = library.create_dialog
+        t:check(rotated ~= dialog, "rotation rebuilds the form at the new screen size")
+        t:eq(library.modal_widgets[dialog], nil, "old form was closed")
+        local state = rotated:creationState()
+        t:eq(state.title, "A long unsaved notebook name")
+        t:eq(state.preset, "letter_portrait")
+        t:eq(state.paper, "dots")
+        t:eq(state.keyboard_visible, false, "rotation keeps keyboard hidden")
+        t:eq(writes, 0, "rotation does not create a notebook")
+        dialog.buttons[1][2].callback()
+        t:eq(writes, 0, "a late callback from the old form cannot create")
+        rotated.buttons[1][1].callback()
+        t:eq(library.create_dialog, nil, "Cancel releases the tracked form")
+        t:eq(writes, 0, "Cancel does not create")
+        library:shutdown()
+        screen.w, screen.h, screen.keyboard_height = old_w, old_h, old_keyboard
     end)
 
     t:case("closing a library modal twice closes it once", function()
@@ -391,7 +444,7 @@ return function(ctx)
             library:markShown(); library:startLoading(); ctx.env.UIManager:flush()
             local dialog = library:showCreateDialog()
             local groups = {}
-            for _, widget in ipairs(dialog.added_widgets) do
+            for _, widget in ipairs(dialog.paper_options) do
                 groups[widget.radio_buttons[1][1].text] = widget
             end
             if choose then choose(groups) end
