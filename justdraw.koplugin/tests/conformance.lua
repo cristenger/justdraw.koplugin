@@ -2582,6 +2582,29 @@ do
     end
 end
 
+-- The production notebook form must budget added controls against InputDialog,
+-- whose width follows the short screen edge. Run in both screen orientations.
+do
+    local Library = require("ink_notebook_library")
+    local library = Library:new{ controller = {} }
+    library.batch = { writable = true, items = {} }
+    local dialog = library:showCreateDialog()
+    local available = dialog:getAddedWidgetAvailableWidth()
+    local widths = {}
+    local fits = true
+    for _, container in ipairs(dialog._added_widgets or {}) do
+        local width = container[1]:getSize().w
+        widths[#widths + 1] = tostring(width)
+        if width > available then fits = false end
+    end
+    claim("production notebook options fit InputDialog's available width",
+        true, fits and #widths == 2,
+        table.concat(widths, ", ") .. " <= " .. available
+            .. " on " .. Device.screen:getWidth() .. "x" .. Device.screen:getHeight())
+    library:shutdown()
+    library:free()
+end
+
 for _, r in ipairs(rows) do
     io.write(string.format("%-12s %-56s %s\n", r[1], r[2], r[3]))
 end

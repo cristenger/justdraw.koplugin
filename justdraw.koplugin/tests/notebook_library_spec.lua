@@ -316,6 +316,39 @@ return function(ctx)
         library:shutdown()
     end)
 
+    t:case("creation options use the dialog width, with a short-side fallback", function()
+        ctx.reset()
+        local MultiInputDialog = require("ui/widget/multiinputdialog")
+        local original = MultiInputDialog.new
+        local screen = ctx.env.Device.screen
+        local old_w, old_h = screen.w, screen.h
+        screen.w, screen.h = 1448, 1072
+        local controller = {}
+        function controller:listNotebookBatch()
+            return { items = {}, has_more = false, writable = true }
+        end
+        local library = Library:new{ controller = controller }
+        library:markShown(); library:startLoading(); ctx.env.UIManager:flush()
+        for _, available in ipairs({ 371, false }) do
+            MultiInputDialog.new = function(class, opts)
+                local dialog = original(class, opts)
+                dialog.getAddedWidgetAvailableWidth = available
+                    and function() return available end or nil
+                return dialog
+            end
+            local dialog = library:showCreateDialog()
+            t:eq(#dialog.added_widgets, 2, "both radio groups remain")
+            for _, widget in ipairs(dialog.added_widgets) do
+                t:eq(widget.width, available or math.floor(1072 * 0.72),
+                    "option group fits the dialog in landscape")
+            end
+            library:_closeModal(dialog)
+        end
+        MultiInputDialog.new = original
+        screen.w, screen.h = old_w, old_h
+        library:shutdown()
+    end)
+
     t:case("closing a library modal twice closes it once", function()
         ctx.reset()
         local controller = {}

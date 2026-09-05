@@ -453,8 +453,11 @@ function Library:showCreateDialog()
             end },
         }},
     }
+    local width = dialog.getAddedWidgetAvailableWidth
+        and dialog:getAddedWidgetAvailableWidth()
+        or math.floor(math.min(Screen:getWidth(), Screen:getHeight()) * 0.72)
     local radio = RadioButtonTable:new{
-        width = math.floor(Screen:getWidth() * 0.72),
+        width = width,
         parent = dialog,
         show_parent = dialog,
         radio_buttons = {
@@ -472,7 +475,7 @@ function Library:showCreateDialog()
     -- two rather than four across, because four labels do not survive the
     -- narrowest screen this runs on with the keyboard up.
     local style_radio = RadioButtonTable:new{
-        width = math.floor(Screen:getWidth() * 0.72),
+        width = width,
         parent = dialog,
         show_parent = dialog,
         radio_buttons = {
