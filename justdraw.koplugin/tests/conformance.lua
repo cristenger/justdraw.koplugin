@@ -2436,7 +2436,7 @@ end
 -- The sheet handle's placement label, against the real widget
 --
 -- The label lands in `InkCanvasOverlay:paintChromeTo`, which live ink reaches
--- once per segment, so it is fitted and rasterized once into a transparent
+-- once per segment, so it is fitted and rasterized once into a small
 -- BB8A and only alpha-blitted thereafter (ADR-45). The shared fake has no
 -- FreeType metrics and its `paintTo` is a no-op, so the unit suite can state
 -- the caching but not the fit. These are the parts only a real runtime knows:
@@ -2464,8 +2464,8 @@ do
     local raw = math.floor(Screen:getHeight() * 0.03)
     local here = raw < 16 and 16 or (raw > 48 and 48 or raw)
 
-    --- One label, measured, painted into a transparent BB8A and composed onto
-    --- a screen-like BB8 -- the whole path the overlay uses, in order.
+    --- Font metrics only. The production probe below owns visible pixels:
+    --- successful paint/alpha-blit calls can still compose a blank image.
     local function probe(text, font_size)
         local made, widget = pcall(TextWidget.new, TextWidget, {
             text = text,
@@ -2546,6 +2546,39 @@ do
             cut and ("w=" .. cut.w .. " of " .. max_width .. ", h=" .. cut.h
                 .. " of " .. room .. ", truncated=" .. tostring(cut.truncated))
                 or "widget not built")
+    end
+
+    local Overlay = require("ink_canvas_overlay")
+    for _, handle in ipairs({ 16, 48 }) do
+        for _, placement in ipairs({ { "away", 10 }, { "away" }, { "lost" } }) do
+            local subject = setmetatable({ placement = placement[1],
+                placement_page = placement[2] }, { __index = Overlay })
+            function subject:handleRect()
+                return { x = 0, y = 0, w = Screen:getWidth(), h = handle }
+            end
+            subject:_rebuildPlacementLabel()
+            local label = subject.placement_label_bb
+            local visible = 0
+            if label then
+                local page = Blitbuffer.new(label:getWidth(), label:getHeight(),
+                    Blitbuffer.TYPE_BB8)
+                page:fill(Blitbuffer.COLOR_WHITE)
+                page:alphablitFrom(label, 0, 0, 0, 0,
+                    label:getWidth(), label:getHeight())
+                for y = 0, page:getHeight() - 1 do
+                    for x = 0, page:getWidth() - 1 do
+                        if page:getPixel(x, y):getColor8().a < 255 then
+                            visible = visible + 1
+                        end
+                    end
+                end
+                page:free()
+            end
+            claim("production placement glyphs are visible: " .. placement[1]
+                .. " " .. tostring(placement[2]) .. " / " .. handle .. "px",
+                true, visible > 0, tostring(visible) .. " non-white pixels")
+            subject:_freePlacementLabel()
+        end
     end
 end
 

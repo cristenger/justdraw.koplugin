@@ -422,7 +422,7 @@ return function(ctx)
                 label_blits = label_blits + 1
             end
         end
-        t:eq(label_blits, 50, "each paint reused the transparent label")
+        t:eq(label_blits, 50, "each paint reused the cached label")
     end)
 
     t:case("the cached label fits vertically inside the handle", function()

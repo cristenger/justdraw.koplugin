@@ -257,9 +257,11 @@ function InkCanvasOverlay:_rebuildPlacementLabel()
         }
         local size = widget:getSize()
         if size.h > room then return nil end
-        -- A fresh BB8A is calloc-zeroed, hence transparent. Paint the glyphs
-        -- once and retain no TextWidget on the live chrome path.
+        -- TextWidget blends glyphs without making a fresh BB8A opaque. Give
+        -- the label the handle's white backing or alpha-blit hides its text.
+        -- Retain no TextWidget on the live chrome path.
         label = Blitbuffer.new(size.w, size.h, Blitbuffer.TYPE_BB8A)
+        label:fill(Blitbuffer.COLOR_WHITE)
         widget:paintTo(label, 0, 0)
         return size.w, size.h
     end)
