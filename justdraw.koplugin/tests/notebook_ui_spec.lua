@@ -105,6 +105,7 @@ return function(ctx)
     t:case("editor diagnostics uses the shared notebook trace source", function()
         ctx.reset()
         local source
+        local refresh_ms = 50
         local controller = {
             openNotebook = function() return {} end,
             shutdown = function() return true end,
@@ -123,6 +124,8 @@ return function(ctx)
             showDiagnostics = function(_, value) source = value end,
             setInputMode = function() return true end,
             setPenWidth = function() return true end,
+            getDrawingRefreshInterval = function() return refresh_ms end,
+            setDrawingRefreshInterval = function(_, ms) refresh_ms = ms; return ms end,
             setNotebookRailSide = function() end,
         }
         local ui = NotebookUI.new{
@@ -132,6 +135,9 @@ return function(ctx)
         local editor = ui:openNotebook{ id = 1, title = "Private title" }
         editor.show_stylus_diagnostics()
         t:eq(source, "notebook", "notebook editor arms the shared trace session")
+        t:eq(editor.get_drawing_refresh_ms(), 50, "the notebook reads the host's refresh setting")
+        editor.set_drawing_refresh_ms(33)
+        t:eq(refresh_ms, 33, "the notebook writes through the host's shared setter")
         ui:shutdown()
     end)
 

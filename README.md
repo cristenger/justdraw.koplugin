@@ -29,6 +29,15 @@ removed with **Clear legacy ink** in the JustDraw menu.
 
 ## Troubleshooting
 
+**Graphite or marker trails behind the pen.** Open **More → Drawing refresh**
+in a notebook or document drawing panel. Choose 20, 33, 50, 75, 100, 150 or
+200 **milliseconds** between grayscale screen updates; 100 ms is the default.
+The choice applies immediately and is remembered across documents and notebooks.
+Try 75 or 50 ms first, then compare lower values on your device. Return to
+100 ms if strokes become erratic. Black-only pages retain their 20 ms fast
+refresh; pages containing gray ink use the selected interval even when you
+switch back to the ink pen.
+
 **Palm marks, stray lines, or a pen that erases on its own.** On Wacom devices
 — the Kindle Scribes and the reMarkable — Linux reports a rejected touch with
 the same numeric tool value KOReader uses for the stylus eraser, so a resting

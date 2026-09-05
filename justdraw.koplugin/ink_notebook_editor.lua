@@ -26,6 +26,7 @@ local ExportDialog = require("ink_export_dialog")
 local ExportSource = require("ink_export_source")
 local LiveRefresh = require("ink_live_refresh")
 local NotebookLayout = require("ink_notebook_layout")
+local RefreshDialog = require("ink_refresh_dialog")
 local Stack = require("ink_stack")
 local Style = require("ink_style")
 
@@ -66,6 +67,9 @@ function Editor:init()
     self.set_pen_width = self.set_pen_width or function() return true end
     self.get_raw_pen_style = self.get_raw_pen_style or function() return Style.PEN end
     self.set_pen_style = self.set_pen_style or function() return true end
+    self.get_drawing_refresh_ms = self.get_drawing_refresh_ms
+        or function() return LiveRefresh.SLOW_INTERVAL * 1000 end
+    self.set_drawing_refresh_ms = self.set_drawing_refresh_ms or function() end
     self.get_rail_side = self.get_rail_side or function() return "right" end
     self.get_live_fast = self.get_live_fast or function() return true end
     self.has_active_contact = self.has_active_contact or function() return false end
@@ -229,6 +233,8 @@ function Editor:_initQualityRefresh()
         UIManager:unschedule(action)
     end
     self.live_refresh = self.live_refresh or LiveRefresh.new{
+        slow_interval = LiveRefresh.normalizeSlowIntervalMs(
+            self.get_drawing_refresh_ms()) / 1000,
         -- The editor's monotonic seconds, the same seam the quality pass reads.
         clock = self.quality_clock,
         schedule_in = self.live_schedule_in,
@@ -1596,6 +1602,9 @@ function Editor:showMore()
             {{ text = _("Pen width"), callback = function()
                 self:_closeModal(dialog); self:showPenWidth()
             end }},
+            {{ text = _("Drawing refresh"), callback = function()
+                self:_closeModal(dialog); self:showDrawingRefresh()
+            end }},
             {{ text = _("Rail side"), callback = function()
                 self.set_rail_side(self.get_rail_side() == "left" and "right" or "left")
                 self:_closeModal(dialog)
@@ -1679,6 +1688,18 @@ function Editor:showExport()
                 end,
             }
         end,
+    }
+end
+
+function Editor:showDrawingRefresh()
+    return RefreshDialog.show{
+        get_interval = self.get_drawing_refresh_ms,
+        set_interval = function(ms)
+            self.set_drawing_refresh_ms(ms)
+            self.live_refresh:setSlowIntervalMs(ms)
+        end,
+        show_modal = function(dialog) return self:showModalSafely(dialog) end,
+        close_modal = function(dialog) self:_closeModal(dialog) end,
     }
 end
 

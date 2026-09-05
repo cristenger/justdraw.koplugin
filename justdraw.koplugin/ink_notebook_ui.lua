@@ -177,6 +177,12 @@ function NotebookUI:openNotebook(item)
         set_pen_width = function(value) return self.plugin:setPenWidth(value) end,
         set_pen_style = function(v) return self.plugin:setPenStyle(v) end,
         get_raw_pen_style = function() return self.plugin.pen_style end,
+        get_drawing_refresh_ms = function()
+            return self.plugin:getDrawingRefreshInterval()
+        end,
+        set_drawing_refresh_ms = function(ms)
+            return self.plugin:setDrawingRefreshInterval(ms)
+        end,
         get_live_fast = function() return self.plugin.live_fast end,
         get_rail_side = function() return self.plugin.notebook_rail_side end,
         show_stylus_diagnostics = function()

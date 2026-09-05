@@ -37,6 +37,17 @@ Live.FAST_INTERVAL = 0.02
 --- three-minute session with the pen down has to stay inside (ADR-43).
 Live.SLOW_INTERVAL = 0.10
 
+-- Milliseconds at the settings/UI boundary; the scheduler uses seconds.
+Live.SLOW_INTERVALS_MS = { 20, 33, 50, 75, 100, 150, 200 }
+
+function Live.normalizeSlowIntervalMs(value)
+    value = tonumber(value)
+    for _, ms in ipairs(Live.SLOW_INTERVALS_MS) do
+        if value == ms then return ms end
+    end
+    return Live.SLOW_INTERVAL * 1000
+end
+
 local RANK = { fast = 1, partial = 2, ui = 3 }
 local MODE = { "fast", "partial", "ui" }
 
@@ -51,7 +62,7 @@ local EPSILON = 0.001
   opts.schedule_in   function(delay_seconds, action)  -- UIManager:scheduleIn
   opts.unschedule    function(action)                 -- UIManager:unschedule
   opts.refresh       function(mode, left, top, right, bottom) -- the one physical refresh
-  opts.fast_interval, opts.slow_interval   seconds; tests only
+  opts.fast_interval, opts.slow_interval   seconds; omitted values use defaults
 ]]
 function Live.new(opts)
     opts = opts or {}
@@ -146,6 +157,27 @@ end
 
 function Live:hasPending()
     return self.pending
+end
+
+-- Change cadence without losing the pending region or restarting capture.
+-- Re-arm rather than calling the refresh sink inside a settings callback.
+function Live:setSlowIntervalMs(value)
+    if self.closed then return false end
+    local interval = Live.normalizeSlowIntervalMs(value) / 1000
+    if interval == self.slow_interval then return true end
+    self.slow_interval = interval
+    if self.unschedule then
+        if self.armed then self.unschedule(self.action) end
+        self.armed = false
+        if self.pending then
+            local pending_interval = self.rank == RANK.fast and self.fast_interval
+                or self.slow_interval
+            local delay = math.max(0, pending_interval - (self.clock() - self.last_at))
+            self.armed = true
+            self.schedule_in(delay, self.action)
+        end
+    end
+    return true
 end
 
 --- Whether the trailing timer is armed. Tests only.

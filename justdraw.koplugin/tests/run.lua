@@ -2161,6 +2161,45 @@ t:case("pen width is set from the dialog and remembered", function()
     t:eq(_G.G_reader_settings.data.justdraw_pen_width, 7, "and it is saved")
 end)
 
+t:case("Drawing refresh is selected in the reader, applied live, and remembered by another host", function()
+    local p, bar = realBarPlugin()
+    bar.more_btn.callback()
+    local more = env.dialogs[#env.dialogs]
+    local entry = dialogButton(more, "Drawing refresh")
+    t:check(entry ~= nil, "the drawing panel exposes the setting")
+    entry.callback()
+    local choices = env.dialogs[#env.dialogs]
+    t:eq(dialogButton(choices, "100 ms (default)").checked_func(), true,
+        "existing installs start at 100 ms")
+    for _, row in ipairs(choices.buttons) do
+        if row[1].checked_func then
+            t:eq(row[1].no_refresh_checkmark, true, "closing the chooser cannot stamp a dead row")
+        end
+    end
+    dialogButton(choices, "50 ms").callback()
+    t:eq(p.live_refresh.slow_interval, 0.05, "the active reader changed without restarting")
+    t:eq(p.live_refresh.fast_interval, 0.02, "black-only fast refresh is unchanged")
+    t:eq(_G.G_reader_settings.data.justdraw_drawing_refresh_ms, 50,
+        "stored in milliseconds")
+    local other = newPlugin()
+    t:eq(other.live_refresh.slow_interval, 0.05, "a new host loads the shared setting")
+    t:eq(other:diagnosticReport().drawing_refresh_ms, 50, "the diagnostic report identifies the test value")
+    p:showDrawingRefreshDialog()
+    t:eq(dialogButton(env.dialogs[#env.dialogs], "50 ms").checked_func(), true,
+        "reopening marks the selected value")
+    dialogButton(env.dialogs[#env.dialogs], "100 ms (default)").callback()
+    t:eq(p.live_refresh.slow_interval, 0.10, "the default is one selection away")
+end)
+
+t:case("an invalid saved refresh interval cannot disable the limiter", function()
+    reset()
+    _G.G_reader_settings.data.justdraw_drawing_refresh_ms = 0
+    local p = newPlugin()
+    t:eq(p.live_refresh.slow_interval, 0.10, "invalid saved value uses the default")
+    t:eq(p:setDrawingRefreshInterval(-1), 100, "invalid setter value is normalized")
+    t:eq(_G.G_reader_settings.data.justdraw_drawing_refresh_ms, 100, "normalized value is saved")
+end)
+
 t:case("input mode stays locked while drawing, from the dialog too", function()
     local p, bar = realBarPlugin()
     p:setDrawing(true)

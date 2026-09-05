@@ -48,6 +48,7 @@ local Legacy = require("ink_legacy_ink")
 local Limits = require("ink_limits")
 local LiveRefresh = require("ink_live_refresh")
 local Render = require("ink_render")
+local RefreshDialog = require("ink_refresh_dialog")
 local Router = require("ink_contact_router")
 local Stack = require("ink_stack")
 local Store = require("ink_store")
@@ -587,6 +588,7 @@ function JustDraw:init()
     --- accumulator; the panel is asked at its cadence, never per pen sample
     --- (ADR-43).
     self.live_refresh = LiveRefresh.new{
+        slow_interval = self:getDrawingRefreshInterval() / 1000,
         clock = monotonicSeconds,
         schedule_in = function(delay, action) UIManager:scheduleIn(delay, action) end,
         unschedule = function(action) UIManager:unschedule(action) end,
@@ -1870,6 +1872,8 @@ function JustDraw:setDrawing(on)
 
         self.input_lease = lease
         self.input_backend = backend
+        -- Another host (e.g. FileManager notebooks) may have changed it.
+        self.live_refresh:setSlowIntervalMs(self:getDrawingRefreshInterval())
         self.drawing = true
         if self.router then self.router:setBackend(backend) end
         logger.info("JustDraw: drawing on, mode", self.input_mode, "backend", backend)
@@ -2471,6 +2475,7 @@ function JustDraw:diagnosticReport()
         -- Our own active lease is not a foreign owner, and reporting it as
         -- one sent readers chasing a plugin conflict that did not exist.
         callback_taken = self:stylusCallbackIsForeign(input),
+        drawing_refresh_ms = self:getDrawingRefreshInterval(),
     }
     r.eraser_by_button, r.eraser_by_tool = Capture:eraserCounts()
     r.collapsed_dots, r.collapsed_discards = Capture:collapsedCounts()
@@ -2513,6 +2518,7 @@ function JustDraw:diagnosticLines()
             .. "   native page size: " .. capabilityWord(caps.native_dimensions)
             .. "   alpha overlay: " .. capabilityWord(caps.alpha_blit),
         "Input mode: " .. tostring(r.mode) .. "  ->  backend: " .. tostring(r.backend),
+        "Gray ink refresh interval: " .. tostring(r.drawing_refresh_ms) .. " ms",
         "Stylus API: " .. tostring(r.stylus_api)
             .. "   tool types: " .. tostring(r.tool_types),
         "Pen digitizer flag: " .. tostring(r.wacom)
@@ -3831,6 +3837,23 @@ function JustDraw:setPenStyle(style)
     Compat.saveSetting(G_reader_settings, "pen_style", style)
 end
 
+function JustDraw:getDrawingRefreshInterval()
+    return LiveRefresh.normalizeSlowIntervalMs(
+        Compat.readSetting(G_reader_settings, "drawing_refresh_ms"))
+end
+
+function JustDraw:setDrawingRefreshInterval(value)
+    local ms = LiveRefresh.normalizeSlowIntervalMs(value)
+    Compat.saveSetting(G_reader_settings, "drawing_refresh_ms", ms)
+    self.live_refresh:setSlowIntervalMs(ms)
+    local editor = self.notebook_ui and self.notebook_ui.editor
+    if editor and not editor.closed then
+        editor.live_refresh:setSlowIntervalMs(ms)
+    end
+    logger.info("JustDraw: gray ink refresh interval", ms, "ms")
+    return ms
+end
+
 --[[--
 Where the marker may draw: a surface this plugin owns end to end.
 
@@ -3961,6 +3984,15 @@ function JustDraw:showPenWidthDialog()
     })
 end
 
+function JustDraw:showDrawingRefreshDialog()
+    return RefreshDialog.show{
+        get_interval = function() return self:getDrawingRefreshInterval() end,
+        set_interval = function(ms) self:setDrawingRefreshInterval(ms) end,
+        show_modal = function(dialog) return self:showReaderModal(dialog) end,
+        close_modal = function(dialog) self:closeReaderModal(dialog) end,
+    }
+end
+
 --- Locked while drawing for the same reason the menu locks it: swapping
 --- backends mid-sequence would tear down capture inside a live contact.
 function JustDraw:showInputModeDialog()
@@ -4005,6 +4037,8 @@ function JustDraw:showBarMenu()
             callback = pick(function() self:showPenStyleDialog() end) } },
         { { text = _("Pen width"),
             callback = pick(function() self:showPenWidthDialog() end) } },
+        { { text = _("Drawing refresh"),
+            callback = pick(function() self:showDrawingRefreshDialog() end) } },
         { { text = _("Input mode"),
             callback = pick(function() self:showInputModeDialog() end) } },
         { { text = _("Export…"), enabled = self:canExport(),
@@ -4544,6 +4578,10 @@ function JustDraw:addToMainMenu(menu_items)
                     self:penItem(_("Medium"), PEN_MEDIUM),
                     self:penItem(_("Thick"), PEN_THICK),
                 },
+            },
+            {
+                text = _("Drawing refresh"),
+                callback = function() self:showDrawingRefreshDialog() end,
             },
             {
                 text = _("Fast refresh while drawing"),

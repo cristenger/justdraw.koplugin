@@ -58,6 +58,8 @@ return function(ctx)
             set_eraser = function() end,
             get_raw_pen_style = overrides.get_raw_pen_style,
             set_pen_style = overrides.set_pen_style,
+            get_drawing_refresh_ms = overrides.get_drawing_refresh_ms,
+            set_drawing_refresh_ms = overrides.set_drawing_refresh_ms,
             get_live_fast = function() return runtime.live_fast end,
             has_active_contact = function() return runtime.active_contact end,
             quality_schedule_in = function(delay, action)
@@ -143,6 +145,41 @@ return function(ctx)
         diagnostic.callback()
         t:eq(calls, 1, "shared diagnostics callback invoked once")
         t:eq(uncovered, true, "More closed before the privacy flow begins")
+    end)
+
+    t:case("Drawing refresh changes the open notebook without replacing its accumulator", function()
+        ctx.reset()
+        local chosen = 75
+        local editor = newEditor{
+            get_drawing_refresh_ms = function() return chosen end,
+            set_drawing_refresh_ms = function(ms) chosen = ms end,
+        }
+        editor:onStateChanged()
+        local live = editor.live_refresh
+        t:eq(live.slow_interval, 0.075, "a notebook starts with the shared preference")
+        local more = editor:showMore()
+        local entry
+        for _, row in ipairs(more.buttons) do
+            if row[1].text == "Drawing refresh" then entry = row[1] end
+        end
+        t:check(entry ~= nil, "More exposes the same chooser as the document panel")
+        entry.callback()
+        local chooser = editor.modal_widget
+        t:check(chooser ~= nil and chooser ~= more, "More closed before the chooser opened")
+        local checked
+        for _, row in ipairs(chooser.buttons) do
+            local btn = row[1]
+            if btn.checked_func then
+                t:eq(btn.no_refresh_checkmark, true, "no row repaint after closing")
+                if btn.checked_func() then checked = btn.text end
+            end
+            if btn.text == "20 ms" then btn.callback() end
+        end
+        t:eq(checked, "75 ms", "the saved preference was marked")
+        t:eq(chosen, 20, "the choice reached shared settings")
+        t:eq(editor.live_refresh, live, "capture and the accumulator retain their identity")
+        t:eq(live.slow_interval, 0.02, "the next stroke gets the new cadence")
+        t:eq(editor.modal_widget, nil, "the chooser closed")
     end)
 
     t:case("More offers Pen style, and picks reach the injected seam", function()
