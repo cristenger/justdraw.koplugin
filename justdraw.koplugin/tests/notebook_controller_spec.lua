@@ -5,6 +5,22 @@ return function(ctx)
 
     t:describe("ink_notebook_controller / lifecycle")
 
+    t:case("ordinal navigation delegates without implicitly opening a notebook", function()
+        local controller = Controller.new{}
+        local ok, err = controller:goToPagePosition(2)
+        t:eq(ok, nil, "no implicit open")
+        t:eq(err, "no_notebook", "stable missing-session error")
+        local seen
+        controller.active_session = { goToPagePosition = function(_, position)
+            seen = position
+            return nil, "contact_active"
+        end }
+        ok, err = controller:goToPagePosition(80)
+        t:eq(seen, 80, "position passed unchanged")
+        t:eq(ok, nil, "failure propagated")
+        t:eq(err, "contact_active", "reason propagated")
+    end)
+
     t:case("repository opening is lazy", function()
         local opens = 0
         local store = support.newNotebookStore()

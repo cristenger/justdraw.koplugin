@@ -51,6 +51,8 @@ function Session.new(opts)
         has_previous = false,
         has_next = false,
         navigation_status_error = nil,
+        page_position = nil,
+        page_position_error = nil,
         opened = false,
         closed = false,
     }, Session)
@@ -94,6 +96,15 @@ function Session:_refreshNeighbours(page)
     self.has_previous = previous ~= nil
     self.has_next = next_page ~= nil
     return true
+end
+
+function Session:_refreshPagePosition(page)
+    self.page_position, self.page_position_error = nil, nil
+    if not page or self.closed then return end
+    self.page_position, self.page_position_error = self.repository:pagePosition(page)
+    if self.page_position_error then
+        logger.warn("JustDraw notebooks: page position unavailable:", self.page_position_error)
+    end
 end
 
 function Session:uiSnapshot()
@@ -148,6 +159,7 @@ function Session:uiSnapshot()
         has_previous = can_navigate and self.has_previous or false,
         has_next = can_navigate and self.has_next or false,
         page_count = self.notebook_obj and self.notebook_obj.page_count or 0,
+        page_position = self.page_position,
         -- The open page's ruling, so the chooser reads one public snapshot
         -- rather than reaching into the page row for a second opinion.
         template_kind = self.current_page and self.current_page.template_kind
@@ -295,6 +307,8 @@ function Session:_retryMetadata()
     end
     self.state_error = nil
     self.state_error_reason = nil
+    self:_refreshNeighbours(self.current_page)
+    self:_refreshPagePosition(self.current_page)
     return true
 end
 
@@ -324,6 +338,7 @@ function Session:_pageReady(page, surface)
     self.state_error = nil
     self.state_error_reason = nil
     self:_refreshNeighbours(page)
+    self:_refreshPagePosition(page)
     local acquired, acquire_err = self:_acquireCapture()
     if not acquired then self.notify(acquire_err) end
     if self.on_page_ready then self.on_page_ready(page, self) end
@@ -387,6 +402,7 @@ function Session:_openPage(page, persist_current, transform)
         end,
     }
     self.current_page = page
+    self.page_position, self.page_position_error = nil, nil
     self.surface_session = surface
     self.has_previous = false
     self.has_next = false
@@ -480,6 +496,21 @@ function Session:goToPage(page_id)
     end
     self.surface_session = nil
     return self:_openPage(page, self.repository.read_only ~= true, transform)
+end
+
+function Session:goToPagePosition(position)
+    if self.closed or not self.opened then return nil, "closed" end
+    if type(position) ~= "number" or position ~= position
+        or position < 1 or position > self.notebook_obj.page_count
+        or position > 9007199254740991 or position ~= math.floor(position) then
+        return nil, "bad_position"
+    end
+    local snapshot = self:uiSnapshot()
+    if not snapshot.can_navigate then return nil, snapshot.navigation_block_reason end
+    if position == self.page_position then return true end
+    local page, err = self.repository:pageAtPosition(self.notebook_obj.id, position)
+    if not page then return nil, err end
+    return self:goToPage(page.id)
 end
 
 function Session:goPrevious()

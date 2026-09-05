@@ -27,6 +27,50 @@ return function(ctx)
 
     t:describe("ink_notebook_repository / schema and boundaries")
 
+    t:case("page ordinals use ordered metadata and normalize SQL integers", function()
+        local repo, driver = openRepo{ int64 = true, answers = function(conn)
+            conn:answer("SELECT COUNT%(%*%) FROM notebook_pages", { { 3 } })
+            conn:answer("ORDER BY sort_key, id LIMIT 1 OFFSET", {
+                { 40, 7, 4096, 1000, 1400, "ruled", 1, 1 },
+            })
+        end }
+        local position = repo:pagePosition{ id = 99, notebook_id = 7, sort_key = 8192 }
+        t:eq(position, 3, "ordinal normalized from int64")
+        t:eq(type(position), "number", "no cdata escapes")
+        local row = repo:pageAtPosition(7, 2)
+        t:eq(row.id, 40, "ordinal is not a row id")
+        local conn = driver.last()
+        local binds = conn:bindsFor("LIMIT 1 OFFSET")
+        t:eq(binds[1], 7, "notebook is bound")
+        t:eq(binds[2], 1, "second page skips exactly one row")
+        local sql = conn:statement("SELECT COUNT%(%*%) FROM notebook_pages")
+        t:check(sql:find("id <= %?3") ~= nil, "ties use the page id")
+        t:check(sql:find("deleted_at IS NULL", 1, true) ~= nil, "deleted pages excluded")
+        local before = #conn.log
+        for _, bad in ipairs({ 0, -1, 1.5, math.huge, -math.huge, 0/0, 1e20 }) do
+            local value, err = repo:pageAtPosition(7, bad)
+            t:eq(value, nil, "invalid ordinal rejected")
+            t:eq(err, "bad_position", "explicit validation failure")
+        end
+        t:eq(#conn.log, before, "invalid ordinals do not reach SQL")
+    end)
+
+    t:case("ordinal queries propagate missing rows and driver failures", function()
+        local repo = openRepo{ answers = function(conn)
+            conn:answer("SELECT COUNT%(%*%) FROM notebook_pages", { { 0 } })
+        end }
+        local value, err = repo:pagePosition{ id = 1, notebook_id = 1, sort_key = 1024 }
+        t:eq(value, nil, "no page zero")
+        t:eq(err, "not_found", "empty active set")
+        value, err = repo:pageAtPosition(1, 3)
+        t:eq(value, nil, "missing ordinal")
+        t:eq(err, "not_found", "explicit missing row")
+        local broken = openRepo{ fail_on = "SELECT COUNT" }
+        value, err = broken:pagePosition{ id = 1, notebook_id = 1, sort_key = 1024 }
+        t:eq(value, nil, "SQL failure")
+        t:check(err ~= nil, "SQL reason preserved")
+    end)
+
     t:case("a fresh database creates only the notebook domain", function()
         local repo, driver = openRepo{ user_version = 0 }
         local conn = driver.last()

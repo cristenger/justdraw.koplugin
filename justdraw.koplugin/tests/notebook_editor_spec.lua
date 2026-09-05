@@ -33,6 +33,10 @@ return function(ctx)
         function controller:undo() self.calls[#self.calls + 1] = "undo"; return {} end
         function controller:goPrevious() self.calls[#self.calls + 1] = "previous"; return true end
         function controller:goNext() self.calls[#self.calls + 1] = "next"; return true end
+        function controller:goToPagePosition(position)
+            self.calls[#self.calls + 1] = "goto:" .. position
+            return true
+        end
         function controller:appendPage() self.calls[#self.calls + 1] = "add"; return true end
         function controller:deleteNotebook()
             self.calls[#self.calls + 1] = "delete_notebook"
@@ -76,6 +80,65 @@ return function(ctx)
         return editor, controller, snapshot, function() return closed end, session,
             runtime, scheduler
     end
+
+    t:case("page position is painted from the snapshot without a lookup", function()
+        ctx.reset()
+        local editor, _, snapshot = newEditor()
+        local labels = {}
+        editor._paintText = function(_, _, text) labels[#labels + 1] = text end
+        snapshot.page_position = 2
+        editor:_refreshSnapshot()
+        local bb = ctx.support.newBlitbuffer(1072, 1448)
+        editor:paintTo(bb, 0, 0)
+        t:eq(labels[2], "Page 2 of 2", "ordinal in info band")
+        labels = {}
+        snapshot.page_position = nil
+        snapshot.writable = false
+        editor:_refreshSnapshot()
+        editor:paintTo(bb, 0, 0)
+        t:eq(labels[2], "2 pages · Read-only", "unknown ordinal retains count and read-only state")
+    end)
+
+    t:case("Go to page validates the whole input and keeps a rejected form", function()
+        ctx.reset()
+        local editor, controller, snapshot = newEditor()
+        snapshot.page_position = 1
+        snapshot.writable = false
+        local dialog = editor:showGoToPage()
+        t:check(dialog ~= nil, "read-only navigation is available")
+        t:eq(dialog.input, "1", "current ordinal prefilled")
+        for _, invalid in ipairs({ "", "0", "3", "-1", "+2", "2.5", "1e2", "9999999999999999999999" }) do
+            dialog:setInputText(invalid)
+            dialog.buttons[1][2].callback()
+            t:eq(#controller.calls, 0, "invalid text does not navigate")
+            t:eq(editor.modal_widgets[dialog], true, "form retained")
+            editor:_closeModal(editor.modal_widget) -- validation message only
+        end
+        dialog:setInputText(" 002 ")
+        dialog.buttons[1][2].callback()
+        t:eq(controller.calls[1], "goto:2", "valid ordinal passed to controller")
+        t:eq(editor.modal_widgets[dialog], nil, "successful navigation closes once")
+        dialog.buttons[1][2].callback()
+        t:eq(#controller.calls, 1, "closed callback cannot navigate again")
+    end)
+
+    t:case("Go to page refuses contacts and callbacks from a replaced session", function()
+        ctx.reset()
+        local editor, controller, _, _, _, runtime = newEditor()
+        runtime.active_contact = true
+        local before = #ctx.env.dialogs
+        local dialog, err = editor:showGoToPage()
+        t:eq(dialog, nil, "contact refused before constructing keyboard")
+        t:eq(err, "contact_active", "contact reason")
+        t:eq(#ctx.env.dialogs, before, "no widget allocated")
+        runtime.active_contact = false
+        dialog = editor:showGoToPage()
+        dialog:setInputText("2")
+        controller.activeSession = function() return {} end
+        dialog.buttons[1][2].callback()
+        t:eq(#controller.calls, 0, "stale session callback is inert")
+        editor:_closeModal(dialog)
+    end)
 
     t:case("paper, rail and input regions stay separate", function()
         ctx.reset()
@@ -234,7 +297,7 @@ return function(ctx)
         local entry
         for i = 1, #more.buttons do
             local button = more.buttons[i][1]
-            if button.text == "Paper style" then entry = button end
+            if button.text == "Paper for this page" then entry = button end
         end
         t:check(entry ~= nil, "Paper style is reachable from More")
         t:eq(entry.enabled, true, "and enabled on a writable notebook")
@@ -330,7 +393,7 @@ return function(ctx)
         local more = editor:showMore()
         for i = 1, #more.buttons do
             local button = more.buttons[i][1]
-            if button.text == "Paper style" then
+            if button.text == "Paper for this page" then
                 t:eq(button.enabled, false, "Paper style is disabled")
             end
         end

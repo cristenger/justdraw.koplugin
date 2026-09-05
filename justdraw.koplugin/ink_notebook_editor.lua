@@ -948,7 +948,7 @@ function Editor:_rebuildControls()
     local next_button = self:_button(_("Next page"),
         self:_actionAvailability("next", snapshot),
         function() self:_runDomain("next") end, rects.next)
-    local add = self:_button(_("Add page"), self:_actionAvailability("add", snapshot),
+    local add = self:_button(_("Add page at end"), self:_actionAvailability("add", snapshot),
         function() self:_runDomain("add") end, rects.add)
     local more = self:_button(_("More"), snapshot.state ~= "loading",
         function() self:showMore() end, rects.more)
@@ -1034,6 +1034,9 @@ function Editor:_actionAvailability(action, snapshot)
     elseif action == "add" then
         if snapshot.writable then return true end
         return false, "read_only"
+    elseif action == "goto" then
+        if snapshot.page_count >= 1 then return true end
+        return false, "unavailable"
     end
     return false, "unavailable"
 end
@@ -1058,7 +1061,7 @@ function Editor:_reportBlockedAction(action, reason)
     end
 end
 
-function Editor:_runDomain(action)
+function Editor:_runDomain(action, argument)
     local snapshot = self:_refreshSnapshot()
     local enabled, blocked_reason = self:_actionAvailability(action, snapshot)
     if not enabled then
@@ -1074,6 +1077,8 @@ function Editor:_runDomain(action)
         ok, err = self.controller:goNext()
     elseif action == "add" then
         ok, err = self.controller:appendPage()
+    elseif action == "goto" then
+        ok, err = self.controller:goToPagePosition(argument)
     else
         return nil, "disabled"
     end
@@ -1280,10 +1285,8 @@ function Editor:paintTo(bb, x, y)
     bb:paintRect(geometry.paper_rect.x, geometry.paper_rect.y,
         border, geometry.paper_rect.h, Blitbuffer.COLOR_BLACK)
     local info = pageCountText(self.snapshot.page_count)
-    if self.snapshot.can_navigate and not self.snapshot.has_previous then
-        info = info .. " · " .. _("First page")
-    elseif self.snapshot.can_navigate and not self.snapshot.has_next then
-        info = info .. " · " .. _("Last page")
+    if self.snapshot.page_position then
+        info = T(_("Page %1 of %2"), self.snapshot.page_position, self.snapshot.page_count)
     end
     if self.snapshot.writable == false and self.snapshot.state == "ready" then
         info = info .. " · " .. _("Read-only")
@@ -1483,6 +1486,48 @@ function Editor:_closeModal(widget)
     return true
 end
 
+function Editor:showGoToPage()
+    if self.closed then return nil, "closed" end
+    local snapshot = self:_refreshSnapshot()
+    local enabled, reason = self:_actionAvailability("goto", snapshot)
+    if not enabled then return nil, reason end
+    if self.has_active_contact() then return nil, "contact_active" end
+    local session = self:_currentSession()
+    local dialog
+    dialog = InputDialog:new{
+        title = T(_("Go to page (1–%1)"), snapshot.page_count),
+        input_type = "number",
+        input = snapshot.page_position and tostring(snapshot.page_position) or "",
+        buttons = {{
+            { text = _("Cancel"), id = "close", callback = function() self:_closeModal(dialog) end },
+            { text = _("Go"), callback = function()
+                if self.closed or self:_currentSession() ~= session
+                    or not self.modal_widgets[dialog] then return end
+                if self.has_active_contact() then return end
+                local current = self:_refreshSnapshot()
+                local text = dialog:getInputText():match("^%s*(.-)%s*$")
+                local position = text:match("^%d+$") and tonumber(text)
+                if not position or position < 1 or position > current.page_count
+                    or position > 9007199254740991 or position ~= math.floor(position) then
+                    self:_showInfo(T(_("Enter a whole page number from 1 to %1."), current.page_count))
+                    return
+                end
+                local ok, err = self:_runDomain("goto", position)
+                local state = self:_refreshSnapshot().state
+                if ok or state == "save_failed" or state == "load_failed" then
+                    self:_closeModal(dialog)
+                elseif err ~= "contact_active" and err ~= "loading"
+                    and err ~= "transition_pending" then
+                    self:_showInfo(_("Couldn’t open that page. Try again."))
+                end
+            end },
+        }},
+    }
+    local shown, err = self:showModalSafely(dialog)
+    if shown and dialog.onShowKeyboard then dialog:onShowKeyboard() end
+    return shown, err
+end
+
 function Editor:showRename()
     local dialog
     dialog = InputDialog:new{
@@ -1578,10 +1623,12 @@ function Editor:showMore()
     dialog = ButtonDialog:new{
         title = _("More"),
         buttons = {
+            {{ text = _("Go to page…"), enabled = self.snapshot.can_navigate,
+                callback = function() self:_closeModal(dialog); self:showGoToPage() end }},
             {{ text = _("Rename notebook"), enabled = writable, callback = function()
                 self:_closeModal(dialog); self:showRename()
             end }},
-            {{ text = _("Paper style"), enabled = writable, callback = function()
+            {{ text = _("Paper for this page"), enabled = writable, callback = function()
                 self:_closeModal(dialog); self:showPaperStyle()
             end }},
             {{ text = _("Delete page"), enabled = writable and self.snapshot.page_count > 1,

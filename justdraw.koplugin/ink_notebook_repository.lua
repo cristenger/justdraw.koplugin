@@ -558,6 +558,44 @@ function Repository:listPages(notebook_id, opts)
         { notebook_id, after_key, after_id, limit }, pageRow)
 end
 
+-- Ordinals follow the same active-page ordering as listPages, not row ids.
+-- Called at page boundaries only: COUNT/OFFSET may scan page metadata.
+function Repository:pagePosition(page)
+    local ready, reason = self:_ready(false)
+    if not ready then return nil, reason end
+    local id = page and positiveInteger(page.id)
+    local notebook_id = page and positiveInteger(page.notebook_id)
+    local key = page and positiveInteger(page.sort_key)
+    if not id or not notebook_id or not key then return nil, "bad_id" end
+    local rows, err = self:_select([[
+        SELECT COUNT(*) FROM notebook_pages
+         WHERE notebook_id = ?1 AND deleted_at IS NULL
+           AND (sort_key < ?2 OR (sort_key = ?2 AND id <= ?3));]],
+        { notebook_id, key, id }, function(row) return num(row[1]) end)
+    if not rows then return nil, err end
+    if not rows[1] or rows[1] == 0 then return nil, "not_found" end
+    return rows[1]
+end
+
+function Repository:pageAtPosition(notebook_id, position)
+    local ready, reason = self:_ready(false)
+    if not ready then return nil, reason end
+    notebook_id = positiveInteger(notebook_id)
+    position = positiveInteger(position)
+    if not notebook_id then return nil, "bad_id" end
+    if not position or position > 9007199254740991 then return nil, "bad_position" end
+    local rows, err = self:_select([[
+        SELECT id, notebook_id, sort_key, logical_w, logical_h,
+               template_kind, created_at, updated_at, deleted_at
+          FROM notebook_pages
+         WHERE notebook_id = ?1 AND deleted_at IS NULL
+         ORDER BY sort_key, id LIMIT 1 OFFSET ?2;]],
+        { notebook_id, position - 1 }, pageRow)
+    if not rows then return nil, err end
+    if not rows[1] then return nil, "not_found" end
+    return rows[1]
+end
+
 function Repository:getPage(id, include_deleted)
     local ready, reason = self:_ready(false)
     if not ready then return nil, reason end

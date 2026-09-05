@@ -1631,6 +1631,31 @@ else
                 and scale_next and #scale_next == 50
                 and scale_next[1].sort_key > scale_rows[#scale_rows].sort_key)
 
+        local position_started = os.clock()
+        local last = repo:pageAtPosition(scale_id, 10000)
+        local ordinal = last and repo:pagePosition(last)
+        claim("notebook database: direct ordinal lookup reaches page 10,000",
+            true, last ~= nil and last.sort_key == 10240000 and ordinal == 10000,
+            string.format("%.6fs metadata lookup + count", os.clock() - position_started))
+        -- Use the scale fixture to leave earlier stroke/schema checks intact.
+        -- Gaps and another notebook must not change the order. This schema
+        -- makes (notebook_id, sort_key) unique, so actual ties cannot occur.
+        local removed = repo:pageAtPosition(scale_id, 2)
+        if removed then
+            repo:softDeletePage(scale_id, removed.id)
+        end
+        local ordered = repo:listPages(scale_id, { limit = 4 })
+        local agrees = ordered ~= nil and #ordered == 4
+        for i, page in ipairs(ordered or {}) do
+            local selected = repo:pageAtPosition(scale_id, i)
+            agrees = agrees and repo:pagePosition(page) == i
+                and selected ~= nil and selected.id == page.id
+                and selected.notebook_id == scale_id
+        end
+        claim("notebook database: ordinal lookup agrees with active-page ordering after deletion",
+            true, agrees
+                and repo:pageAtPosition(scale_id, 10000) == nil)
+
         conn:exec([[
             WITH RECURSIVE seq(x) AS (
                 VALUES(1) UNION ALL SELECT x + 1 FROM seq WHERE x < 5000

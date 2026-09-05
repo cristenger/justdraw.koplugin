@@ -304,6 +304,11 @@ function Controller:undo()
     return self.active_session:undo()
 end
 
+function Controller:goToPagePosition(position)
+    if not self.active_session then return nil, "no_notebook" end
+    return self.active_session:goToPagePosition(position)
+end
+
 function Controller:goPrevious()
     if not self.active_session then return nil, "no_notebook" end
     return self.active_session:goPrevious()

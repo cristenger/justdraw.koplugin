@@ -57,6 +57,93 @@ return function(ctx)
 
     t:describe("ink_notebook_session / navigation gates")
 
+    t:case("ordinal navigation preserves page ordering and durable selection", function()
+        local session, store, sched, input = fixture{
+            pages = { page(11, 1024), page(40, 4096), page(99, 8192) }, stroke_on = 99,
+        }
+        session:open(1)
+        t:eq(session:uiSnapshot().page_position, 1, "first ordinal")
+        local queries = store.calls.page_position
+        for _ = 1, 100 do session:uiSnapshot() end
+        session:flush()
+        t:eq(store.calls.page_position, queries, "snapshots and ordinary flush do no ordinal SQL")
+        t:eq(session:goToPagePosition(1), true, "same page is a no-op")
+        t:eq(store.calls.page_at_position, 0, "same page needs no lookup")
+        input.contact = true
+        local ok, err = session:goToPagePosition(3)
+        t:eq(ok, nil, "contact refuses jump")
+        t:eq(err, "contact_active", "contact guard preserved")
+        t:eq(store.calls.page_at_position, 0, "contact refused before lookup")
+        input.contact = false
+        t:eq(session:goToPagePosition(3), true, "direct jump accepted")
+        t:eq(session:uiSnapshot().page_position, nil, "old ordinal hidden during loading")
+        t:eq(store.notebooks[1].current_page_id, 11, "destination not yet durable")
+        sched:drain()
+        t:eq(session:currentPage().id, 99, "ID resolved from ordinal")
+        t:eq(session:uiSnapshot().page_position, 3, "destination ordinal")
+        t:eq(store.calls.page_at_position, 1, "one direct lookup")
+        t:eq(session:goToPagePosition(2), true, "middle page")
+        t:eq(session:softDeleteCurrentPage(), true, "middle removed")
+        sched:drain()
+        t:eq(session:uiSnapshot().page_count, 2, "two active pages")
+        local actual = session:currentPage().id == 99 and 2 or 1
+        t:eq(session:uiSnapshot().page_position, actual, "ordinal follows tombstone")
+    end)
+
+    t:case("ordinal errors keep readable ink and failed commits retain the old page", function()
+        local session, store = fixture()
+        store.fail_page_position = "read_error"
+        session:open(1)
+        t:eq(session:uiSnapshot().page_position, nil, "cosmetic fallback")
+        t:eq(session:stateName(), "ready", "ink remains usable")
+        store.fail_page_position = nil
+        local surface = session:surface()
+        store.fail_page_at_position = "read_error"
+        t:eq(session:goToPagePosition(2), nil, "lookup failed")
+        t:eq(session:surface(), surface, "old cache retained")
+        store.fail_page_at_position = nil
+        surface:addStroke({1, 1, 2, 2}, 2, 4, 1)
+        store.fail_transaction = "commit"
+        t:eq(session:goToPagePosition(2), nil, "commit failed")
+        t:eq(session:surface(), surface, "old ink remains retryable")
+        t:eq(store.notebooks[1].current_page_id, 11, "old durable selection")
+        store.fail_transaction = nil
+        t:eq(session:retrySave(), true, "save retry")
+        t:eq(session:goToPagePosition(2), true, "jump after retry")
+        t:eq(session:uiSnapshot().page_position, 2, "position recovered")
+    end)
+
+    t:case("ordinal jumps are read-only compatible and range checked", function()
+        local session, store = fixture()
+        store.read_only = true
+        session:open(1)
+        t:eq(session:goToPagePosition(2), true, "reading does not require writes")
+        t:eq(session:uiSnapshot().page_position, 2, "readonly position")
+        local queries = store.calls.page_at_position
+        for _, bad in ipairs({ 0, -1, 3, 2.5, math.huge, 0/0, "2" }) do
+            local ok, err = session:goToPagePosition(bad)
+            t:eq(ok, nil, "invalid position")
+            t:eq(err, "bad_position", "range reason")
+        end
+        t:eq(store.calls.page_at_position, queries, "invalid inputs perform no lookup")
+    end)
+
+    t:case("a failed ordinal destination stays unconfirmed until retry finishes", function()
+        local session, store, sched = fixture{ stroke_on = 12 }
+        session:open(1)
+        store.fail_stroke_cursor = "broken destination"
+        t:eq(session:goToPagePosition(2), true, "destination load started")
+        sched:drain()
+        t:eq(session:stateName(), "load_failed", "failure remains retryable")
+        t:eq(session:uiSnapshot().page_position, nil, "no confirmed destination number")
+        t:eq(store.notebooks[1].current_page_id, 11, "old durable page preserved")
+        store.fail_stroke_cursor = nil
+        t:eq(session:retryLoad(), true, "load retry")
+        sched:drain()
+        t:eq(session:uiSnapshot().page_position, 2, "ordinal confirmed after loading")
+        t:eq(store.notebooks[1].current_page_id, 12, "then selection is durable")
+    end)
+
     t:case("only the page that reaches ready becomes current on disk", function()
         local session, store, sched = fixture{ stroke_on = 12 }
         t:eq(session:open(1), true, "opened first page")
@@ -181,6 +268,7 @@ return function(ctx)
         store.fail_select_page = nil
         t:eq(session:retrySave(), true, "metadata retry succeeds")
         t:eq(store.notebooks[1].current_page_id, 12, "new page is now durable")
+        t:eq(session:uiSnapshot().page_position, 2, "metadata retry also refreshes ordinal")
         t:check(input.current ~= nil, "input resumes afterward")
     end)
 

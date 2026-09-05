@@ -1435,6 +1435,8 @@ function support.newNotebookStore(opts)
     store.pages = pages
     store.calls.list_notebooks = 0
     store.calls.list_pages = 0
+    store.calls.page_position = 0
+    store.calls.page_at_position = 0
     store.calls.select_page = 0
     store.calls.purge = 0
 
@@ -1493,6 +1495,37 @@ function support.newNotebookStore(opts)
                 or a.sort_key < b.sort_key
         end)
         return out
+    end
+
+    function store:pagePosition(page)
+        self.calls.page_position = self.calls.page_position + 1
+        if self.fail_page_position then return nil, self.fail_page_position end
+        local position = 0
+        for _, p in ipairs(self.pages) do
+            if p.notebook_id == page.notebook_id and not p.deleted_at
+                and (p.sort_key < page.sort_key
+                    or p.sort_key == page.sort_key and p.id <= page.id) then
+                position = position + 1
+            end
+        end
+        if position == 0 then return nil, "not_found" end
+        return position
+    end
+
+    function store:pageAtPosition(notebook_id, position)
+        self.calls.page_at_position = self.calls.page_at_position + 1
+        if self.fail_page_at_position then return nil, self.fail_page_at_position end
+        local pages = {}
+        for _, p in ipairs(self.pages) do
+            if p.notebook_id == notebook_id and not p.deleted_at then
+                pages[#pages + 1] = p
+            end
+        end
+        table.sort(pages, function(a, b)
+            return a.sort_key == b.sort_key and a.id < b.id or a.sort_key < b.sort_key
+        end)
+        if not pages[position] then return nil, "not_found" end
+        return copyRow(pages[position])
     end
 
     function store:getPage(id)
