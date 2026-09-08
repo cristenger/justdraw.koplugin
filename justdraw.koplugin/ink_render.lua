@@ -7,6 +7,25 @@ local floor, ceil = math.floor, math.ceil
 local abs = math.abs
 
 local Render = {}
+local function setPixelExplicit(bb, x, y, color) bb:setPixel(x, y, color) end
+
+-- BB_fill_rect's full-width fast path fills stride * height bytes. A viewport
+-- retains its parent's stride, so a full-width write can escape the view.
+-- Two narrower rectangles avoid that path without changing any pixels.
+-- The one-pixel case uses the documented Lua setter instead of the C fill.
+function Render.safeRect(bb, x, y, w, h, color)
+    if x == 0 and w == bb:getWidth() and bb.pixel_stride and bb.w
+        and bb.pixel_stride > bb.w then
+        if w > 1 then
+            bb:paintRect(0, y, w - 1, h, color)
+            bb:paintRect(w - 1, y, 1, h, color)
+        else
+            bb:paintRect(x, y, w, h, color, setPixelExplicit)
+        end
+    else
+        bb:paintRect(x, y, w, h, color)
+    end
+end
 
 local function finite(v)
     return type(v) == "number" and v == v
@@ -41,7 +60,7 @@ local function paintSample(bb, x, y, w, half, color, bw, bh)
     if right > bw then right = bw end
     if bottom > bh then bottom = bh end
     if right <= left or bottom <= top then return false end
-    bb:paintRect(left, top, right - left, bottom - top, color)
+    Render.safeRect(bb, left, top, right - left, bottom - top, color)
     return true, left, top, right, bottom
 end
 
