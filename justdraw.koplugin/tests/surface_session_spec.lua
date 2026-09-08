@@ -315,8 +315,8 @@ return function(ctx)
         t:check(box ~= nil, "the cut reports a dirty region")
         local metas = session:cache():strokes()
         t:eq(#metas, 2, "two fragments remain")
-        t:eq(metas[1].point_count, 2, "the head kept its two points")
-        t:eq(metas[2].point_count, 2, "the tail kept its two points")
+        t:eq(metas[1].point_count, 3, "the head includes the exact cut endpoint")
+        t:eq(metas[2].point_count, 3, "the tail includes the exact cut endpoint")
         t:check(metas[1].from_erase and metas[2].from_erase,
             "both are marked as erase debris")
         t:eq(session:pendingWrites(), 3,

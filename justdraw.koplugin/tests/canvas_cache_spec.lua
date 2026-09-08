@@ -395,20 +395,22 @@ return function(ctx)
         local cache = readyCache{ strokes = { bar(100, 100, 5, 4) }, cell = 100 }
         local ctx = cache:beginErase()
         -- bar points: x = 100,110,120,130,140 at y = 100. A vertical capsule
-        -- through x = 120 with reach 4 + 4/2 kills the two middle segments.
+        -- through x = 120 cuts at 114 and 126 (reach = 4 + 4/2).
         local hits = cache:eraseSweep(120, 90, 120, 110, 4, ctx)
         cache:endErase(ctx)
         t:eq(#hits, 1, "one stroke under the capsule")
         local hit = hits[1]
         t:eq(hit.n, 5, "with all its points decoded")
         t:eq(#hit.fragments, 2, "cut into two runs")
-        t:eq(hit.fragments[1].first, 1, "head from the start")
-        t:eq(hit.fragments[1].last, 2, "to before the cut")
-        t:eq(hit.fragments[2].first, 4, "tail from after the cut")
-        t:eq(hit.fragments[2].last, 5, "to the end")
-        t:check(math.abs(hit.removed.min_x - 110) < 0.1
-            and math.abs(hit.removed.max_x - 130) < 0.1,
-            "the removed box spans the dead segments, dequantised")
+        local head, tail = hit.fragments[1], hit.fragments[2]
+        t:check(math.abs(head.points[1] - 100) < 0.1, "head from the start")
+        t:check(math.abs(head.points[head.n * 2 - 1] - 114) < 0.1,
+            "head ends at the intersection")
+        t:check(math.abs(tail.points[1] - 126) < 0.1, "tail starts at the intersection")
+        t:check(math.abs(tail.points[tail.n * 2 - 1] - 140) < 0.1, "tail to the end")
+        t:check(math.abs(hit.removed.min_x - 114) < 0.1
+            and math.abs(hit.removed.max_x - 126) < 0.1,
+            "the removed box spans only the covered centreline")
     end)
 
     t:case("the sweep collects every stroke under the capsule, ascending", function()
@@ -450,10 +452,11 @@ return function(ctx)
         t:eq(#hits, 1, "the seam stroke was found")
         t:eq(hits[1].n, 2000, "joined with the seam point deduplicated")
         t:eq(#hits[1].fragments, 2, "and cut into two runs")
-        t:eq(hits[1].fragments[1].first, 1, "head intact")
-        t:eq(hits[1].fragments[2].last, 2000, "tail intact")
-        t:check(hits[1].fragments[1].last < hits[1].fragments[2].first,
-            "with a real gap between them")
+        local head, tail = hits[1].fragments[1], hits[1].fragments[2]
+        t:check(math.abs(head.points[1] - 10) < 0.1, "head intact")
+        t:check(math.abs(tail.points[tail.n * 2 - 1] - 1809.1) < 0.1, "tail intact")
+        t:check(math.abs(tail.points[1] - head.points[head.n * 2 - 1] - 8) < 0.1,
+            "the gap is the capsule diameter, even across chunks")
         t:check(store.calls.stroke_chunk - reads <= 4,
             "chunks were read through the LRU, not re-decoded per segment")
     end)

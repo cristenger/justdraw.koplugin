@@ -103,9 +103,11 @@ the same palette; in document panels, drawing must be running for this
 shortcut. Tapping Pen while the eraser is selected returns to the pen.
 Preferences are shared between notebooks and documents.
 
-Fragments left by partial erasing keep the visual order of the stroke they came
-from, after saving and reopening. Undo keeps its existing behaviour; erase
-fragments are still skipped only in the session that created them.
+Partial erasing now cuts at the eraser's intersection with the centreline, even
+on sparsely sampled lines. Fragments left by it keep the visual order of the
+stroke they came from, after saving and reopening. Undo keeps its existing
+behaviour; erase fragments are still skipped only in the session that created
+them.
 
 **Notebooks.** Choose a name, paper size and paper style when creating a
 notebook. The paper options scroll when the virtual keyboard leaves little

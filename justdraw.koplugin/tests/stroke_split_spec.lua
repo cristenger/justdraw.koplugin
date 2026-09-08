@@ -100,4 +100,44 @@ return function(ctx)
         t:eq(removed.min_x, 0, "and its points joined the removed box")
         t:eq(removed.max_x, 100, "with the dead segment's")
     end)
+    t:describe("ink_stroke_split / exact centreline clipping")
+    t:case("sampling density does not change the cut", function()
+        for _, count in ipairs({ 2, 21, 401 }) do
+            local points = {}
+            for i = 0, count - 1 do
+                points[#points + 1] = i * 400 / (count - 1)
+                points[#points + 1] = 100
+            end
+            for _, sweep in ipairs({ {200,100,200,100}, {200,80,200,120} }) do
+                local f = Split.clipByCapsule(points, count, sweep[1], sweep[2], sweep[3], sweep[4], 20, 4)
+                t:eq(#f, 2, "two survivors at density " .. count)
+                t:check(math.abs(f[1].points[f[1].n*2-1] - 180) < 1e-7, "entry at 180")
+                t:check(math.abs(f[2].points[1] - 220) < 1e-7, "exit at 220")
+                t:eq(f[1].points[1], 0, "start preserved")
+                t:eq(f[2].points[f[2].n*2-1], 400, "end preserved")
+            end
+        end
+    end)
+    t:case("capsule sides, round caps, tangency and zero length", function()
+        local f = Split.clipByCapsule({0,0,100,0}, 2, 40,0,60,0,10,0)
+        t:eq(f[1].points[3], 30, "first round cap")
+        t:eq(f[2].points[1], 70, "second round cap")
+        t:eq(Split.clipByCapsule({0,10,100,10},2,50,0,50,0,10,0), nil, "tangency removes no length")
+        f = Split.clipByCapsule({0,0,0,0,100,0},3,0,0,0,0,10,0)
+        t:eq(#f, 1, "duplicate endpoint inside is removed")
+        t:eq(f[1].points[1], 10, "survivor starts at circle")
+        t:eq(#Split.clipByCapsule({0,0},1,0,0,0,0,10,0), 0, "dot removed")
+        t:eq(Split.clipByCapsule({0,0,100,0},2,50,20,50,20,10,0), nil, "miss")
+    end)
+
+    t:case("exact cuts work in a rotated frame and on a previous fragment", function()
+        local q=math.sqrt(0.5)
+        local f=Split.clipByCapsule({0,0,400*q,400*q},2,200*q,200*q,200*q,200*q,20,0)
+        t:check(math.abs(f[1].points[3]-180*q)<1e-7,"diagonal circle entry")
+        t:check(math.abs(f[2].points[1]-220*q)<1e-7,"diagonal circle exit")
+        local again=Split.clipByCapsule(f[1].points,f[1].n,50*q,50*q,50*q,50*q,20,0)
+        t:eq(#again,2,"recutting preserves both outside runs")
+        t:check(math.abs(again[2].points[again[2].n*2-1]-180*q)<1e-7,"earlier cut does not move")
+    end)
+
 end

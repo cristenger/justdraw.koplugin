@@ -699,7 +699,7 @@ return function(ctx)
         Capture:resolveTools(input)
         local session, _, spec = notebookFixture()
         local surface = session:surface()
-        surface:addStroke({ 505, 505, 515, 520 }, 2, 4, Replays.TOOL_PEN)
+        surface:addStroke({ 518, 528, 523, 533 }, 2, 4, Replays.TOOL_PEN)
         t:eq(#surface:cache():strokes(), 1, "a stroke to erase")
 
         playNotebook(spec, input,

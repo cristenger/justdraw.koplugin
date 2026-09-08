@@ -153,4 +153,123 @@ function Split.splitByCapsule(points, n, ex0, ey0, ex1, ey1, reach, min_keep_len
     return fragments, removed
 end
 
+local function finite(v)
+    return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
+end
+
+-- Parameter interval of a segment inside a circle, clipped to [0,1].
+local function circleInterval(x, y, dx, dy, cx, cy, r2)
+    local fx, fy = x - cx, y - cy
+    local a = dx * dx + dy * dy
+    local b = fx * dx + fy * dy
+    local c = fx * fx + fy * fy - r2
+    if not finite(a) or not finite(b) or not finite(c) then return nil end
+    if a == 0 then if c <= 0 then return 0, 1 end; return nil end
+    local discriminant = b * b - a * c
+    if not finite(discriminant) or discriminant < 0 then return nil end
+    local root = sqrt(discriminant)
+    local first, last = (-b - root) / a, (-b + root) / a
+    if first < 0 then first = 0 end
+    if last > 1 then last = 1 end
+    if first > last then return nil end
+    return first, last
+end
+
+local function slab(p, d, low, high, first, last)
+    if d == 0 then
+        if p < low or p > high then return nil end
+        return first, last
+    end
+    local a, b = (low - p) / d, (high - p) / d
+    if not finite(a) or not finite(b) then return nil end
+    if a > b then a, b = b, a end
+    if a > first then first = a end
+    if b < last then last = b end
+    if first > last then return nil end
+    return first, last
+end
+
+-- A capsule is convex: the union of its body and end-circle intervals is
+-- one interval. The sweep's unit vector is computed once per erase query.
+local function capsuleInterval(x, y, dx, dy, ex0, ey0, ex1, ey1, ux, uy, len, r, r2)
+    local first, last = circleInterval(x, y, dx, dy, ex0, ey0, r2)
+    if len == 0 then return first, last end
+    local a, b = circleInterval(x, y, dx, dy, ex1, ey1, r2)
+    if a then
+        if not first or a < first then first = a end
+        if not last or b > last then last = b end
+    end
+    local fx, fy = x - ex0, y - ey0
+    a, b = slab(fx * ux + fy * uy, dx * ux + dy * uy, 0, len, 0, 1)
+    if a then a, b = slab(-fx * uy + fy * ux, -dx * uy + dy * ux, -r, r, a, b) end
+    if a then
+        if not first or a < first then first = a end
+        if not last or b > last then last = b end
+    end
+    return first, last
+end
+
+--[[--
+Exact cuts for modern surfaces (ADR-47). Surviving fragments carry new flat
+point arrays because intersections need not coincide with recorded samples.
+Legacy sidecars keep splitByCapsule's index-range contract unchanged.
+The miss path allocates nothing; no resampling proportional to segment length
+is performed. Refused geometry leaves the original untouched.
+]]
+function Split.clipByCapsule(points, n, ex0, ey0, ex1, ey1, reach, min_keep_len)
+    local r2 = reach * reach
+    local edx, edy = ex1 - ex0, ey1 - ey0
+    local len = sqrt(edx * edx + edy * edy)
+    if not finite(r2) or not finite(len) or reach < 0 then return nil end
+    if not Split.capsuleHitsRange(points, 1, n, ex0, ey0, ex1, ey1, r2) then return nil end
+    local ux, uy = 0, 0
+    if len > 0 then ux, uy = edx / len, edy / len end
+    local fragments, removed, run = {}, nil, nil
+    local function remove(x, y)
+        if not removed then removed = { min_x=x, min_y=y, max_x=x, max_y=y }
+        else
+            removed.min_x = math.min(removed.min_x, x); removed.max_x = math.max(removed.max_x, x)
+            removed.min_y = math.min(removed.min_y, y); removed.max_y = math.max(removed.max_y, y)
+        end
+    end
+    local function append(x, y)
+        if not run then run = {} end
+        local k = #run
+        if k > 0 and math.abs(run[k-1]-x) < 1e-9 and math.abs(run[k]-y) < 1e-9 then return end
+        run[k+1], run[k+2] = x, y
+    end
+    local function closeRun()
+        if not run then return end
+        local length = 0
+        for i=3,#run,2 do
+            local dx, dy = run[i]-run[i-2], run[i+1]-run[i-1]
+            length = length + sqrt(dx*dx+dy*dy)
+        end
+        if #run < 4 or length < (min_keep_len or 0) then
+            for i=1,#run,2 do remove(run[i],run[i+1]) end
+        else fragments[#fragments+1] = { points=run, n=#run/2 } end
+        run = nil
+    end
+    if n == 1 then remove(points[1],points[2]); return fragments, removed end
+    for i=3,n*2,2 do
+        local x,y = points[i-2],points[i-1]
+        local dx,dy = points[i]-x,points[i+1]-y
+        if not finite(dx) or not finite(dy) then return nil end
+        local a,b = capsuleInterval(x,y,dx,dy,ex0,ey0,ex1,ey1,ux,uy,len,reach,r2)
+        -- A tangent removes no length. Degenerate samples inside the rubber
+        -- still divide the runs, so they cannot bridge a later cut.
+        if a and b-a > 1e-12 then
+            if a > 0 then append(x,y); append(x+dx*a,y+dy*a) end
+            closeRun()
+            remove(x+dx*a,y+dy*a); remove(x+dx*b,y+dy*b)
+            if b < 1 then append(x+dx*b,y+dy*b); append(points[i],points[i+1]) end
+        else
+            append(x,y); append(points[i],points[i+1])
+        end
+    end
+    closeRun()
+    if not removed then return nil end
+    return fragments, removed
+end
+
 return Split

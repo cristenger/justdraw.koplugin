@@ -349,13 +349,15 @@ function SurfaceSession:_applySplit(hit)
     local added = {}
     for f = 1, #hit.fragments do
         local range = hit.fragments[f]
-        local count = range.last - range.first + 1
-        local frag = {}
-        local at = 0
-        for p = range.first, range.last do
-            at = at + 1
-            frag[at * 2 - 1] = hit.points[p * 2 - 1]
-            frag[at * 2] = hit.points[p * 2]
+        local count = range.n or (range.last - range.first + 1)
+        local frag = range.points or {}
+        if not range.points then
+            local at = 0
+            for p = range.first, range.last do
+                at = at + 1
+                frag[at * 2 - 1] = hit.points[p * 2 - 1]
+                frag[at * 2] = hit.points[p * 2]
+            end
         end
         local frag_id, err = self:addStroke(frag, count, m.width, m.tool, {
             paint_seq = m.paint_seq or m.seq, defer_paint = true,
@@ -378,9 +380,12 @@ function SurfaceSession:_applySplit(hit)
     end
     self.cache_obj:forgetStroke(m.id)
     self.edited = true
+    -- Interpolated endpoints can change the historical DDA's sampling phase.
+    -- Rebuild its full box so live cache and persisted replay cannot diverge.
+    local repair = hit.exact and m or hit.removed
     return self.cache_obj:repair{
-        min_x = hit.removed.min_x, min_y = hit.removed.min_y,
-        max_x = hit.removed.max_x, max_y = hit.removed.max_y,
+        min_x = repair.min_x, min_y = repair.min_y,
+        max_x = repair.max_x, max_y = repair.max_y,
         width = m.width,
     }
 end

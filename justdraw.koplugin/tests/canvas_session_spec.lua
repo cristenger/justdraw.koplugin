@@ -574,7 +574,7 @@ return function(ctx)
         session:flush()
         local durable = session:cache():strokes()[1].id
         t:check(durable > 0, "cache adopted the SQLite identity")
-        t:check(session:eraseAt(25, 10, 2) ~= nil, "the flushed stroke is erasable")
+        t:check(session:eraseAt(25, 10, 20) ~= nil, "the flushed stroke is entirely within the eraser")
         session:flush()
         t:eq(#store.strokes[1], 0, "and remains deleted on disk")
     end)

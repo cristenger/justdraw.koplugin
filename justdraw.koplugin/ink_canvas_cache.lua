@@ -659,13 +659,14 @@ function Cache:eraseSweep(x0, y0, x1, y1, radius, ctx)
         if touched then
             local points, n = self:_readAllPoints(m, ctx)
             if not points then self:_fail(n); return nil, n end
-            local fragments, removed = Split.splitByCapsule(points, n,
+            local fragments, removed = Split.clipByCapsule(points, n,
                 x0, y0, x1, y1, reach, tonumber(m.width) or 0)
             if fragments then
                 if not hits then hits = {} end
                 hits[#hits + 1] = {
                     meta = m, points = points, n = n,
                     fragments = fragments, removed = removed,
+                    exact = true,
                 }
             end
         end
