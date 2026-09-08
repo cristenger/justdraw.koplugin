@@ -55,66 +55,70 @@ function InkBar:mkButton(text, width, cb)
     }
 end
 
+-- Button:setText's same-width shortcut does not fit a newly longer label.
+-- Context controls change from Draw to Loading/Read-only and Show to Go;
+-- rebuild only the changed label, keeping the original frame height.
+function InkBar:setContextText(button, text)
+    if text == button.text then return end
+    button.height = button.height or button.label_widget:getSize().h
+    button.context_font_size = button.context_font_size or button.text_font_size
+    button.label_widget:free()
+    button.text, button.text_font_size = text, button.context_font_size
+    button:init()
+    PenDialog.fitButton(button)
+end
+
 function InkBar:init()
     local p = self.plugin
     local w = math.floor(Screen:getWidth() * 0.15)
-
-    self.draw_btn = self:mkButton(_("Draw"), w, function()
-        if p.canvas_open and p.session and p.session:loadFailed() then
-            p:retryCanvasLoad()
-        else
-            p:setDrawing(not p.drawing)
+    local controls = VerticalGroup:new{align="center"}
+    if self.note_return then
+        self.show_btn = self:mkButton(_("Show note"), w, function() p:showNote() end)
+        self.notes_btn = self:mkButton(_("Notes"), w, function() p:onShowDocumentNotes() end)
+        self.dismiss_btn = self:mkButton(_("Dismiss"), w, function() p:dismissNoteReturnBar() end)
+        controls[1], controls[2], controls[3] = self.show_btn, self.notes_btn, self.dismiss_btn
+    else
+        self.draw_btn = self:mkButton(_("Draw"), w, function()
+            if p.canvas_open and p.session and p.session:loadFailed() then
+                p:retryCanvasLoad()
+            else
+                p:setDrawing(not p.drawing)
+            end
+        end)
+        self.pen_btn = self:mkButton(_("Pen"), w, function()
+            if not p.eraser and p.drawing then p:showPenSettingsDialog()
+            else p:setEraser(false) end
+        end)
+        -- Keep the existing outer geometry when the longer state label is fitted.
+        self.pen_btn.height = self.draw_btn.label_widget:getSize().h
+        self.pen_font_size = self.pen_btn.text_font_size
+        self.pen_btn.avoid_text_truncation = true
+        self.pen_btn.help_text = _("Tap the selected pen to change its style and width.")
+        self.eraser_btn = self:mkButton(_("Eraser"), w, function() p:setEraser(true) end)
+        self.undo_btn = self:mkButton(_("Undo"), w, function() p:onJustDrawUndo() end)
+        self.more_btn = self:mkButton(_("More"), w, function() p:showBarMenu() end)
+        self.hide_btn = self:mkButton(self.embedded and _("Hide note") or _("Hide"), w,
+            function() p:setBarShown(false) end)
+        controls[1], controls[2], controls[3], controls[4] =
+            self.draw_btn, self.pen_btn, self.eraser_btn, self.undo_btn
+        if self.note_context then
+            self.notes_btn = self:mkButton(_("Notes"), w, function() p:onShowDocumentNotes() end)
+            controls[#controls + 1] = self.notes_btn
         end
-    end)
-    self.pen_btn = self:mkButton(_("Pen"), w, function()
-        if not p.eraser and p.drawing then p:showPenSettingsDialog()
-        else p:setEraser(false) end
-    end)
-    -- Keep the existing outer geometry when the longer state label is fitted.
-    self.pen_btn.height = self.draw_btn.label_widget:getSize().h
-    self.pen_font_size = self.pen_btn.text_font_size
-    self.pen_btn.avoid_text_truncation = true
-    self.pen_btn.help_text = _("Tap the selected pen to change its style and width.")
-    self.eraser_btn = self:mkButton(_("Eraser"), w, function()
-        p:setEraser(true)
-    end)
-    self.undo_btn = self:mkButton(_("Undo"), w, function()
-        p:onJustDrawUndo()
-    end)
-    self.more_btn = self:mkButton(_("More"), w, function()
-        p:showBarMenu()
-    end)
-    self.hide_btn = self:mkButton(_("Hide"), w, function()
-        p:setBarShown(false)
-    end)
-
+        controls[#controls + 1], controls[#controls + 2] = self.more_btn, self.hide_btn
+    end
     self[1] = FrameContainer:new{
         background = Blitbuffer.COLOR_WHITE,
         bordersize = Size.border.window,
         radius = Size.radius.window,
         padding = Size.padding.small,
         margin = 0,
-        VerticalGroup:new{
-            align = "center",
-            self.draw_btn,
-            self.pen_btn,
-            self.eraser_btn,
-            self.undo_btn,
-            self.more_btn,
-            self.hide_btn,
-        },
+        controls,
     }
-
     local size = self[1]:getSize()
     local pad = Size.padding.large
-    local x = (self.side == "left") and pad
-        or (Screen:getWidth() - size.w - pad)
-    self.dimen = Geom:new{
-        x = x,
-        y = math.floor((Screen:getHeight() - size.h) / 2),
-        w = size.w,
-        h = size.h,
-    }
+    local x = (self.side == "left") and pad or (Screen:getWidth() - size.w - pad)
+    self.dimen = Geom:new{x=x, y=math.floor((Screen:getHeight() - size.h) / 2), w=size.w, h=size.h}
     self:update(false)
 end
 
@@ -129,6 +133,13 @@ end
 --- Relabel the stateful buttons. Pass true to also repaint.
 function InkBar:update(refresh)
     local p = self.plugin
+    if self.note_return then
+        local c = p.note_context
+        self:setContextText(self.show_btn, c and c.placement == "away" and _("Go to note") or _("Show note"))
+        self.show_btn:enableDisable(c ~= nil and (c.placement == "here" or c.placement == "away"))
+        if refresh then UIManager:setDirty(self, "ui", self.dimen) end
+        return
+    end
     local draw_text = p.drawing and _("Stop") or _("Draw")
     local session = p.session
     local cache = session and session:cache()
@@ -136,9 +147,10 @@ function InkBar:update(refresh)
         local state = cache:stateName()
         if state == "loading" then draw_text = _("Loading")
         elseif state == "load_failed" then draw_text = _("Retry")
-        elseif not session:isWritable() then draw_text = _("View") end
+        elseif not session:isWritable() then draw_text = self.note_context and _("Read-only") or _("View") end
     end
-    self.draw_btn:setText(draw_text, self.draw_btn.width)
+    if self.note_context then self:setContextText(self.draw_btn, draw_text)
+    else self.draw_btn:setText(draw_text, self.draw_btn.width) end
     -- The active-tool check rides in the label, not in `checked_func`: a
     -- Button refreshes that checkmark only after its own tap, and the tool
     -- also flips from outside the bar -- the menu, or a bound eraser gesture.
@@ -156,6 +168,15 @@ function InkBar:update(refresh)
     end
     self.eraser_btn:setText(p.eraser and _("Eraser") .. mark or _("Eraser"),
         self.eraser_btn.width)
+    if self.note_context and session then
+        local ready = cache and cache:isReady()
+        self.draw_btn:enableDisable(p.drawing or session:loadFailed()
+            or ready and session:isWritable() and not p.canvas_off_page and not session:saveFailed())
+        local editing = p.drawing and ready and session:isWritable() and not p.canvas_off_page
+        self.pen_btn:enableDisable(editing)
+        self.eraser_btn:enableDisable(editing)
+        self.undo_btn:enableDisable(editing)
+    end
     if refresh then
         -- Embedded, the bar is not a window, and UIManager finds nothing to
         -- mark dirty when handed one that is not on the stack. The overlay is.

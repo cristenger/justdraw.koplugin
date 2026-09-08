@@ -326,6 +326,10 @@ do
         margin = NotebookLayout.BUTTON_MARGIN, padding = Size.padding.button,
     }
     local size = made:getSize()
+    made:enableDisable(false)
+    claim("Button enableDisable(false) disables interaction", true, made.enabled == false, tostring(made.enabled))
+    made:enableDisable(true)
+    claim("Button enableDisable(true) enables interaction", true, made.enabled == true, tostring(made.enabled))
     claim("Button treats `width` as the widget's own width",
         true, size.w == width, size.w .. " for a requested " .. width)
     claim("Button treats `height` as the label box, not the widget's height",

@@ -289,7 +289,7 @@ return function(ctx)
     t:case("opening a sheet turns drawing on", function()
         local p = canvasPlugin()
         p:openCanvasHere()
-        t:eq(p.drawing, true, "there is no point opening one to look at it")
+        t:eq(p.drawing, true, "generic sheet entry retains editing behavior")
     end)
 
     t:case("a populated sheet captures no ink until its chunks validate", function()
@@ -353,6 +353,53 @@ return function(ctx)
         env.UIManager:flush()
         t:eq(p.session:cache():isReady(), true, "retry rebuilt the raster")
         t:eq(p.drawing, true, "capture resumes after successful validation")
+    end)
+
+    t:describe("main / canvas viewing intent")
+    t:case("view survives ready, retry, recovery and same-ID reopen without a lease", function()
+        local rows, pages = manySheets(1)
+        local canvas = rows[1]
+        local p, store = canvasPlugin{canvases=rows, pages=pages, strokes={
+            {canvas_id=canvas.id, stroke={width=4,tool=1,n=2,points={10,10,30,30}}},
+        }}
+        local saved = G_reader_settings.data.justdraw_canvas_height
+        store.fail_stroke_chunk = 0
+        local overlay = p:openCanvas(canvas, {mode="view",height_pct=40,remember_height=false})
+        t:eq(p.drawing, false, "loading does not capture")
+        env.UIManager:flush()
+        t:eq(p.session:loadFailed(), true, "load failure is visible")
+        store.fail_stroke_chunk = nil
+        p:retryCanvasLoad(); env.UIManager:flush()
+        t:eq(p.drawing, false, "Retry preserves view")
+        t:eq(p.input_lease, nil, "no lease after ready")
+        p:onCanvasSaveRecovered(canvas)
+        t:eq(p.drawing, false, "save recovery is not user intent")
+        p:setDrawing(true)
+        t:eq(p.drawing, true, "explicit Draw works")
+        local copy = {}; for k,v in pairs(canvas) do copy[k]=v end
+        local cache = p.session:cache()
+        t:eq(p:openCanvas(copy,{mode="view"}), overlay, "same ID returns its overlay")
+        t:eq(p.session:cache(), cache, "same ID reuses its raster")
+        t:eq(p.drawing, false, "same ID can stop drawing")
+        overlay.remember_height = false
+        overlay:setHeight(100)
+        t:eq(G_reader_settings.data.justdraw_canvas_height, saved, "context height is transient")
+        t:eq(p.drawing, false, "expansion stays in view")
+        p:teardown()
+    end)
+
+    t:case("Stop before load completion cancels pending edit even while capture is off", function()
+        local rows, pages = manySheets(1)
+        local p = canvasPlugin{canvases=rows,pages=pages,strokes={
+            {canvas_id=1,stroke={width=4,tool=1,n=2,points={10,10,30,30}}},
+        }}
+        p:openCanvas(rows[1])
+        t:eq(p.drawing,false,"edit initially loads")
+        p:setDrawing(false)
+        env.UIManager:flush()
+        t:eq(p.drawing,false,"late ready cannot undo Stop")
+        t:eq(p.input_lease,nil,"no late lease")
+        p:teardown()
     end)
 
     t:case("closing the sheet brings the standalone toolbar back", function()

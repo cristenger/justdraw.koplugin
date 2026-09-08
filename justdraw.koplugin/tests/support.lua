@@ -2221,6 +2221,9 @@ function support.install()
     end
     function Button:enable() self.enabled = true end
     function Button:disable() self.enabled = false end
+    function Button:enableDisable(enabled)
+        if enabled then self:enable() else self:disable() end
+    end
     function Button:free() end
     package.preload["ui/widget/button"] = function() return Button end
 

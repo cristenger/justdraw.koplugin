@@ -1025,6 +1025,7 @@ function JustDraw:onCloseWidget()
 end
 
 function JustDraw:onSuspend()
+    self.reader_suspended = true
     -- A suspend flushes settings and can close connections underneath a job
     -- that is still reading through them; and the reader cannot answer a
     -- progress modal that is no longer on screen.
@@ -1035,6 +1036,8 @@ function JustDraw:onSuspend()
 end
 
 function JustDraw:onResume()
+    self.reader_suspended = false
+    self:refreshNoteContextPlacement()
     if self.notebooks then
         local resumed, resume_err = self.notebooks:onResume()
         if not resumed then logger.warn("JustDraw: notebook resume failed:", resume_err) end
@@ -1049,6 +1052,10 @@ leaving it dangling loses it silently and leaks contact state into whatever
 document is opened next in the same session.
 ]]
 function JustDraw:teardown()
+    self.reader_closed = true
+    self.note_context = nil
+    self.canvas_intent, self.canvas_intent_id = nil, nil
+    self.document_drawing_suspended = false
     -- Closing the document takes its repository with it, and a raster still
     -- replaying through that connection would be reading a closed one.
     Export.cancelRunning()
@@ -1167,11 +1174,18 @@ function JustDraw:clearWholeDocumentInk()
 end
 
 --- Rotation and resize invalidate the bar's fixed position; rebuild it.
+-- Rebuild synchronously at the existing resize boundary. A queued normal-bar
+-- restore could otherwise resurrect it after Dismiss, suspend or book close.
+function JustDraw:mountReaderBar(note_return)
+    if self.canvas_open or self.reader_closed then return end
+    if self.bar then UIManager:close(self.bar); self.bar = nil end
+    self.bar = InkBar:new{plugin=self, side=self.bar_side, note_return=note_return}
+    UIManager:show(self.bar, "ui", self.bar.dimen)
+end
+
 function JustDraw:rebuildBar()
     if not self.bar then return end
-    UIManager:close(self.bar)
-    self.bar = nil
-    UIManager:nextTick(function() self:setBarShown(true) end)
+    self:mountReaderBar(self.bar.note_return)
 end
 
 function JustDraw:_applyScreenResize()
@@ -1249,6 +1263,7 @@ end
 --- Font, margin or line-height change. The page index is rebuilt; not one
 --- stroke is read, written or moved.
 function JustDraw:onDocumentRerendered()
+    if self.notes_controller then self.notes_controller:cancelNavigation() end
     if self.notes_controller and self.notes_controller.browser then
         self.notes_controller:close()
     end
@@ -1339,6 +1354,7 @@ function JustDraw:refreshCanvasPlacement()
     self.canvas_off_page = placement == "away"
     local overlay = self.session and self.session:overlay()
     if overlay then overlay:setPlacement(placement, page) end
+    self:refreshNoteContextPlacement()
 end
 
 -- --------------------------------------------------- page ink: view events
@@ -1514,7 +1530,7 @@ function JustDraw:onDocumentInkSaveFailed(reason)
     -- -- and the second failure finds drawing already off.
     self.document_drawing_suspended =
         self.document_drawing_suspended or self.drawing
-    self:setDrawing(false)
+    self:setDrawing(false, true)
     self:notify(DOCUMENT_ERRORS.save_failed)
 end
 
@@ -1558,15 +1574,20 @@ function JustDraw:setBarShown(on)
     -- ours. "Hide" then means put the sheet away -- the invariant is still
     -- that drawing is never on without a way to turn it off.
     if self.canvas_open then
-        if not on then self:closeCanvas() end
+        if not on then
+            if self.note_context then self:hideNote() else self:closeCanvas() end
+        end
         return
+    end
+    if self.bar and self.bar.note_return then
+        if not on then self:dismissNoteReturnBar(); return end
+        self:clearNoteContext()
     end
     Compat.saveSetting(G_reader_settings, "bar_shown", on)
 
     if on then
         if self.bar then return end
-        self.bar = InkBar:new{ plugin = self, side = self.bar_side }
-        UIManager:show(self.bar, "ui", self.bar.dimen)
+        self:mountReaderBar(false)
     else
         -- Invariant: drawing is never on without a way to turn it off.
         self:setDrawing(false)
@@ -1793,8 +1814,14 @@ function JustDraw:disarmInput(err)
     if self.bar then self.bar:update(true) end
 end
 
-function JustDraw:setDrawing(on)
+function JustDraw:setDrawing(on, preserve_intent)
     on = on and true or false
+    -- Stop is an intention even while a raster is still loading and capture
+    -- is already off. Temporary cache/save stops opt out of clearing it.
+    if not on and not preserve_intent then
+        self.canvas_intent = self.canvas_open and "view" or nil
+        self.document_drawing_suspended = false
+    end
     if on == self.drawing then return end
     if on and self.canvas_open and self.session and not self.session:isWritable() then
         self:notify(_("This sheet is read-only"))
@@ -1904,6 +1931,10 @@ function JustDraw:setDrawing(on)
         -- Another host (e.g. FileManager notebooks) may have changed it.
         self.live_refresh:setSlowIntervalMs(self:getDrawingRefreshInterval())
         self.drawing = true
+        if self.canvas_open then
+            self.canvas_intent = "edit"
+            self.canvas_intent_id = self.session:activeCanvas().id
+        end
         if self.router then self.router:setBackend(backend) end
         logger.info("JustDraw: drawing on, mode", self.input_mode, "backend", backend)
         self:notePenUnavailable(backend)
@@ -3018,53 +3049,68 @@ There is never more than one JustDraw window: the standalone toolbar steps
 down and the overlay's embedded one takes its place, so `self.bar` keeps
 meaning "the toolbar the reader can see" everywhere else in this file.
 ]]
-function JustDraw:openCanvas(canvas)
-    if not (self.session and canvas) then return end
-    if self.canvas_open and self.session:activeCanvas() == canvas then return end
+function JustDraw:openCanvas(canvas, opts)
+    opts = opts or {}
+    local mode = opts.mode or "edit"
+    if mode ~= "view" and mode ~= "edit" then return nil, "invalid_mode" end
+    if not (self.session and canvas) then return nil, "no_canvas" end
+    local valid, validation_err = self.session:validateCanvas(canvas)
+    if not valid then return nil, validation_err end
+    if self.notes_controller and opts.navigation_request ~= self.notes_controller.pending_navigation then
+        self.notes_controller:cancelNavigation()
+    end
 
+    local active = self.session:activeCanvas()
+    local same = self.canvas_open and active and active.id == canvas.id
+    local old_intent, old_id = self.canvas_intent, self.canvas_intent_id
     local switching = self.canvas_open
     if switching then
-        -- Session may refuse to close the old sheet. Stop capture first, but
-        -- leave its embedded toolbar/window owned by the old overlay until the
-        -- durable switch succeeds.
         self:abortCanvasStroke()
-        self:setDrawing(false)
+        self:setDrawing(false, true)
     else
-        self.bar_restore = self.bar ~= nil
+        self.bar_restore = self:ordinaryBarShown()
     end
+    self.canvas_intent, self.canvas_intent_id = mode, canvas.id
+
     if not switching and self.bar then
         local dimen = self.bar.dimen
         UIManager:close(self.bar)
         self.bar = nil
         UIManager:setDirty(self.ui, "ui", dimen)
     end
-
-    local overlay, err = self.session:openCanvas(canvas)
+    local overlay, err = self.session:openCanvas(canvas, opts)
     if not overlay then
+        self.canvas_intent, self.canvas_intent_id = old_intent, old_id
         if switching then
             local old = self.session:overlay()
-            if old then
-                self.bar = old.bar
-            else
-                self.canvas_open = false
-                self.bar = nil
-                if self.bar_restore then self:setBarShown(true) end
-            end
-        elseif self.bar_restore then
-            self:setBarShown(true)
+            self.canvas_open = old ~= nil
+            self.bar = old and old.bar
         end
+        if not self.bar and self.bar_restore then self:setBarShown(true) end
         return nil, err
+    end
+    if self.note_context and opts.note_context ~= self.note_context then
+        self.note_context = nil
+    end
+    if same then
+        local context_changed = overlay.note_context ~= opts.note_context
+        overlay.note_context = opts.note_context
+        overlay.bar.note_context = opts.note_context
+        overlay.remember_height = opts.remember_height
+        if opts.height_pct then overlay:setHeight(opts.height_pct) end
+        if context_changed then overlay:onScreenResize() end
     end
     self.canvas_pending_repaint = nil
     self.bar = overlay.bar
     self.canvas_open = true
-    -- Before setDrawing below, which refuses an off-page sheet (ADR-45).
     self:refreshCanvasPlacement()
     if self.router then self.router:reset() end
-    if self.session:isWritable() and self.session:cache():isReady() then
-        self:setDrawing(true)
+    if mode == "edit" and self.session:isWritable() and self.session:cache():isReady() then
+        self:setDrawing(true, true)
+    else
+        self.bar:update(true)
     end
-    return overlay
+    return overlay, err
 end
 
 --- Overlay replaces its embedded toolbar whenever geometry or side changes.
@@ -3088,7 +3134,7 @@ function JustDraw:onCanvasCacheWillRebuild(canvas)
     end
     self.canvas_pending_repaint = nil
     self:abortCanvasStroke()
-    self:setDrawing(false)
+    self:setDrawing(false, true)
 end
 
 --[[--
@@ -3166,7 +3212,7 @@ function JustDraw:_deferCanvasCaptureStop(canvas, repair_live_stroke)
             self.canvas_stroke = nil
             self.draw_slot = nil
         end
-        self:setDrawing(false)
+        self:setDrawing(false, true)
         local overlay = self.session and self.session:overlay()
         if self.bar then self.bar:update(false) end
         if overlay then UIManager:setDirty(overlay, "ui") end
@@ -3182,8 +3228,9 @@ function JustDraw:onCanvasReady(canvas)
         and active.id == canvas.id) then
         return
     end
-    if self.session:isWritable() then
-        self:setDrawing(true)
+    if self.canvas_intent == "edit" and self.canvas_intent_id == canvas.id
+        and self.session:isWritable() then
+        self:setDrawing(true, true)
     elseif self.bar then
         self.bar:update(false)
     end
@@ -3207,8 +3254,9 @@ end
 function JustDraw:onCanvasSaveRecovered(canvas)
     local active = self.session and self.session:activeCanvas()
     if self.canvas_open and active and canvas and active.id == canvas.id
+        and self.canvas_intent == "edit" and self.canvas_intent_id == canvas.id
         and self.session:cache() and self.session:cache():isReady() then
-        self:setDrawing(true)
+        self:setDrawing(true, true)
     end
     if self.bar then self.bar:update(true) end
 end
@@ -3218,6 +3266,124 @@ function JustDraw:retryCanvasLoad()
     local ok, err = self.session:retryLoad()
     if self.bar then self.bar:update(true) end
     return ok, err
+end
+
+-- Only one selected sheet survives leaving the notes browser. The context
+-- carries identity and presentation, never a hidden raster or stroke list.
+function JustDraw:ordinaryBarShown()
+    if self.note_context then return self.note_context.bar_restore end
+    if self.canvas_open then return self.bar_restore == true end
+    return self.bar ~= nil and not self.bar.note_return
+end
+
+function JustDraw:rememberNoteContext(canvas, group_id, height, restore_bar)
+    if restore_bar == nil then restore_bar = self:ordinaryBarShown() end
+    self.note_context = {document=self.ui.document, session=self.session,
+        surface_id=canvas.id, anchor_key=canvas.anchor_key, anchor_raw=canvas.anchor_raw,
+        group_id=group_id, height_pct=height, bar_restore=restore_bar, dismissed=false}
+    self:refreshNoteContextPlacement()
+end
+
+function JustDraw:contextCanvas()
+    local c = self.note_context
+    if not c or c.document ~= self.ui.document or c.session ~= self.session
+        or not self.session or not self.session:isAvailable() then return end
+    local row = self.session.index and self.session.index:get(c.surface_id)
+    if row and row.anchor_key == c.anchor_key and row.anchor_raw == c.anchor_raw then return row end
+end
+
+function JustDraw:refreshNoteContextPlacement()
+    local c = self.note_context
+    if not c then return end
+    local canvas = self:contextCanvas()
+    local placement, page = "lost", nil
+    if canvas then
+        local active = self.session:activeCanvas()
+        if active and active.id == canvas.id then
+            -- The session already places its visible sheet once per view event.
+            placement, page = self.session:openCanvasPlacement()
+        else
+            local ok, xp = pcall(require("ink_anchor").resolve, self.ui.document, canvas)
+            if ok and xp then
+                local placed, here = pcall(self.ui.document.isXPointerInCurrentPage, self.ui.document, xp)
+                if placed then placement = here and "here" or "away" end
+                page = self.session.index:pageOf(canvas.id)
+            end
+        end
+    elseif self.session and self.session:isIndexing() then
+        placement = "loading"
+    end
+    if c.placement == placement and c.page == page then return end
+    c.placement, c.page = placement, page
+    if self.bar and self.bar.note_return then self.bar:update(true) end
+end
+
+function JustDraw:clearNoteContext()
+    local c = self.note_context
+    self.note_context = nil
+    if self.bar and self.bar.note_return then
+        local dimen = self.bar.dimen
+        UIManager:close(self.bar); self.bar = nil
+        if c and c.bar_restore then self:mountReaderBar(false) end
+        UIManager:setDirty(self.ui, "ui", dimen)
+    end
+end
+
+function JustDraw:showNoteReturnBar()
+    if not self.note_context or self.canvas_open or self.reader_closed then return end
+    self.note_context.dismissed = false
+    self:refreshNoteContextPlacement()
+    self:mountReaderBar(true)
+end
+
+function JustDraw:dismissNoteReturnBar()
+    local c = self.note_context
+    if not c then return end
+    c.dismissed = true
+    if self.bar and self.bar.note_return then
+        local dimen = self.bar.dimen
+        UIManager:close(self.bar); self.bar = nil
+        if c.bar_restore then self:mountReaderBar(false) end
+        UIManager:setDirty(self.ui, "ui", dimen)
+    end
+end
+
+function JustDraw:hideNote()
+    local c = self.note_context
+    local active = self.session and self.session:activeCanvas()
+    if not (c and active and active.id == c.surface_id) then return self:closeCanvas() end
+    c.height_pct = self.session:overlay().height_pct
+    local closed, err = self:closeCanvas(false)
+    if not closed then return nil, err end
+    self:showNoteReturnBar()
+    return true
+end
+
+function JustDraw:showNote()
+    local canvas, c = self:contextCanvas(), self.note_context
+    if not canvas or self.reader_closed or self.reader_suspended then
+        self:notify(_("This drawing sheet is no longer available."))
+        return nil, "no_sheet"
+    end
+    self:refreshNoteContextPlacement()
+    if c.placement == "lost" or c.placement == "loading" then
+        self:notify(_("This note’s location is no longer available."))
+        return nil, "location_unavailable"
+    end
+    if c.placement == "away" then
+        return self.notes_controller:navigate({kind="sheet",surface=canvas}, "view", c)
+    end
+    if Export.isRunning() or self.input_lease and self.input_lease:hasActiveContact() then
+        return nil, "busy"
+    end
+    self:setDrawing(false)
+    local overlay, err = self:openCanvas(canvas, {mode="view",height_pct=c.height_pct,
+        remember_height=false,note_context=c})
+    if not overlay then
+        self:showNoteReturnBar()
+        self:notify(_("Could not open this note in the document."))
+    end
+    return overlay, err
 end
 
 --- Open the sheet at the reader's position, or make one there.
@@ -3295,7 +3461,7 @@ indexing, transient by construction, which the menu handles the same way.
 ]]
 function JustDraw:onJustDrawSheet()
     if self.canvas_open then
-        self:closeCanvas()
+        if self.note_context then self:hideNote() else self:closeCanvas() end
     elseif self.session and self.session:isAvailable() then
         self:openCanvasHere()
     elseif self.is_docless then
@@ -3308,7 +3474,7 @@ function JustDraw:onJustDrawSheet()
     return true
 end
 
-function JustDraw:closeCanvas()
+function JustDraw:closeCanvas(restore_bar)
     if not self.canvas_open then return end
     -- Keep the visible sheet, its retry queue and ReaderUI capture intact if
     -- durability refuses the transition. Only dismantle the surface after the
@@ -3321,9 +3487,10 @@ function JustDraw:closeCanvas()
     if not ok then return nil, err end
     self.canvas_pending_repaint = nil
     self.canvas_open = false
+    self.canvas_intent, self.canvas_intent_id = nil, nil
     self:refreshCanvasPlacement()
     self.bar = nil
-    if self.bar_restore then self:setBarShown(true) end
+    if restore_bar ~= false and self.bar_restore then self:mountReaderBar(false) end
     -- The sheet uncovered a page of text; a partial refresh would leave it
     -- ghosted.
     UIManager:setDirty(self.ui, "full")
@@ -4097,8 +4264,10 @@ function JustDraw:showBarMenu()
     }
     if self.canvas_open then
         local active = self.session:activeCanvas()
-        rows[#rows + 1] = { { text = _("Close sheet"),
-            callback = pick(function() self:closeCanvas() end) } }
+        rows[#rows + 1] = { { text = self.note_context and _("Hide note") or _("Close sheet"),
+            callback = pick(function()
+                if self.note_context then self:hideNote() else self:closeCanvas() end
+            end) } }
         rows[#rows + 1] = { { text = _("Delete sheet"),
             enabled = self.session:isWritable(),
             callback = pick(function() self:confirmDeleteCanvas(active) end) } }
@@ -4170,7 +4339,11 @@ function JustDraw:deleteCanvas(canvas)
         return nil, err
     end
 
+    if self.note_context and self.note_context.surface_id == canvas.id then
+        self:clearNoteContext()
+    end
     if active then
+        self.canvas_intent, self.canvas_intent_id = nil, nil
         self.canvas_pending_repaint = nil
         self.canvas_open = false
         -- The session has already cleared its active canvas; leaving this
@@ -4197,6 +4370,17 @@ afford.
 function JustDraw:canvasMenu()
     local items = {}
     if not (self.session and self.session:isAvailable()) then return items end
+    if self.note_context and not self.canvas_open then
+        items[#items + 1] = {
+            text = self.note_context.placement == "away" and _("Go to note") or _("Show note"),
+            enabled_func = function()
+                local c = self.note_context
+                return c and (c.placement == "here" or c.placement == "away")
+            end,
+            callback = function() self:showNote() end,
+            separator = true,
+        }
+    end
 
     if self.canvas_open then
         local active = self.session:activeCanvas()

@@ -833,6 +833,23 @@ return function(ctx)
         t:eq(p.drawing, false, "the plugin does not decide to start drawing")
     end)
 
+    t:case("explicit Stop while save-failed cancels PDF recovery intent", function()
+        local p, store = documentPlugin{ canvases = { pageRow(1, 1) } }
+        startDrawing(p)
+        penDown(p, INK_XY.x, INK_XY.y)
+        penFrame(p, INK_XY.x + 40, INK_XY.y + 40)
+        penLift(p, INK_XY.x + 40, INK_XY.y + 40)
+        store.fail_transaction = "commit"
+        env.UIManager:flush()
+        t:eq(p.drawing, false, "save failure stopped capture")
+        t:eq(p.document_drawing_suspended, true, "internal failure retained editing intent")
+        p:setDrawing(false) -- also the first step of notes read/view navigation
+        store.fail_transaction = nil
+        p.document_session:retrySave(); env.UIManager:flush()
+        t:eq(p.drawing, false, "successful retry cannot undo explicit Stop")
+        t:eq(p.document_drawing_suspended, false, "old recovery intention cleared")
+    end)
+
     t:case("continuous scrolling suspends page ink and says so", function()
         -- With ink on it, so that what resume brings back is a real surface:
         -- an empty row is dropped when its surface closes.

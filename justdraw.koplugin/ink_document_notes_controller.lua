@@ -15,8 +15,22 @@ local T = require("ffi/util").template
 local Controller = {}
 Controller.__index = Controller
 
+local function copyMap(value)
+    local result = {}
+    for key, item in pairs(value or {}) do result[key] = item end
+    return result
+end
+
 function Controller.new(host)
     return setmetatable({ host = host, modals = {}, generation = 0, first = 1 }, Controller)
+end
+
+-- A queued reader handoff belongs to this controller generation, not to a
+-- closed preview. Keep the callback reference so lifecycle events cancel it.
+function Controller:cancelNavigation()
+    local request = self.pending_navigation
+    self.pending_navigation = nil
+    if request and request.run then UIManager:unschedule(request.run) end
 end
 
 function Controller:notify(text)
@@ -85,6 +99,7 @@ function Controller:chapterLookup()
 end
 
 function Controller:open()
+    self:cancelNavigation()
     if self.browser or self.host.is_docless then
         return false
     end
@@ -143,15 +158,83 @@ function Controller:open()
     self.catalog = Catalog.new(opts)
     local saved = self.view_state
     if saved and saved.file == host.ui.document.file then
-        self.catalog.filter, self.catalog.order = saved.filter, saved.order
+        self.catalog.filter, self.catalog.order = copyMap(saved.filter), saved.order
+        self.restore_state = saved
+        self.focus_id, self.surface_id = saved.focus_id, saved.surface_id
+    else
+        self.first, self.focus_id, self.surface_id = 1, nil, nil
     end
     self.browser = require("ink_document_notes_ui"):new { controller = self }
     self:showModal(self.browser)
     self.catalog:start()
     if saved and saved.file == host.ui.document.file then
-        self.catalog.selected = saved.selected
+        self.catalog.selected = copyMap(saved.selected)
     end
     return true
+end
+
+function Controller:cancelRestore()
+    self.restore_state = nil
+    if self.restore_job then UIManager:unschedule(self.restore_job) end
+    self.restore_job = nil
+end
+
+-- Restoration waits for grouped, sorted results. An empty first browser paint
+-- must not turn a saved page 12 into page 1. Scan metadata in bounded slices,
+-- once; never search thousands of entries inside a widget paint/rebuild.
+function Controller:restoreBrowser()
+    local saved, catalog, browser = self.restore_state, self.catalog, self.browser
+    if not saved or self.restore_job or not browser or catalog.state ~= "ready" or catalog.busy then return end
+    local result, generation, query = catalog.result, self.generation, catalog.query_generation
+    local i, sheet, first, focus, leaf_index, leaf_focus = 1, 0
+    local run
+    run = function()
+        if self.restore_job ~= run or self.generation ~= generation or self.browser ~= browser then return end
+        if catalog.query_generation ~= query then self:cancelRestore(); return end
+        local budget = Catalog.BATCH
+        while i <= #result and budget > 0 do
+            local item = result[i]
+            if sheet == 0 then
+                if item.id == saved.first_id then first = i end
+                if item.id == saved.focus_id then focus = i end
+                if not item.sheets then
+                    if item.surface and item.surface.id == saved.surface_id then
+                        leaf_focus, leaf_index = i, 1
+                    end
+                    i = i + 1
+                else sheet = 1 end
+            else
+                local leaf = item.sheets[sheet]
+                if leaf and leaf.surface.id == saved.surface_id then leaf_focus, leaf_index = i, sheet end
+                sheet = sheet + 1
+                if sheet > #item.sheets then i, sheet = i + 1, 0 end
+            end
+            budget = budget - 1
+        end
+        if i <= #result then UIManager:nextTick(run); return end
+        self.restore_job, self.restore_state = nil, nil
+        focus = leaf_focus or focus
+        self.focus_id = focus and result[focus].id or saved.focus_id
+        self.surface_id, self.focus_sheet_index = saved.surface_id, leaf_index
+        browser.first = first or saved.first or 1
+        browser.restore_focus = focus
+        browser:_rebuild()
+    end
+    self.restore_job = run
+    UIManager:nextTick(run)
+end
+
+function Controller:saveViewState()
+    local browser, catalog = self.browser, self.catalog
+    if not browser or not catalog then return end
+    if self.restore_state then return end -- retain the saved state during loading
+    self.view_state = {
+        file = self.host.ui.document.file,
+        selected = copyMap(catalog.selected), filter = copyMap(catalog.filter), order = catalog.order,
+        first = browser.first, first_id = browser.visible_ids and browser.visible_ids[1],
+        focus_id = self.focus_id, surface_id = self.surface_id,
+        select_mode = browser.select_mode,
+    }
 end
 
 function Controller:retry()
@@ -171,6 +254,7 @@ function Controller:changed()
         end
         self.refresh_pending = false
         if self.browser then
+            self:restoreBrowser()
             self.browser:_rebuild()
         end
     end)
@@ -219,14 +303,9 @@ function Controller:onScreenResize()
 end
 
 function Controller:close()
-    if self.browser and self.catalog then
-        self.view_state = {
-            file = self.host.ui.document.file,
-            selected = self.catalog.selected,
-            filter = self.catalog.filter,
-            order = self.catalog.order,
-        }
-    end
+    self:cancelNavigation()
+    self:saveViewState()
+    self:cancelRestore()
     self.generation = self.generation + 1
     self.refresh_pending = false
     Export.cancelRunning()
@@ -245,11 +324,20 @@ function Controller:close()
 end
 
 function Controller:showDetail(id, sheet_index)
+    self:cancelRestore()
     local group = self.catalog.by_id[id]
-    local item = group and group.sheets and group.sheets[sheet_index or 1] or group
-    if not item then
-        return false
+    if not sheet_index and group and group.sheets and id == self.focus_id and self.surface_id then
+        local ordinal = self.focus_sheet_index
+        if ordinal and group.sheets[ordinal] and group.sheets[ordinal].surface.id == self.surface_id then
+            sheet_index = ordinal
+        else
+            self:notify(_("The previously selected sheet is no longer in this note."))
+        end
     end
+    sheet_index = sheet_index or 1
+    local item = group and group.sheets and group.sheets[sheet_index] or group
+    if not item then return false end
+    self.focus_id, self.surface_id, self.focus_sheet_index = id, item.surface and item.surface.id, sheet_index
     self:closeDetail()
     if item.native then
         self.detail = require("ui/widget/textviewer"):new {
@@ -259,10 +347,10 @@ function Controller:showDetail(id, sheet_index)
             buttons_table = {
                 {
                     {
-                        text = _("Go to document"),
-                        enabled = item.page ~= nil,
+                        text = _("Read from here"),
+                        enabled = self:canNavigate(item, "read"),
                         callback = function()
-                            self:navigate(item, false)
+                            self:navigate(item, "read")
                         end,
                     },
                     {
@@ -369,15 +457,20 @@ function Controller:showDetail(id, sheet_index)
                 has_next = position < #sequence or group.sheets and (sheet_index or 1) < #group.sheets,
                 previous_label = group.sheets and (sheet_index or 1) > 1 and _("Previous sheet") or nil,
                 next_label = group.sheets and (sheet_index or 1) < #group.sheets and _("Next sheet") or nil,
-                can_navigate = item.page ~= nil,
+                show_view_on_page = item.kind == "sheet" or item.kind == "page_ink",
+                can_view_on_page = self:canNavigate(item, "view"),
+                can_read_from_here = self:canNavigate(item, "read"),
                 previous_note = function()
                     relative(-1)
                 end,
                 next_note = function()
                     relative(1)
                 end,
-                go_to_document = function()
-                    self:navigate(item, false)
+                view_on_page = function()
+                    self:navigate(item, "view")
+                end,
+                read_from_here = function()
+                    self:navigate(item, "read")
                 end,
                 note_actions = function()
                     self:showNoteActions(group, item)
@@ -402,53 +495,168 @@ function Controller:showDetail(id, sheet_index)
     return true
 end
 
-function Controller:navigate(item, edit)
-    local host, xp = self.host
-    if edit and not self:canEdit(item) then
-        return false
+-- Resolve only the selected descriptor at a UI boundary. The catalogue's
+-- cached page is a label, never a fallback for a sheet with a lost anchor.
+function Controller:resolveDestination(item, destination)
+    if destination ~= "read" and destination ~= "view" and destination ~= "edit" then
+        return nil, "invalid_destination"
     end
+    if not item or item.sheets then return nil, "no_sheet" end
+    if destination == "view" and item.kind ~= "sheet" and item.kind ~= "page_ink" then
+        return nil, "unsupported"
+    end
+    local host, target = self.host, {}
     local document = host.ui.document
-    if item.kind == "sheet" or item.xpointer then
-        xp = item.xpointer or Anchor.resolve(host.ui.document, item.surface)
-        if xp and not host.ui.document:isXPointerInDocument(xp) then
-            xp = nil
+    if destination == "view" and item.kind == "page_ink"
+        and not (host.document_session and host.document_session:isAvailable()) then
+        return nil, "unavailable"
+    end
+    if item.kind == "sheet" then
+        local session = host.session
+        if not (session and session:isAvailable() and session.document == document) then
+            return nil, "unavailable"
         end
-        if not xp then
-            self:notify(_("This note’s location is no longer available."))
-            return false
+        local row = item.surface and session.index and session.index:get(item.surface.id)
+        if not row or row.anchor_key ~= item.surface.anchor_key then return nil, "no_sheet" end
+        target.canvas = row
+        target.xp = Anchor.resolve(document, row)
+        if not target.xp then return nil, "location_unavailable" end
+        if destination ~= "read" then
+            local valid, err = session:validateCanvas(row)
+            if not valid then return nil, err end
         end
+    elseif item.xpointer then
+        if not document:isXPointerInDocument(item.xpointer) then return nil, "location_unavailable" end
+        target.xp = item.xpointer
     else
-        local count = host.ui.document:getPageCount()
-        if not item.page or item.page < 1 or item.page > count then
-            self:notify(_("This note’s page is no longer available."))
-            return false
+        local page = item.page
+        if type(page) ~= "number" or page ~= math.floor(page) or page < 1
+            or page > document:getPageCount() then return nil, "location_unavailable" end
+        target.page = page
+    end
+    if destination == "edit" then
+        local session = target.canvas and host.session or host.document_session
+        if item.native or item.legacy or not session or not session:isWritable() then
+            return nil, "read_only"
         end
     end
+    return target
+end
+
+function Controller:canNavigate(item, destination)
+    local ok, target = pcall(self.resolveDestination, self, item, destination)
+    return ok and target ~= nil
+end
+
+function Controller:navigationError(reason)
+    if reason == "location_unavailable" then
+        self:notify(_("This note’s location is no longer available."))
+    elseif reason == "no_sheet" then
+        self:notify(_("This drawing sheet is no longer available."))
+    elseif reason == "bad_geometry" then
+        self:notify(_("This drawing sheet has invalid dimensions."))
+    else
+        self:notify(_("Could not open this note in the document."))
+    end
+end
+
+function Controller:navigate(item, destination, resume_context)
+    local host = self.host
+    if Export.isRunning() or host.input_lease and host.input_lease:hasActiveContact() then
+        self:notify(ExportDialog.reason(Export.isRunning() and "export_busy" or "contact_active"))
+        return false, "busy"
+    end
+    local resolved, target, why = pcall(self.resolveDestination, self, item, destination)
+    if not resolved or not target then
+        self:navigationError(resolved and why or "location_unavailable")
+        return false, why or "location_unavailable"
+    end
+    host:setDrawing(false)
+    local durable, err = host.export_controller:flushSurfaces()
+    if not durable then
+        self:notify(ExportDialog.reason(err))
+        return false, err
+    end
+    local restore_bar = host:ordinaryBarShown()
+    local active = host.session and host.session:activeCanvas()
+    if host.canvas_open and (destination == "read" or not target.canvas
+        or not active or active.id ~= target.canvas.id) then
+        local closed, close_err = host:closeCanvas(false)
+        if not closed then
+            self:notify(ExportDialog.reason(close_err))
+            return false, close_err
+        end
+    end
+    local group_id = self.focus_id
     self:close()
-    local generation = self.generation
-    if host.ui.link then
-        host.ui.link:addCurrentLocationToStack()
+    local document = host.ui.document
+    local request = { generation = self.generation, document = document,
+        session = host.session, target = target, destination = destination }
+    self.pending_navigation = request
+    if target.canvas then
+        local height
+        if destination ~= "edit" then height = 40 end
+        if resume_context == host.note_context and resume_context then height = resume_context.height_pct end
+        host:rememberNoteContext(target.canvas, group_id, height, restore_bar)
+    else
+        host:clearNoteContext()
     end
-    host.ui:handleEvent(xp and Event:new("GotoXPointer", xp, xp) or Event:new("GotoPage", item.page))
-    if edit then
-        UIManager:nextTick(function()
-            if generation ~= self.generation or host.ui.document ~= document then
-                return
-            end
-            if item.kind == "sheet" and host.session then
-                host:openCanvas(item.surface)
-            elseif item.kind == "page_ink" and host.document_session then
-                host:setDrawing(true)
-            end
+    local navigated = pcall(function()
+        if host.ui.link then host.ui.link:addCurrentLocationToStack() end
+        -- The followed-link marker paints/restores the framebuffer on timers.
+        -- A panel destination must not leave it scheduled over the new sheet.
+        host.ui:handleEvent(target.xp and Event:new("GotoXPointer", target.xp)
+            or Event:new("GotoPage", target.page))
+    end)
+    if not navigated then
+        self:cancelNavigation()
+        if host.note_context and not host.canvas_open then host:showNoteReturnBar() end
+        self:navigationError("location_unavailable")
+        return false, "location_unavailable"
+    end
+    request.run = function()
+        if self.pending_navigation ~= request then return end
+        if self.generation ~= request.generation or host.ui.document ~= document
+            or host.session ~= request.session or host.reader_closed or host.reader_suspended then
+            self:cancelNavigation()
+            return
+        end
+        local ok, here = pcall(function()
+            return target.xp and document:isXPointerInCurrentPage(target.xp)
+                or not target.xp and host:currentPage() == target.page
         end)
+        if not ok or not here then
+            self:cancelNavigation()
+            return
+        end
+        if target.canvas then
+            if destination == "read" then
+                host:showNoteReturnBar()
+            else
+                local context = host.note_context
+                local overlay, open_err = host:openCanvas(target.canvas, {
+                    mode = destination, height_pct = context and context.height_pct,
+                    remember_height = false, note_context = context,
+                    navigation_request = request,
+                })
+                if not overlay then
+                    host:showNoteReturnBar()
+                    self:navigationError(open_err)
+                end
+            end
+        elseif destination == "edit" and host.document_session then
+            host:setDrawing(true)
+        end
+        if self.pending_navigation == request then self.pending_navigation = nil end
     end
+    UIManager:nextTick(request.run)
     return true
 end
 
 function Controller:canEdit(item)
-    local session = item.kind == "sheet" and self.host.session or self.host.document_session
-    return not item.native and not item.legacy and item.page ~= nil and session and session:isWritable()
-        or false
+    -- Organization acts on a logical group; navigation always acts on a leaf.
+    local leaf = item and item.sheets and item.sheets[1] or item
+    return self:canNavigate(leaf, "edit")
 end
 
 function Controller:showNoteActions(item, current_sheet)
@@ -488,10 +696,10 @@ function Controller:showNoteActions(item, current_sheet)
             {
                 {
                     text = _("Edit in document"),
-                    enabled = self:canEdit(item),
+                    enabled = self:canEdit(current_sheet or item),
                     callback = function()
                         self:closeModal(dialog)
-                        self:navigate(current_sheet or item, true)
+                        self:navigate(current_sheet or item, "edit")
                     end,
                 },
             },
@@ -518,7 +726,7 @@ function Controller:addSheet(item)
         return self:notify(ExportDialog.reason(why))
     end
     session.index:add(canvas, item.page)
-    self:navigate({ kind = "sheet", surface = canvas, page = item.page }, true)
+    self:navigate({ kind = "sheet", surface = canvas, page = item.page }, "edit")
 end
 
 function Controller:organizeSheets(item)

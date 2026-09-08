@@ -46,9 +46,9 @@ local function preview()
     controller.preview_result = {release = function() released = released + 1; raster:free() end}
     controller.detail = Detail:new{
         image = raster, title_text = "Note preview", caption = "Page 1",
-        can_navigate = true, has_previous = false, has_next = false,
+        show_view_on_page = true, can_view_on_page = true, can_read_from_here = true, has_previous = false, has_next = false,
         close_note = function() controller:closeDetail() end,
-        note_actions = function() end, go_to_document = function() end,
+        note_actions = function() end, view_on_page = function() end, read_from_here = function() end,
     }
     controller:showModal(controller.detail)
     return controller.detail

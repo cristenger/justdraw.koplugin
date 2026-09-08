@@ -151,10 +151,22 @@ picture, not editable vectors.
 toolbar's **More → Document notes**. The list brings together this book's
 drawing sheets, page notes, legacy ink and KOReader's typed notes, highlights
 and bookmarks. Each entry shows its location and
-chapter when available. Tap an entry to read it with zoom and pan, move to the
-previous or next note, or go to its position in the document. Reopening the
-list preserves the list page, filter, order and selection for that document.
+chapter when available. Tap an entry to read it with zoom and pan, or move to
+the previous or next note. **View on page** opens the selected drawing over its
+book location with drawing off and the sheet initially at 40% height. Use
+**Draw / Stop** to annotate, and expand the sheet to see an extensive drawing.
+**Read from here** goes to that location with the drawing panel closed.
+**Hide note / Show note** puts away and reopens the same sheet, keeping its
+chosen height. If you read on, **Go to note** returns to its original location.
+**Dismiss** removes the compact return controls; the same note remains
+available from the JustDraw sheet menu during this book session. These controls
+do not change your usual sheet-height or toolbar preferences.
+
+The contextual panel's **Notes** action returns to the list. Reopening it
+preserves the list page, filter, order, selection and exact sheet being viewed
+within a multi-sheet note, including after its sheets are reordered.
 Notes whose EPUB anchor no longer resolves remain readable and exportable.
+Read-only sheets can be viewed in context; editing controls remain disabled.
 
 Filter by chapter, page range, note type or missing location, and sort by
 document position or last change. **Select** marks individual notes;

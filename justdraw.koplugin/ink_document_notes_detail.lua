@@ -15,13 +15,19 @@ function Detail:init()
     self._initializing = true
     ImageViewer.init(self)
     self.button_container:free()
-    self.button_table = ButtonTable:new{ width = self.width - 2 * self.button_padding,
-        zero_sep = true, show_parent = self,
-        buttons = {
+    local destinations = {}
+    if self.show_view_on_page then
+        destinations[1] = {{id = "view_on_page", text = _("View on page"),
+            enabled = self.can_view_on_page, callback = self.view_on_page}}
+    end
+    destinations[#destinations + 1] = {
+        {id = "read_from_here", text = _("Read from here"),
+         enabled = self.can_read_from_here, callback = self.read_from_here},
+        {id = "note_actions", text = _("Actions…"), callback = self.note_actions},
+    }
+    local buttons = {
             {{text = self.previous_label or _("Previous note"), enabled = self.has_previous, callback = self.previous_note},
              {text = self.next_label or _("Next note"), enabled = self.has_next, callback = self.next_note}},
-            {{text = _("Go to document"), enabled = self.can_navigate, callback = self.go_to_document},
-             {text = _("Actions…"), callback = self.note_actions}},
             {{id = "scale", text = _("Scale"), callback = function()
                 self.scale_factor = self._scale_to_fit and 1 or 0
                 self._scale_to_fit = not self._scale_to_fit
@@ -32,7 +38,11 @@ function Detail:init()
              end},
              {text = "−", callback = function() self:onZoomOut() end},
              {text = "+", callback = function() self:onZoomIn() end}},
-        } }
+    }
+    -- Insert before the existing zoom controls, retaining ImageViewer's IDs.
+    for i, row in ipairs(destinations) do table.insert(buttons, 1 + i, row) end
+    self.button_table = ButtonTable:new{width = self.width - 2 * self.button_padding,
+        zero_sep = true, show_parent = self, buttons = buttons}
     self.button_container = CenterContainer:new{ dimen = Geom:new{
         w = self.width, h = self.button_table:getSize().h }, self.button_table }
     self._initializing = nil

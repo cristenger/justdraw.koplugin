@@ -27,7 +27,8 @@ local Browser = FocusManager:extend{ covers_fullscreen = true }
 
 function Browser:init()
     self.first = self.controller.first or 1
-    self.select_mode = false
+    local saved = self.controller.restore_state
+    self.select_mode = saved and saved.select_mode or false
     self.show_parent = self
     self:_rebuild()
 end
@@ -80,6 +81,10 @@ function Browser:_rebuild()
     self.per_page = math.max(1, math.floor(list_h / row_target))
     self.first = math.max(1, math.min(self.first, math.max(1, #c.result)))
     self.first = math.floor((self.first - 1) / self.per_page) * self.per_page + 1
+    if self.restore_focus and (self.restore_focus < self.first
+        or self.restore_focus >= self.first + self.per_page) then
+        self.first = math.floor((self.restore_focus - 1) / self.per_page) * self.per_page + 1
+    end
     local row_h = math.floor(list_h / self.per_page)
     local content = VerticalGroup:new{ align = "left", title }
     content[#content + 1] = self:_actions({
@@ -106,6 +111,7 @@ function Browser:_rebuild()
         local button = self:_button{ text = label, align = "left", width = w,
             height = row_h - chapter_h, enabled = ready or not self.select_mode,
             callback = function()
+                self.controller:cancelRestore()
                 if self.select_mode then c:toggle(item.id)
                 else self.controller:showDetail(item.id) end
             end }
@@ -130,7 +136,11 @@ function Browser:_rebuild()
             callback = function() self:onNext() end},
     }, w, controls_h)
     self[1] = content
-    self.controller.first = self.first
+    if not self.controller.restore_state then self.controller.first = self.first end
+    if self.restore_focus then
+        self.selected = {x=1, y=self.restore_focus - self.first + 2}
+        self.restore_focus = nil
+    end
     local y = math.min(self.selected and self.selected.y or 1, #self.layout)
     self.selected = {x = math.min(self.selected and self.selected.x or 1, #self.layout[y]), y = y}
     if self.shown then self:refocusWidget(); UIManager:setDirty(self, "ui") end
@@ -143,12 +153,14 @@ function Browser:paintTo(bb, x, y)
 end
 function Browser:onTap() return true end
 function Browser:onNext()
+    self.controller:cancelRestore()
     if self.first + self.per_page <= #self.controller.catalog.result then
         self.first = self.first + self.per_page; self:_rebuild()
     end
     return true
 end
 function Browser:onPrevious()
+    self.controller:cancelRestore()
     self.first = math.max(1, self.first - self.per_page); self:_rebuild(); return true
 end
 function Browser:onSwipe(_, gesture)
@@ -158,10 +170,19 @@ function Browser:onSwipe(_, gesture)
 end
 function Browser:onScreenResize() self.controller:onScreenResize(); return true end
 Browser.onSetRotationMode = Browser.onScreenResize
-function Browser:onClose() self.controller:close(); return true end
+function Browser:onClose()
+    local id = self.visible_ids and self.selected and self.visible_ids[self.selected.y - 1]
+    if id and id ~= self.controller.focus_id then
+        self.controller.focus_id = id
+        self.controller.surface_id, self.controller.focus_sheet_index = nil, nil
+    end
+    self.controller:close()
+    return true
+end
 function Browser:onCloseWidget() self.closed = true end
 
 function Browser:showPageDialog()
+    self.controller:cancelRestore()
     local dialog
     dialog = InputDialog:new{ title = _("Go to list page"), input = "", input_type = "number",
         buttons = {{ {text = _("Cancel"), callback = function() self.controller:closeModal(dialog) end},
@@ -178,6 +199,7 @@ function Browser:showPageDialog()
 end
 
 function Browser:showRange()
+    self.controller:cancelRestore()
     local dialog
     dialog = MultiInputDialog:new{ title = _("Document page range"),
         fields = {{text = "", hint = _("First page"), input_type = "number"},
@@ -197,6 +219,7 @@ function Browser:showRange()
 end
 
 function Browser:showFilters()
+    self.controller:cancelRestore()
     local c, dialog = self.controller.catalog
     local function choose(filter, order)
         self.controller:closeModal(dialog)

@@ -133,6 +133,7 @@ function InkCanvasOverlay:_rebuild()
         side = self.bar_side,
         embedded = true,
         parent = self,
+        note_context = self.note_context,
     }
     -- Children before the container's own handler, so the toolbar gets first
     -- refusal on every gesture. paintTo draws it last, on purpose.
@@ -303,7 +304,10 @@ function InkCanvasOverlay:setHeight(pct)
     if pct == self.height_pct then return end
     local was = self.dimen
     self.height_pct = pct
-    Compat.saveSetting(G_reader_settings, "canvas_height", pct)
+    if self.remember_height ~= false then
+        Compat.saveSetting(G_reader_settings, "canvas_height", pct)
+    end
+    if self.note_context then self.note_context.height_pct = pct end
     self:_rebuild()
     -- The sheet grew or shrank, so both the old and the new footprint are
     -- stale. One refresh over the union, at the end -- never during a drag.
