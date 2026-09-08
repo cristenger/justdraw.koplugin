@@ -2,6 +2,9 @@
 /*.md
 !/README.md
 
+# Local analyses, remediation plans and implementation reports
+/docs/
+
 # Local agent guidance (already covered by /*.md; listed to make it explicit)
 /CLAUDE.md
 
