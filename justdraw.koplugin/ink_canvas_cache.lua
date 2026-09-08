@@ -51,6 +51,7 @@ local ffi_ok, ffi = pcall(require, "ffi")
 local Grid = require("ink_spatial_grid")
 local Paper = require("ink_paper")
 local Render = require("ink_render")
+local Brush = require("ink_brush")
 local Codec = require("ink_canvas_codec")
 local Split = require("ink_stroke_split")
 local Style = require("ink_style")
@@ -281,6 +282,10 @@ end
 --- The raster buffer, for the overlay's regional blits. nil once closed.
 --- Whether any gray ink has reached the raster since the last rebuild. Box
 --- refreshes over this cache must ride a grayscale pass while true (ADR-36).
+function Cache:hasTranslucentInk()
+    return self.translucent_ink == true
+end
+
 function Cache:hasGrayInk()
     return self.gray_ink == true
 end
@@ -420,6 +425,13 @@ function Cache:addStroke(meta, points, n, opts)
     if live_raster_valid then
         return true, nil, false
     end
+    -- A stale live token may have left partial alpha in the raster. Rebuild
+    -- this region from accepted vectors rather than compositing it twice.
+    if meta.tool == Style.HIGHLIGHTER then
+        local box, err = self:repair(meta)
+        if not box then return nil, err end
+        return true, nil, true, box.x, box.y, box.x + box.w, box.y + box.h
+    end
     local painted, left, top, right, bottom =
         self:_paintStroke(meta, points, n)
     return true, nil, painted, left, top, right, bottom
@@ -495,6 +507,7 @@ function Cache:repair(m)
     if not self.bb then return nil end
     local box = self:_regionFor(m)
     if box.w <= 0 or box.h <= 0 then return box end
+    self:_resetCoverage()
     clearRegion(self, self.bb, box.x, box.y, box.w, box.h)
 
     local scale = self.transform.scale
@@ -709,21 +722,29 @@ end
 
 --[[--
 Paint one live segment of the stroke in progress, in canvas coordinates.
+Modern styles also pass their tool ID; highlighter segments must share the
+same non-nil stroke identity for the entire physical contact.
 
 Returns the dirty region in cache coordinates plus the cache identity and
 generation for a live-raster token, or nil if nothing was painted. A segment
 outside the canvas paints nothing at all: the buffer bounds the write, so it
 is dropped rather than wrapped onto the far side.
 ]]
-function Cache:drawSegment(x0, y0, x1, y1, width, color)
+function Cache:drawSegment(x0, y0, x1, y1, width, color, style, stroke)
     if not self.bb then return nil end
     local tr = self.transform
     local w = tr:scaleWidth(width)
     local kx0, ky0 = tr:toCache(x0, y0)
     local kx1, ky1 = tr:toCache(x1, y1)
-    local painted, left, top, right, bottom =
-        Render.segment(self.bb, kx0, ky0, kx1, ky1, w, color or self.ink)
+    local painted, left, top, right, bottom
+    if Style.isModern(style) then
+        painted, left, top, right, bottom = Brush.segment(self.bb, kx0, ky0, kx1, ky1, w, style,
+            self:_coverage(style, stroke), 0, 0, tr.scale, width)
+    else
+        painted, left, top, right, bottom = Render.segment(self.bb, kx0, ky0, kx1, ky1, w, color or self.ink)
+    end
     if not painted then return nil end
+    self:_recordCoverage(style, left, top, right, bottom, 0, 0)
     -- An explicit colour is exactly a gray style's (colorFor hands nil for
     -- pen). rawequal: a real colour is cdata whose __eq indexes its argument.
     if not rawequal(color, nil) then self.gray_ink = true end
@@ -751,7 +772,40 @@ function Cache:_cellSize()
     return cell < 64 and 64 or cell
 end
 
+function Cache:_resetCoverage()
+    if self.coverage and self.coverage_left then
+        self.coverage:paintRect(self.coverage_left, self.coverage_top,
+            self.coverage_right - self.coverage_left,
+            self.coverage_bottom - self.coverage_top, Blitbuffer.COLOR_BLACK)
+    end
+    self.coverage_key, self.coverage_left, self.coverage_top = nil, nil, nil
+    self.coverage_right, self.coverage_bottom = nil, nil
+end
+
+function Cache:_coverage(style, key)
+    if style ~= Style.HIGHLIGHTER then return nil end
+    assert(key ~= nil, "JustDraw: highlighter needs a stroke identity")
+    self.translucent_ink = true
+    if self.coverage_key ~= key then
+        self:_resetCoverage()
+        self.coverage_key = key
+    end
+    return self.coverage
+end
+
+function Cache:_recordCoverage(style, l, t, r, b, ox, oy)
+    if style ~= Style.HIGHLIGHTER or not l then return end
+    l, t, r, b = l - ox, t - oy, r - ox, b - oy
+    self.coverage_left = math.min(self.coverage_left or l, l)
+    self.coverage_top = math.min(self.coverage_top or t, t)
+    self.coverage_right = math.max(self.coverage_right or r, r)
+    self.coverage_bottom = math.max(self.coverage_bottom or b, b)
+end
+
 function Cache:_freeBuffer()
+    if self.coverage then self.coverage:free(); self.coverage = nil end
+    self.coverage_key, self.coverage_left, self.coverage_top = nil, nil, nil
+    self.coverage_right, self.coverage_bottom = nil, nil
     if self.bb then
         self.bb:free()
         self.bb = nil
@@ -766,6 +820,7 @@ function Cache:_build()
     self.state = "loading"
     self.chunks_by_id = {}
     self.gray_ink = false
+    self.translucent_ink = false
 
     self:_freeBuffer()
     if not self.transform or type(self.transform.cacheSize) ~= "function" then
@@ -783,6 +838,10 @@ function Cache:_build()
         self.bb:fill(self.background)
         self:_rulePaper(0, 0, w, h)
     end
+
+    -- One reusable byte per cache pixel, allocated with the generation,
+    -- never from a stylus sample. calloc starts with no coverage.
+    self.coverage = Blitbuffer.new(w, h, Blitbuffer.TYPE_BB8)
 
     local grid, grid_err = Grid.new{
         width = self.canvas.logical_w,
@@ -985,6 +1044,14 @@ function Cache:_paintStroke(m, points, n, target, ox, oy)
     -- Every persisted-stroke paint funnels through here -- build replay,
     -- repair, fragment repaint -- so this is where gray content is noticed.
     if Style.isGray(m.tool) then self.gray_ink = true end
+    if Style.isModern(m.tool) then
+        ox, oy = ox or 0, oy or 0
+        local painted, left, top, right, bottom = Brush.points(target or self.bb,
+            points, n, tr.scale, ox, oy, tr:scaleWidth(m.width), m.tool,
+            self:_coverage(m.tool, m.paint_seq or m.seq), m.width)
+        self:_recordCoverage(m.tool, left, top, right, bottom, ox, oy)
+        return painted, left, top, right, bottom
+    end
     return Render.points(target or self.bb, points, n, tr.scale,
         ox or 0, oy or 0, tr:scaleWidth(m.width),
         Style.colorFor(m.tool, self.ink))

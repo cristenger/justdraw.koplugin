@@ -265,7 +265,7 @@ function Adapter:_beginInk(sx, sy, tool)
     }
     local box, raster_cache, raster_generation =
         surface:cache():drawSegment(cx, cy, cx, cy, width,
-            Style.colorFor(self.stroke.tool, nil))
+            Style.colorFor(self.stroke.tool, nil), self.stroke.tool, self.stroke)
     updateLiveRasterToken(self.stroke, box, raster_cache, raster_generation)
     self:_dirty(box, "ink")
     return true
@@ -304,7 +304,7 @@ function Adapter:_continueInk(sx, sy, tool)
     if cy < stroke.min_y then stroke.min_y = cy elseif cy > stroke.max_y then stroke.max_y = cy end
     local box, raster_cache, raster_generation =
         surface:cache():drawSegment(previous_x, previous_y,
-            cx, cy, stroke.width, Style.colorFor(stroke.tool, nil))
+            cx, cy, stroke.width, Style.colorFor(stroke.tool, nil), stroke.tool, stroke)
     updateLiveRasterToken(stroke, box, raster_cache, raster_generation)
     self:_dirty(box, "ink")
     return true

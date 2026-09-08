@@ -272,7 +272,7 @@ return function(ctx)
         for i = 1, #chooser.buttons do
             labels[#labels + 1] = chooser.buttons[i][1].text
         end
-        t:eq(table.concat(labels, "|"), "Ink pen · Thin|Graphite · Thin|Marker · Thin|Close",
+        t:eq(table.concat(labels, "|"), "Ink pen · Thin|Graphite · Thin|Marker · Thin|Round ink · Thin|Highlighter · Thin|Textured graphite · Thin|Close",
             "every style, in English")
 
         for i = 1, #chooser.buttons do

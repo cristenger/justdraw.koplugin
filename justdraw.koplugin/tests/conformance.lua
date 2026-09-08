@@ -2654,7 +2654,7 @@ do
     local bar = Bar:new{ plugin = plugin }
     local before = bar.pen_btn:getSize()
     local fits, min_font = true, math.huge
-    for _, style in ipairs({ Style.PEN, Style.GRAPHITE, Style.MARKER }) do
+    for _, style in ipairs({ Style.PEN, Style.GRAPHITE, Style.MARKER, Style.ROUND, Style.HIGHLIGHTER, Style.TEXTURED }) do
         for _, width in ipairs({ 2, 4, 7 }) do
             for _, eraser in ipairs({ false, true }) do
                 plugin.pen_style, plugin.pen_width, plugin.eraser = style, width, eraser
@@ -2668,7 +2668,7 @@ do
             end
         end
     end
-    claim("document pen labels preserve real Button geometry and fit all nine choices",
+    claim("document pen labels preserve real Button geometry and fit all eighteen choices",
         true, fits, before.w .. "x" .. before.h .. "; minimum font " .. min_font)
 
     -- Real notebook button sizing, including longer localized labels. The
@@ -2679,7 +2679,7 @@ do
     local host = { control_entries = {} }
     local rect = { w = layout.rail_rect.w, h = layout.target_size }
     local notebook_fits, notebook_font = true, math.huge
-    for _, style in ipairs({ "Ink pen", "Graphite", "Marker", "Pluma de tinta", "Grafito", "Marcador" }) do
+    for _, style in ipairs({ "Ink pen", "Graphite", "Marker", "Round ink", "Highlighter", "Textured graphite", "Pluma de tinta", "Grafito", "Marcador", "Grafito texturado" }) do
         for _, width in ipairs({ "Thin", "Medium", "Thick", "Fino", "Mediano", "Grueso", "Custom (5.5)" }) do
             local button = Editor._button(host, style .. " · " .. width .. Button.checkmark,
                 true, function() end, rect)
@@ -2703,7 +2703,7 @@ do
         close_modal = function() end,
     }
     local relayed, marks = true, 0
-    for row = 1, 3 do
+    for row = 1, 6 do
         for column = 1, 3 do
             local button = palette.layout[row][column]
             relayed = relayed and button.checked_func == nil

@@ -43,7 +43,8 @@ local Raster = {}
 --[[--
 The area budget for one exported page, in pixels.
 
-A BB8 costs one byte per pixel, but that is only the floor of the peak: a PDF
+A BB8 plus its reusable stroke-coverage mask costs two bytes per pixel
+(three for a BB8A overlay), before the rest of the peak: a PDF
 page also holds the raw bytes as a Lua string and whatever zlib allocates on
 top, and a colour source adds an RGB24 conversion. 8 Mpx keeps an A5 notebook
 page above 300 dpi while leaving that peak inside what a Kindle-class device

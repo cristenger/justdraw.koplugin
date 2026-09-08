@@ -254,7 +254,7 @@ local function addSurfacePoint(s, cx, cy, cache, limit)
         return true
     end
     local box, raster_cache, raster_generation =
-        cache:drawSegment(px, py, cx, cy, s.w, Style.colorFor(s.t, nil))
+        cache:drawSegment(px, py, cx, cy, s.w, Style.colorFor(s.t, nil), s.t, s)
     updateLiveRasterToken(s, box, raster_cache, raster_generation)
     return true, box
 end
@@ -424,7 +424,7 @@ local function endSurfaceStroke(self, route)
         if cache then
             local box, raster_cache, raster_generation =
                 cache:drawSegment(s[1], s[2], s[1], s[2], s.w,
-                    Style.colorFor(s.t, nil))
+                    Style.colorFor(s.t, nil), s.t, s)
             updateLiveRasterToken(s, box, raster_cache, raster_generation)
             self[route.paint](self, box, tr)
         end
@@ -595,6 +595,13 @@ function JustDraw:init()
         unschedule = function(action) UIManager:unschedule(action) end,
         refresh = function(mode, left, top, right, bottom)
             local w, h = right - left, bottom - top
+            local cache = self.document_session and self.document_session:cache()
+            if not self.canvas_open and cache and cache:hasTranslucentInk() then
+                -- Recompose against the book at the SAME bounded cadence.
+                -- Alpha-blitting onto an already composed frame darkens it.
+                self:queueDocumentViewRepaint(left, top, w, h)
+                return
+            end
             if mode == "ui" then
                 Screen:refreshUI(left, top, w, h)
             elseif mode == "fast" then
@@ -3595,7 +3602,9 @@ function JustDraw:blitDocumentBox(box, tr)
     local bb = cache and cache:buffer()
     if not bb then return end
     local sx, sy = tr:fromCache(box.x, box.y)
-    blitCacheBox(cache, bb, Screen.bb, sx, sy, box.x, box.y, box.w, box.h)
+    if not cache:hasTranslucentInk() then
+        blitCacheBox(cache, bb, Screen.bb, sx, sy, box.x, box.y, box.w, box.h)
+    end
     self:refreshBox(sx, sy, sx + box.w, sy + box.h, cache:hasGrayInk())
 end
 
@@ -3913,8 +3922,12 @@ function JustDraw:styleItem(text, value)
     return {
         text = text,
         checked_func = function() return self.pen_style == value end,
+        enabled_func = Style.isModern(value) and function() return self:markerAvailable() end or nil,
         radio = true,
-        callback = function() self:setPenStyle(value) end,
+        callback = function()
+            if Style.isModern(value) and not self:markerAvailable() then return end
+            self:setPenStyle(value)
+        end,
     }
 end
 
@@ -4620,6 +4633,9 @@ function JustDraw:addToMainMenu(menu_items)
                     self:styleItem(_("Ink pen"), Style.PEN),
                     self:styleItem(_("Graphite"), Style.GRAPHITE),
                     marker_style_item,
+                    self:styleItem(_("Round ink"), Style.ROUND),
+                    self:styleItem(_("Highlighter"), Style.HIGHLIGHTER),
+                    self:styleItem(_("Textured graphite"), Style.TEXTURED),
                 },
             },
             {

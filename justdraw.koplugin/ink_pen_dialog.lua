@@ -13,11 +13,12 @@ local T = require("ffi/util").template
 local _ = require("gettext")
 
 local Dialog = {}
-local styles = { Style.PEN, Style.GRAPHITE, Style.MARKER }
+local styles = { Style.PEN, Style.GRAPHITE, Style.MARKER, Style.ROUND, Style.HIGHLIGHTER, Style.TEXTURED }
 local widths = { 2, 4, 7 }
 local style_names = {
     [Style.PEN] = _("Ink pen"), [Style.GRAPHITE] = _("Graphite"),
-    [Style.MARKER] = _("Marker"),
+    [Style.MARKER] = _("Marker"), [Style.ROUND] = _("Round ink"),
+    [Style.HIGHLIGHTER] = _("Highlighter"), [Style.TEXTURED] = _("Textured graphite"),
 }
 local width_names = { [2] = _("Thin"), [4] = _("Medium"), [7] = _("Thick") }
 
@@ -53,10 +54,11 @@ function Dialog.show(opts)
             local selected = current_style == style and current_width == width
             row[#row + 1] = {
                 text = Dialog.label(style, width) .. (selected and Button.checkmark or ""),
-                enabled = style ~= Style.MARKER or marker_allowed,
+                enabled = (style ~= Style.MARKER and not Style.isModern(style)) or marker_allowed,
                 no_refresh_checkmark = true,
                 callback = function()
-                    if style == Style.MARKER and not opts.marker_allowed() then return end
+                    if (style == Style.MARKER or Style.isModern(style))
+                        and not opts.marker_allowed() then return end
                     local ok = opts.set_choice(style, width)
                     if ok then opts.close_modal(dialog) end
                 end,

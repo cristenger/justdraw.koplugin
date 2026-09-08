@@ -27,6 +27,7 @@ not a fake to install.
 
   KO_HOME                 an isolated data dir; one is created when unset
   JUSTDRAW_SMOKE_PDF      the document to open (default: ../../test/sample.pdf)
+  JUSTDRAW_SMOKE_STYLE    optional style ID (1, 3, 65, 66, 67, 68)
   JUSTDRAW_SMOKE_KEEP=1   keep a created KO_HOME on disk to look at
 
 Exit status is 0 only when every step printed OK.
@@ -570,6 +571,9 @@ evdev traffic a pen would have produced, and nothing else.
 ]]
 step("5 a synthetic pen contact, its stroke and its row", function(say)
     local plugin, session = S.plugin, S.session
+    local style = require("ink_style").normalize(tonumber(os.getenv("JUSTDRAW_SMOKE_STYLE")))
+    plugin:setPenStyle(style)
+    S.smoke_style = style
     local dismissed = S.clearOverlays()
     if #dismissed > 0 then
         say("dismissed %d start-up notice(s): %s",
@@ -607,6 +611,7 @@ step("5 a synthetic pen contact, its stroke and its row", function(say)
     local metas = cache:strokes()
     expect(#metas == 1, "the raster holds %d stroke(s), not 1", #metas)
     local m = metas[1]
+    expect(m.tool == S.smoke_style, "selected brush did not reach the stylus contact")
     expect(num(m.point_count) >= 2,
         "the stroke has %s point(s)", tostring(m.point_count))
     say("raster stroke: %d points, box %.2f,%.2f .. %.2f,%.2f (page units)",
@@ -705,7 +710,7 @@ step("6 alphablitFrom BB8A onto the emulator's RGB32 screen", function(say)
     local function darkCount(box)
         local dark = 0
         for i = 1, #box do
-            if box[i] < 128 then dark = dark + 1 end
+            if box[i] < 250 then dark = dark + 1 end
         end
         return dark
     end
@@ -722,6 +727,15 @@ step("6 alphablitFrom BB8A onto the emulator's RGB32 screen", function(say)
     bb:fill(S.Blitbuffer.COLOR_WHITE)
     expect(darkCount(sample()) == 0, "the fill did not clear the box")
     S.plugin:paintTo(bb, 0, 0)
+    if S.smoke_style == require("ink_style").HIGHLIGHTER then
+        local first = sample()
+        -- Every view repaint supplies a fresh page. Repeating composition
+        -- against that page must not accumulate coverage in the ink cache.
+        bb:fill(S.Blitbuffer.COLOR_WHITE)
+        S.plugin:paintTo(bb, 0, 0)
+        local again = sample()
+        for i=1,#first do expect(first[i]==again[i], "repaint changed highlighter density") end
+    end
 
     local on_stroke = darkCount(sample())
     expect(on_stroke > 0,

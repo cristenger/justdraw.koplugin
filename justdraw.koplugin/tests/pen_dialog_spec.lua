@@ -25,12 +25,12 @@ return function(ctx)
     end
 
     t:describe("pen dialog / shared choices")
-    t:case("each of nine cells applies its own style and width", function()
-        for i, style in ipairs({ Style.PEN, Style.GRAPHITE, Style.MARKER }) do
+    t:case("each style and width cell applies its own style and width", function()
+        for i, style in ipairs({ Style.PEN, Style.GRAPHITE, Style.MARKER, Style.ROUND, Style.HIGHLIGHTER, Style.TEXTURED }) do
             for j, width in ipairs({ 2, 4, 7 }) do
                 local dialog, state = fixture()
                 local marks = 0
-                for row = 1, 3 do
+                for row = 1, 6 do
                     for column = 1, 3 do
                         local cell = dialog.buttons[row][column]
                         t:eq(cell.checked_func, nil, "no post-close check refresh on legacy Button")
@@ -50,7 +50,7 @@ return function(ctx)
 
     t:case("close, refusal and unavailable marker cannot write preferences", function()
         local dialog, state = fixture()
-        dialog.buttons[4][1].callback()
+        dialog.buttons[#dialog.buttons][1].callback()
         t:eq(state.writes, 0, "Close does not select")
         dialog, state = fixture{ refuse = true }
         dialog.buttons[2][1].callback()
@@ -71,10 +71,21 @@ return function(ctx)
         t:eq(state.writes, 0, "capability rechecked when selecting")
     end)
 
+    t:case("modern choices stay unavailable on legacy surfaces", function()
+        local dialog,state=fixture{marker=false}
+        for row=4,6 do
+            for _,cell in ipairs(dialog.buttons[row]) do
+                t:eq(cell.enabled,false,"modern cell is disabled")
+                cell.callback()
+            end
+        end
+        t:eq(state.writes,0,"disabled modern callbacks do not change preferences")
+    end)
+
     t:case("non-preset widths stay custom until explicitly replaced", function()
         local dialog, state = fixture{ width = 5.5 }
         t:eq(Dialog.label(Style.GRAPHITE, 5.5), "Graphite · Custom (5.5)", "custom indicator")
-        for row = 1, 3 do
+        for row = 1, 6 do
             for _, cell in ipairs(dialog.buttons[row]) do
                 t:eq(cell.text:find(Button.checkmark, 1, true), nil, "no false preset mark")
             end

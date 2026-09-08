@@ -311,6 +311,25 @@ return function(ctx)
             "and the nib is the screen width divided by the zoom")
     end)
 
+    t:case("translucent page ink recomposes through the view at the live cadence", function()
+        local p = documentPlugin()
+        startDrawing(p)
+        local cache = p.document_session:cache()
+        -- Raster math is checked against native BB8A in brush_native_check.
+        cache.translucent_ink = true
+        local before = #Device.screen.bb.blits
+        local queued = 0
+        p.queueDocumentViewRepaint = function() queued = queued + 1 end
+        local tr = p.document_session:transform()
+        p:blitDocumentBox({x=10,y=10,w=20,h=20},tr)
+        t:eq(queued, 1, "first repaint reaches the reader")
+        for i=1,50 do p:blitDocumentBox({x=10+i,y=10,w=20,h=20},tr) end
+        t:eq(queued, 1, "same-time samples are held by the existing limiter")
+        t:eq(#Device.screen.bb.blits, before, "never alpha-composed over an old composite")
+        p.live_refresh:flush()
+        t:eq(queued, 2, "the tail is recomposed once")
+    end)
+
     t:case("a contact in the surround starts nothing", function()
         local p, store = documentPlugin()
         startDrawing(p)

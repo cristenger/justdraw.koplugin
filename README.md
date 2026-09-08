@@ -97,17 +97,30 @@ Open **More tools → JustDraw** while reading. Standalone notebooks are also
 available under **File manager → More tools → Notebooks**.
 
 **Pen controls.** Open **More → Pen settings** to choose a style and width
-together: Ink pen, Graphite or Marker, each in Thin, Medium or Thick. The
-toolbar shows the selected combination. Tap the already selected pen to open
-the same palette; in document panels, drawing must be running for this
-shortcut. Tapping Pen while the eraser is selected returns to the pen.
-Preferences are shared between notebooks and documents.
+together: Ink pen, Graphite, Marker, Round ink, Highlighter or Textured
+graphite, each in Thin, Medium or Thick. The toolbar shows the selected
+combination. Tap the already selected pen to open the same palette; in document
+panels, drawing must be running for this shortcut. Tapping Pen while the eraser
+is selected returns to the pen. Preferences are shared between notebooks and
+documents.
+
+The three original styles keep their previous appearance. **Round ink** adds a
+round nib. **Highlighter** applies black at 20% opacity and preserves text
+underneath; retracing within one contact keeps the same coverage, while
+separate strokes can darken it. **Textured graphite** adds a fixed paper grain.
+These new options work in notebooks, sheets and PDF overlays. Pressure and pen
+tilt do not change the nib in this version.
 
 Partial erasing now cuts at the eraser's intersection with the centreline, even
 on sparsely sampled lines. Fragments left by it keep the visual order of the
 stroke they came from, after saving and reopening. Undo keeps its existing
 behaviour; erase fragments are still skipped only in the session that created
 them.
+
+The coverage mask adds one byte per cache pixel (about 4.4 MiB at 1860 × 2480).
+On PDFs containing Highlighter, live display is recomposed through the reader
+at the selected Drawing refresh cadence to avoid accumulating alpha on screen.
+Its device cost, like stylus input and e-ink appearance, needs a Scribe check.
 
 **Notebooks.** Choose a name, paper size and paper style when creating a
 notebook. The paper options scroll when the virtual keyboard leaves little
