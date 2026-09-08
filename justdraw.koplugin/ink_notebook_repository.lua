@@ -16,7 +16,7 @@ local unpack = unpack or table.unpack
 local Repository = {}
 Repository.__index = Repository
 
-Repository.SCHEMA_VERSION = 1
+Repository.SCHEMA_VERSION = 2
 Repository.MIGRATIONS = {}
 Repository.SORT_STEP = 1024
 Repository.DEFAULT_LIMIT = 50
@@ -65,6 +65,7 @@ CREATE TABLE notebook_strokes (
     max_y        REAL    NOT NULL,
     created_at   INTEGER NOT NULL,
     deleted_at   INTEGER,
+    paint_seq    INTEGER,
     UNIQUE(page_id, seq)
 );
 CREATE TABLE notebook_stroke_chunks (
@@ -87,6 +88,10 @@ CREATE INDEX strokes_by_page
 CREATE INDEX strokes_deleted
     ON notebook_strokes(deleted_at, id);
 ]]
+
+Repository.MIGRATIONS[1] = function(conn)
+    conn:exec("ALTER TABLE notebook_strokes ADD COLUMN paint_seq INTEGER;")
+end
 
 local function num(v)
     if v == nil then return nil end
@@ -825,14 +830,16 @@ function Repository:addStroke(page, stroke)
     local seq = positiveInteger(stroke.seq)
     if not seq then seq = self:nextSeq(page.id) end
     if not seq then return nil, "no_seq" end
+    local paint_seq = positiveInteger(stroke.paint_seq or seq)
+    if not paint_seq then return nil, "bad_stroke" end
     return self:transaction(function()
         local inserted, insert_err = self:_run([[
             INSERT INTO notebook_strokes
                 (page_id, seq, width, tool, codec, point_count,
-                 min_x, min_y, max_x, max_y, created_at, deleted_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL);]],
+                 min_x, min_y, max_x, max_y, created_at, deleted_at, paint_seq)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12);]],
             { page.id, seq, width, tool, Codec.VERSION, n,
-              min_x, min_y, max_x, max_y, self.now() })
+              min_x, min_y, max_x, max_y, self.now(), paint_seq })
         if not inserted then return nil, insert_err end
         local id, id_err = self:_lastId()
         if not id then return nil, id_err end
@@ -857,7 +864,7 @@ function Repository:listStrokes(page_id)
     if not page_id then return nil, "bad_id" end
     return self:_select([[
         SELECT id, seq, width, tool, codec, point_count,
-               min_x, min_y, max_x, max_y
+               min_x, min_y, max_x, max_y, COALESCE(paint_seq, seq)
           FROM notebook_strokes
          WHERE page_id = ?1 AND deleted_at IS NULL ORDER BY seq;]],
         { page_id }, function(row)
@@ -866,6 +873,7 @@ function Repository:listStrokes(page_id)
                 tool = num(row[4]), codec = num(row[5]), point_count = num(row[6]),
                 min_x = num(row[7]), min_y = num(row[8]),
                 max_x = num(row[9]), max_y = num(row[10]),
+                paint_seq = num(row[11]) or num(row[2]),
             }
         end)
 end

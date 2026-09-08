@@ -1012,6 +1012,7 @@ function support.newCanvasStore(canvases)
         for _, s in ipairs(self.strokes[canvas_id] or {}) do
             out[#out + 1] = {
                 id = s.id, seq = s.seq, width = s.width, tool = s.tool,
+                paint_seq = s.paint_seq or s.seq,
                 codec = 1, point_count = s.point_count,
                 min_x = s.min_x, min_y = s.min_y, max_x = s.max_x, max_y = s.max_y,
             }

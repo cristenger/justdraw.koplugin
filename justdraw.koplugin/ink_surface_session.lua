@@ -259,9 +259,13 @@ function SurfaceSession:addStroke(points, n, width, tool, opts)
     end
     local seq = self.next_seq
     if not seq then return nil, "no_seq" end
+    local paint_seq = opts and opts.paint_seq or seq
+    if type(paint_seq) ~= "number" or paint_seq ~= paint_seq
+        or paint_seq == math.huge or paint_seq < 1
+        or paint_seq ~= math.floor(paint_seq) then return nil, "bad_stroke" end
 
     local local_id, err = self.queue:addStroke(self.surface_obj, {
-        seq = seq, width = width, tool = tool, points = points, n = n,
+        seq = seq, paint_seq = paint_seq, width = width, tool = tool, points = points, n = n,
     })
     if not local_id then return nil, err end
 
@@ -274,7 +278,8 @@ function SurfaceSession:addStroke(points, n, width, tool, opts)
     end
     local added, cache_err, painted, left, top, right, bottom =
         self.cache_obj:addStroke({
-        id = local_id, seq = seq, width = width, tool = tool, point_count = n,
+        id = local_id, seq = seq, paint_seq = paint_seq,
+        width = width, tool = tool, point_count = n,
         min_x = min_x, min_y = min_y, max_x = max_x, max_y = max_y,
     }, points, n, opts)
     if not added then
@@ -307,8 +312,8 @@ One eraser sample: cut every stroke the capsule from the previous sample
 touched, replacing each with its surviving runs (ADR-32).
 
 Per stroke the replacement is all-or-nothing, built from queue primitives
-alone: the fragments are added first -- their pixels are already on the
-raster, so painting them again changes nothing visible -- and only when
+alone: fragments are registered without painting and inherit the original's
+visual order (ADR-46). Only when
 every one is queued does the original's delete join them. In the flush the
 inserts therefore precede the delete inside one transaction, so no power
 loss can keep the delete without the fragments. A refusal anywhere
@@ -352,7 +357,9 @@ function SurfaceSession:_applySplit(hit)
             frag[at * 2 - 1] = hit.points[p * 2 - 1]
             frag[at * 2] = hit.points[p * 2]
         end
-        local frag_id, err = self:addStroke(frag, count, m.width, m.tool)
+        local frag_id, err = self:addStroke(frag, count, m.width, m.tool, {
+            paint_seq = m.paint_seq or m.seq, defer_paint = true,
+        })
         if not frag_id then
             self:_withdrawFragments(added)
             return nil, err
@@ -379,14 +386,13 @@ function SurfaceSession:_applySplit(hit)
 end
 
 --- Take back fragments whose stroke could not be replaced after all. Their
---- inserts are still pending -- withdrawn without residue -- and their
---- pixels are a subset of the original's, which is still indexed, so the
---- removeStroke repaint restores nothing visibly different. Consumed seq
+--- inserts are still pending and have never painted. The original remains
+--- indexed, so withdrawing them must not touch the raster. Consumed seq
 --- numbers are left as gaps: seq is ordered, never dense.
 function SurfaceSession:_withdrawFragments(added)
     for i = #added, 1, -1 do
         self.queue:removeStroke(self.surface_obj, added[i])
-        self.cache_obj:removeStroke(added[i])
+        self.cache_obj:forgetStroke(added[i])
     end
 end
 

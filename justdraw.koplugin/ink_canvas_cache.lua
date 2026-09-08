@@ -73,8 +73,20 @@ local function validMetadata(m)
         or m.min_x > m.max_x or m.min_y > m.max_y then
         return nil, "stroke_metadata"
     end
+    if m.paint_seq ~= nil and (not finite(m.paint_seq) or m.paint_seq < 1
+        or m.paint_seq ~= floor(m.paint_seq)) then return nil, "stroke_metadata" end
     return true
 end
+
+-- Edit order stays in meta/seq. Only painting and visual hit tests use this
+-- inherited order: cutting a stroke must not raise it above newer ink.
+local function paintBefore(a, b)
+    local ap, bp = a.paint_seq or a.seq, b.paint_seq or b.seq
+    if ap == bp then return a.seq < b.seq end
+    return ap < bp
+end
+
+local function paintAfter(a, b) return paintBefore(b, a) end
 
 local Cache = {}
 Cache.__index = Cache
@@ -176,7 +188,7 @@ function Cache.new(opts)
         on_ready = opts.on_ready,
         on_error = opts.on_error,
 
-        meta = {},        -- stroke metadata, in drawing order
+        meta = {},        -- stroke metadata, in edit order
         by_id = {},
         grid = nil,
         bb = nil,
@@ -255,7 +267,7 @@ function Cache:retryOpen()
     return self:open()
 end
 
---- The stroke metadata, in drawing order. Never carries points.
+--- Stroke metadata in edit order; pending strokes may carry their points.
 function Cache:strokes()
     return self.meta
 end
@@ -399,6 +411,7 @@ function Cache:addStroke(meta, points, n, opts)
     self.by_id[meta.id] = meta
     if self.grid then self:_indexStroke(meta) end
     self:_indexLiveChunks(meta, points, n)
+    if opts and opts.defer_paint then return true, nil, false end
     local live_raster_valid = opts
         and opts.live_raster_complete == true
         and opts.raster_cache == self
@@ -442,8 +455,8 @@ function Cache:markPersisted(local_id, row_id)
 end
 
 --- Drop a stroke from the metadata, grid and chunk index without touching
---- the raster. The split path paints the survivors before it repairs the
---- hole, so the pixels' turn comes later; `removeStroke` keeps the old
+--- the raster. The split path registers survivors before repairing the
+--- original region in visual order; `removeStroke` keeps the old
 --- contract of doing both at once.
 function Cache:forgetStroke(id)
     local m = self.by_id[id]
@@ -493,7 +506,7 @@ function Cache:repair(m)
         chunks_decoded = 0, pixels_repaired = box.w * box.h,
     }
     if #neighbours > 0 then
-        table.sort(neighbours, function(a, b) return a.seq < b.seq end)
+        table.sort(neighbours, paintBefore)
         -- A viewport of the region, so the repair cannot paint outside it even
         -- if a neighbour reaches far beyond.
         local view = self.bb:viewport(box.x, box.y, box.w, box.h)
@@ -546,7 +559,7 @@ decoded -- the ones the grid ruled out are never read.
 function Cache:hitTest(cx, cy, radius, ctx)
     if not self.grid then return nil end
     local candidates = self:_metaNear(cx - radius, cy - radius, cx + radius, cy + radius)
-    table.sort(candidates, function(a, b) return a.seq > b.seq end)
+    table.sort(candidates, paintAfter)
     if ctx and ctx.stats then
         ctx.stats.candidates = ctx.stats.candidates + #candidates
     end
@@ -790,6 +803,7 @@ function Cache:_build()
     for i = #self.meta, 1, -1 do
         self.pending[#self.pending + 1] = self.meta[i]
     end
+    table.sort(self.pending, paintAfter)
 
     if #self.pending == 0 then
         self:_finish()

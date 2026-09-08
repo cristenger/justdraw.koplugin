@@ -32,6 +32,38 @@ return function(ctx)
 
     t:describe("ink_surface_session / generic durability")
 
+    t:case("erase fragments inherit visual order without repainting above later ink", function()
+        local session, store = fixture()
+        session:open()
+        local original = session:addStroke({100,100,200,100,300,100,400,100,500,100}, 5, 4, 1)
+        session:addStroke({450,50,450,150}, 2, 12, 3)
+        local cache = session:cache()
+        local before = cache._paintStroke
+        local whole_fragment_paints = 0
+        cache._paintStroke = function(self, m, points, n, target, ...)
+            if not target then whole_fragment_paints = whole_fragment_paints + 1 end
+            return before(self, m, points, n, target, ...)
+        end
+        local ctx = session:beginErase()
+        t:check(session:eraseAt(250,100,18,ctx) ~= nil, "cut admitted")
+        session:endErase(ctx)
+        t:eq(whole_fragment_paints, 0, "survivors are not painted over the complete cache")
+        t:eq(cache:metaById(original), nil, "original withdrawn")
+        local seen = 0
+        for _, m in ipairs(cache:strokes()) do
+            if m.tool == 1 then
+                seen = seen + 1
+                t:eq(m.paint_seq, 1, "original visual layer")
+                t:check(m.seq > 2, "new edit identity")
+            end
+        end
+        t:eq(seen, 2, "two survivors")
+        t:eq(session:flush(), true, "committed")
+        for _, m in ipairs(store:listStrokes(SURFACE.id)) do
+            if m.tool == 1 then t:eq(m.paint_seq, 1, "visual layer persisted") end
+        end
+    end)
+
     t:case("opens and edits a surface with no book fields", function()
         local session, store = fixture()
         t:eq(session:open(), true, "opened")
