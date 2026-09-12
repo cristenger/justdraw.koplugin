@@ -80,8 +80,11 @@ under **JustDraw → Page notes**, which offers *Delete this page note* and
 *Delete all page notes*.
 
 **In an EPUB,** open a panel first: **JustDraw → Drawing sheet → Open sheet
-here**. The sheet is anchored to the passage you were reading. Drag its top edge
-to resize it; close it with the toolbar's **More → Close sheet**.
+here**. The sheet is anchored to the passage you were reading. Its controls sit
+across its top, above the paper, so neither hand rests on them:
+**Draw · Hide note** with the current pen between them, then **Pen · Eraser ·
+Undo · Notes · More** and the sheet's height (**40 % · 70 % · 100 %**). Tap or
+drag the strip above them to resize it; close it with **More → Close sheet**.
 
 Because a sheet belongs to a passage and not to a page, you can keep reading
 with one open. When the page behind it changes, the sheet's top edge says which
@@ -89,8 +92,9 @@ page it belongs to and it stops accepting ink. **JustDraw → Drawing sheet** th
 offers both ways out: **Go to this sheet's page**, or **Open a sheet here
 instead**.
 
-Other useful entries in the same menu: **Toolbar side** (left or right),
-**Input mode** (*Automatic*, *Stylus* or *Finger*) and **Drawing refresh**.
+Other useful entries in the same menu: **Toolbar side** (left or right, for the
+reader's toolbar; a sheet keeps its controls on top), **Input mode**
+(*Automatic*, *Stylus* or *Finger*) and **Drawing refresh**.
 
 ## Notebooks
 
@@ -99,12 +103,14 @@ Other useful entries in the same menu: **Toolbar side** (left or right),
 2. **New notebook** asks for a name, a paper size (*A5 portrait*,
    *Letter portrait*, *A5 landscape*) and a paper style (*Blank*, *Ruled*,
    *Squared*, *Dotted*).
-3. The editor fills the screen. Its rail holds **Exit notebook · Pen · Eraser ·
-   Undo** at the top and **Previous page · Next page · Add page at end · More**
-   at the bottom. The page itself shows **Page N of M**.
+3. The editor fills the screen. A line across the top shows the notebook's
+   title, **Page N of M** and the current pen; under it one row holds
+   **Exit notebook · Pen · Eraser · Undo · Previous page · Next page ·
+   Add page at end · More**, with icons for the six in the middle. The page
+   takes the rest of the screen, so no control sits under a resting hand.
 4. **More** offers *Go to page…*, *Paper for this page*, *Rename notebook*,
-   *Delete page*, *Delete notebook*, *Export…*, *Rail side* and the shared pen
-   and refresh settings.
+   *Delete page*, *Delete notebook*, *Export…* and the shared pen and refresh
+   settings.
 5. Back in the library, each notebook's **Actions** button offers *Rename*,
    *Delete* and *Export…*.
 
