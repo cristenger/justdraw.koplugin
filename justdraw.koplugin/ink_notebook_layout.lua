@@ -1,8 +1,13 @@
 --[[--
 Physical layout helpers for the standalone notebook editor.
 
-The notebook page keeps its logical dimensions. Screen rotation and handedness
-only change the chrome and the rectangle into which that page is fitted.
+The notebook page keeps its logical dimensions. Screen rotation only changes the
+chrome and the rectangle into which that page is fitted.
+
+Handedness changes nothing any more. Every persistent control sits in one row
+above the paper, where neither writing hand rests; a side rail was always in
+the way of one of them, and its lower half sat under the heel of both. A stored
+`rail_side` is accepted and ignored, so old settings stay valid.
 ]]
 
 local Device = require("device")
@@ -114,41 +119,32 @@ function Layout.compute(opts)
     local screen_h = tonumber(opts.screen_h) or (screen and screen:getHeight())
     local page_w = tonumber(opts.logical_w)
     local page_h = tonumber(opts.logical_h)
-    local side = opts.rail_side == "left" and "left" or "right"
     if not finite(screen_w) or not finite(screen_h) or screen_w <= 0 or screen_h <= 0 then
         return nil, "no_viewport"
     end
 
     local target = Layout.physicalPixels(10, screen)
-    local rail_physical = Layout.physicalPixels(14, screen)
     local info_physical = Layout.physicalPixels(7, screen)
     local gap = Layout.physicalPixels(2, screen)
-    if not target or not rail_physical or not info_physical or not gap then
-        return nil, "bad_geometry"
-    end
+    if not target or not info_physical or not gap then return nil, "bad_geometry" end
     local padding = (Size.padding and (Size.padding.default or Size.padding.small)) or 0
     local target_floor = Size.item and Size.item.height_large or target
     target = math.max(target, target_floor or 0)
-    local rail_w = math.max(rail_physical, target + 2 * padding)
     local text_h = tonumber(opts.text_height) or target_floor or target
     local info_h = math.max(info_physical, text_h + 2 * padding)
     gap = math.max(gap, Size.span and Size.span.vertical_default or 0)
 
-    local paper_w = screen_w - rail_w - gap
-    local paper_h = screen_h - info_h - gap
-    -- Eight rail controls need two groups with a usable gap. The error band
-    -- also needs room for two two-target controls plus readable copy.
-    if screen_h < target * 9 or paper_w < target * 5 or paper_h < target then
+    local paper_w = screen_w
+    local paper_h = screen_h - info_h - target - gap
+    -- Eight controls retain the existing physical hit-target floor.
+    if screen_w < target * 8 or paper_h < target * 3 then
         return nil, "no_viewport"
     end
-
-    local rail_x = side == "left" and 0 or screen_w - rail_w
-    local content_x = side == "left" and rail_w + gap or 0
-    local paper = rect(content_x, info_h + gap, paper_w, paper_h)
+    local paper = rect(0, info_h + target + gap, paper_w, paper_h)
     local fit, fit_err = fitPage(page_w, page_h, paper)
     if not fit then return nil, fit_err end
-    local rail = rect(rail_x, 0, rail_w, screen_h)
-    local info = rect(content_x, 0, paper_w, info_h)
+    local rail = rect(0, info_h, screen_w, target)
+    local info = rect(0, 0, screen_w, info_h)
 
     return {
         screen_rect = rect(0, 0, screen_w, screen_h),
@@ -158,7 +154,7 @@ function Layout.compute(opts)
         fit_rect = fit,
         clip_rect = fit:copy(),
         target_size = target,
-        rail_side = side,
+        rail_side = "top",
         gap = gap,
     }
 end

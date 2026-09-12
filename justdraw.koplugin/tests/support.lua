@@ -2192,6 +2192,7 @@ function support.install()
         function label:free() self.freed = true end
         function label:setText(text) self.text = text end
         self.label_widget = label
+        self.label_container = { label }
     end
     --- Records the offer and declines it. The stub has no hit rectangle of its
     --- own, so it cannot decide a tap; what it can prove is that KOReader would
@@ -2226,6 +2227,15 @@ function support.install()
     end
     function Button:free() end
     package.preload["ui/widget/button"] = function() return Button end
+
+    package.preload["ui/widget/iconwidget"] = function()
+        local Icon = {}
+        function Icon:new(o) return setmetatable(o, { __index = self }) end
+        function Icon:getSize() return { w = self.width, h = self.height } end
+        function Icon:paintTo() end
+        function Icon:free() end
+        return Icon
+    end
 
     local function sizedContainer(name)
         local C = {}

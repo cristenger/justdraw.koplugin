@@ -20,12 +20,11 @@ return function(ctx)
             logical_w = 1680, logical_h = 1184, rail_side = "left",
         }
         t:check(right.target_size >= 118, "10 mm target is DPI-scaled")
-        t:eq(right.rail_rect.x + right.rail_rect.w, 1860, "right rail is on edge")
-        t:eq(left.rail_rect.x, 0, "left rail is on edge")
-        t:check(right.paper_rect.x + right.paper_rect.w <= right.rail_rect.x,
-            "paper never overlaps right rail")
-        t:check(left.paper_rect.x >= left.rail_rect.w,
-            "paper never overlaps left rail")
+        t:eq(right.rail_rect.w, 1860, "toolbar uses the whole width")
+        t:eq(left.rail_rect.x, 0, "old side preferences keep the toolbar at the top")
+        t:check(right.paper_rect.y >= right.rail_rect.y + right.rail_rect.h,
+            "paper starts below the toolbar")
+        t:eq(left.paper_rect.w, 1860, "landscape paper also has no side rail")
         t:eq(Layout.preset("a5_portrait").logical_w, 1184, "A5 preset exact")
         t:eq(Layout.preset("letter_portrait").logical_h, 2235, "Letter preset exact")
         local compact = Layout.compute{
@@ -212,4 +211,24 @@ return function(ctx)
             t:eq(combined:find(forbidden, 1, true), nil, forbidden .. " is absent")
         end
     end)
+    t:case("top toolbar fits physical targets in both orientations without distorting pages", function()
+        for _, profile in ipairs({{1860,2480,300},{2480,1860,300},{600,800,160},{800,600,160}}) do
+            for _, preset in ipairs({"a5_portrait", "a5_landscape", "letter_portrait"}) do
+                local page = Layout.preset(preset)
+                local layout = Layout.compute{
+                    screen = support.newScreen{w=profile[1],h=profile[2],dpi=profile[3]},
+                    logical_w=page.logical_w,logical_h=page.logical_h,
+                }
+                t:check(layout ~= nil, "supported geometry " .. preset)
+                t:check(math.floor(layout.rail_rect.w / 8) >= layout.target_size,
+                    "each button keeps its physical target")
+                t:eq(layout.paper_rect.x, 0, "left edge is available")
+                t:eq(layout.paper_rect.w, profile[1], "right edge is available")
+                t:check(math.abs(layout.fit_rect.w / page.logical_w
+                    - layout.fit_rect.h / page.logical_h) < 0.002,
+                    "aspect fit is preserved to pixel rounding")
+            end
+        end
+    end)
+
 end

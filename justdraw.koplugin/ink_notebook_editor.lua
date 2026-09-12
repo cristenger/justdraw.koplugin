@@ -26,6 +26,7 @@ local ExportDialog = require("ink_export_dialog")
 local ExportSource = require("ink_export_source")
 local LiveRefresh = require("ink_live_refresh")
 local NotebookLayout = require("ink_notebook_layout")
+local ToolButton = require("ink_tool_button")
 local RefreshDialog = require("ink_refresh_dialog")
 local PenDialog = require("ink_pen_dialog")
 local Stack = require("ink_stack")
@@ -133,7 +134,6 @@ function Editor:_computeLayout()
     local computed, err = NotebookLayout.compute{
         logical_w = page and page.logical_w or 1184,
         logical_h = page and page.logical_h or 1680,
-        rail_side = self.get_rail_side(),
     }
     if not computed then return nil, err end
     self.layout_geometry = computed
@@ -864,7 +864,7 @@ function Editor:_publishErrorRegion()
     local paper = self.layout_geometry.paper_rect
     local height = math.min(paper.h, self:_errorHeight())
     self.interactive_regions.error_band = Geom:new{
-        x = paper.x, y = paper.y + paper.h - height, w = paper.w, h = height,
+        x = paper.x, y = paper.y, w = paper.w, h = height,
     }
 end
 
@@ -905,20 +905,13 @@ end
 
 function Editor:_railRects()
     local rail = self.layout_geometry.rail_rect
-    local target = self.layout_geometry.target_size
-    local top_names = { "exit", "pen", "eraser", "undo" }
-    local bottom_names = { "previous", "next", "add", "more" }
+    local names = { "exit", "pen", "eraser", "undo", "previous", "next", "add", "more" }
     local rects = {}
-    for i = 1, #top_names do
-        rects[top_names[i]] = Geom:new{
-            x = rail.x, y = rail.y + (i - 1) * target, w = rail.w, h = target,
-        }
-    end
-    for i = 1, #bottom_names do
-        rects[bottom_names[i]] = Geom:new{
-            x = rail.x, y = rail.y + rail.h - (#bottom_names - i + 1) * target,
-            w = rail.w, h = target,
-        }
+    for i, name in ipairs(names) do
+        local left = math.floor((i - 1) * rail.w / #names)
+        local right = math.floor(i * rail.w / #names)
+        rects[name] = Geom:new{ x = rail.x + left, y = rail.y,
+            w = right - left, h = rail.h }
     end
     return rects
 end
@@ -940,10 +933,11 @@ function Editor:_rebuildControls()
             else self.set_eraser(false); self:onPenSettingsChanged() end
         end, rects.pen, pen_label .. "\n"
             .. _("Tap the selected pen to change its style and width."))
-    PenDialog.fitButton(pen)
+    ToolButton.decorate(pen, "pen", not self.get_eraser(), pen_label)
     local eraser = self:_button(_("Eraser"), snapshot.can_ink,
         function() self.set_eraser(true); self:_rebuildControls(); self:_dirtyRail() end,
-        rects.eraser, nil, function() return self.get_eraser() end)
+        rects.eraser)
+    ToolButton.decorate(eraser, "eraser", self.get_eraser(), _("Eraser"))
     -- Enabled state and the domain gate come from one function, so a control
     -- can look wrong only for as long as the snapshot behind it is stale --
     -- and never disagree about what would happen if it were pressed.
@@ -959,10 +953,11 @@ function Editor:_rebuildControls()
         function() self:_runDomain("add") end, rects.add)
     local more = self:_button(_("More"), snapshot.state ~= "loading",
         function() self:showMore() end, rects.more)
-    self.layout = {
-        { exit }, { pen }, { eraser }, { undo },
-        { previous }, { next_button }, { add }, { more },
-    }
+    ToolButton.decorate(undo, "undo", false, _("Undo"))
+    ToolButton.decorate(previous, "previous", false, _("Previous page"))
+    ToolButton.decorate(next_button, "next", false, _("Next page"))
+    ToolButton.decorate(add, "add", false, _("Add page at end"))
+    self.layout = {{ exit, pen, eraser, undo, previous, next_button, add, more }}
 
     local error = self.interactive_regions.error_band
     if error then
@@ -995,7 +990,8 @@ function Editor:_rebuildControls()
 end
 
 function Editor:_dirtyRail()
-    UIManager:setDirty(self, "ui", self.layout_geometry.rail_rect)
+    UIManager:setDirty(self, "ui",
+        self.layout_geometry.rail_rect:combine(self.layout_geometry.info_rect))
 end
 
 function Editor:_showInfo(text)
@@ -1300,16 +1296,24 @@ function Editor:paintTo(bb, x, y)
     end
     local title_rect = Geom:new{
         x = geometry.info_rect.x, y = geometry.info_rect.y,
-        w = math.floor(geometry.info_rect.w / 2), h = geometry.info_rect.h,
+        w = math.floor(geometry.info_rect.w * 0.35), h = geometry.info_rect.h,
     }
     self:_paintText(bb, BD.auto(self.notebook.title), title_rect,
         Font:getFace("smallinfofont", 22), nil)
     local status_rect = Geom:new{
-        x = geometry.info_rect.x + math.floor(geometry.info_rect.w / 2),
-        y = geometry.info_rect.y, w = math.floor(geometry.info_rect.w / 2),
+        x = geometry.info_rect.x + math.floor(geometry.info_rect.w * 0.35),
+        y = geometry.info_rect.y, w = math.floor(geometry.info_rect.w * 0.35),
         h = geometry.info_rect.h,
     }
     self:_paintText(bb, info, status_rect, Font:getFace("smallinfofont", 18), "center")
+    local tool_rect = Geom:new{
+        x = geometry.info_rect.x + math.floor(geometry.info_rect.w * 0.7),
+        y = geometry.info_rect.y, w = math.floor(geometry.info_rect.w * 0.3),
+        h = geometry.info_rect.h,
+    }
+    self:_paintText(bb, self.get_eraser() and _("Eraser") or
+        PenDialog.label(Style.resolve(self.get_raw_pen_style(), nil, true), self.get_pen_width()),
+        tool_rect, Font:getFace("smallinfofont", 18), "center")
     if self.snapshot.state == "loading" then
         self:_paintText(bb, _("Loading page…"), geometry.paper_rect,
             Font:getFace("cfont", 24), "center")
@@ -1649,11 +1653,6 @@ function Editor:showMore()
             {{ text = _("Input mode"), callback = function()
                 self:_closeModal(dialog); self:showInputMode()
             end }},
-            {{ text = _("Rail side"), callback = function()
-                self.set_rail_side(self.get_rail_side() == "left" and "right" or "left")
-                self:_closeModal(dialog)
-                self:onSetDimensions()
-            end }},
             {{ text = _("Stylus diagnostics"), callback = function()
                 self:_closeModal(dialog)
                 self.show_stylus_diagnostics()
@@ -1871,7 +1870,6 @@ function Editor:onSetDimensions()
     local computed, compute_err = NotebookLayout.compute{
         logical_w = self:_currentSession() and self:_currentSession():currentPage().logical_w or 1184,
         logical_h = self:_currentSession() and self:_currentSession():currentPage().logical_h or 1680,
-        rail_side = self.get_rail_side(),
     }
     if not computed then return nil, compute_err end
     self.layout_geometry = computed

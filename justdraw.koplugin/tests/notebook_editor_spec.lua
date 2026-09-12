@@ -147,8 +147,8 @@ return function(ctx)
         local editor = newEditor()
         local rail = editor.layout_geometry.rail_rect
         local paper = editor.layout_geometry.paper_rect
-        t:check(paper.x + paper.w <= rail.x or rail.x + rail.w <= paper.x,
-            "paper and rail do not overlap")
+        t:check(paper.y >= rail.y + rail.h,
+            "paper begins below the toolbar")
         t:eq(editor:stylusPassthrough(rail.x + 1, rail.y + 1), true,
             "stylus passes through rail")
         t:eq(editor:stylusPassthrough(paper.x + 1, paper.y + 1), false,
@@ -308,8 +308,9 @@ return function(ctx)
         dialog.buttons[2][3].callback()
         t:eq(style, 65, "graphite preference")
         t:eq(width, 7, "thick preference")
-        t:eq(editor.layout[2][1].text,
-            "Graphite · Thick" .. require("ui/widget/button").checkmark, "rail reflects pair")
+        t:eq(editor.layout[1][2].tool_label,
+            "Graphite · Thick", "icon help reflects the style and width")
+        t:eq(editor.layout[1][2].tool_selected, true, "selected tool stays visible")
         t:eq(editor.layout_geometry.paper_rect, paper, "paper geometry not rebuilt")
         dialog = editor:showPenWidth()
         controller.activeSession = function() return {} end
@@ -1922,4 +1923,29 @@ return function(ctx)
         editor:shutdown()
         ctx.env.UIManager:close(editor)
     end)
+    t:case("top tools keep actions, selection and error recovery out of the lower edge", function()
+        ctx.reset()
+        local editor, controller, snapshot = newEditor()
+        editor:_refreshSnapshot()
+        editor:_rebuildControls()
+        local paper = editor.layout_geometry.paper_rect
+        for _, entry in ipairs(editor.control_entries) do
+            t:check(entry.rect.y + entry.rect.h <= paper.y, "all persistent actions above paper")
+        end
+        t:eq(#editor.layout, 1, "keyboard focus follows the horizontal row")
+        t:eq(editor.layout[1][2].icon, "pen", "pen has a dedicated icon")
+        t:eq(editor.layout[1][3].icon, "eraser", "eraser is not a delete symbol")
+        t:eq(editor.layout[1][2].tool_selected, true, "pen selection is persistent")
+        editor.layout[1][7].callback()
+        t:eq(controller.calls[1], "add", "add retains append-at-end controller semantics")
+        snapshot.error_code = "page_save_failed"
+        snapshot.state = "save_failed"
+        editor:_refreshSnapshot()
+        editor:_rebuildControls()
+        t:eq(editor.interactive_regions.error_band.y, paper.y, "recovery is below the header")
+        t:eq(editor.layout_geometry.paper_rect, paper, "showing error does not change page scale")
+        t:eq(editor:stylusPassthrough(paper.x + 1, paper.y + 1), true,
+            "error region is excluded from ink")
+    end)
+
 end
