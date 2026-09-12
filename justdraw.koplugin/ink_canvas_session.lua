@@ -32,7 +32,6 @@ local BookDatabase = require("ink_book_database")
 local Index = require("ink_anchor_index")
 local Overlay = require("ink_canvas_overlay")
 local SurfaceSession = require("ink_surface_session")
-local Transform = require("ink_canvas_transform")
 
 local Screen = Device.screen
 
@@ -433,7 +432,7 @@ freed -- because loading the next one takes the memory the last one was using.
 ]]
 function Session:validateCanvas(canvas)
     if not canvas or not self:isAvailable() then return nil, "unavailable" end
-    return self:_transform(canvas, 0)
+    return self:_transform(canvas)
 end
 
 function Session:openCanvas(canvas, opts)
@@ -709,14 +708,13 @@ function Session:retrySave()
     return self.surface_session:retrySave()
 end
 
-function Session:_transform(canvas, sheet_top)
-    return Transform.new{
-        logical_w = canvas.logical_w,
-        logical_h = canvas.logical_h,
-        screen_w = Screen:getWidth(),
-        screen_h = Screen:getHeight(),
-        sheet_top = sheet_top,
-    }
+--- The transform a canvas opens with: the overlay's own geometry at full
+--- height. Its scale is the overlay's at every stop, so the raster built with
+--- it is adopted as it is instead of being built a second time.
+function Session:_transform(canvas)
+    local transform, err = Overlay.geometry(canvas, 100)
+    if not transform then return nil, err end
+    return transform
 end
 
 return Session

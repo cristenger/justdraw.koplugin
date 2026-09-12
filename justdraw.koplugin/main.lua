@@ -4272,10 +4272,12 @@ function JustDraw:showBarMenu()
             enabled = self.session:isWritable(),
             callback = pick(function() self:confirmDeleteCanvas(active) end) } }
     end
-    rows[#rows + 1] = { { text = _("Toolbar side"),
-        callback = function()
-            self:setBarSide(self.bar_side == "left" and "right" or "left")
-        end } }
+    if not self.canvas_open then
+        rows[#rows + 1] = { { text = _("Toolbar side"),
+            callback = function()
+                self:setBarSide(self.bar_side == "left" and "right" or "left")
+            end } }
+    end
     rows[#rows + 1] = { { text = _("Close"),
         callback = function() self:closeReaderModal(dialog) end } }
     dialog = ButtonDialog:new{ title = _("JustDraw"), buttons = rows }

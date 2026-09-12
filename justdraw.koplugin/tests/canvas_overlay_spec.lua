@@ -102,7 +102,7 @@ return function(ctx)
     end
 
     local function sheetTop(overlay)
-        return overlay.transform.sheet_top
+        return overlay.sheet_rect.y
     end
 
     -- =================================================================
@@ -328,7 +328,8 @@ return function(ctx)
         overlay:setHeight(100)
         t:eq(cache:buffer(), bb, "the same raster")
         t:eq(store.calls.stroke_read, reads, "not one stroke decoded again")
-        t:eq(cache.transform.sheet_top, 0, "but placed where the sheet now is")
+        t:eq(cache.transform, overlay.transform, "but placed where the sheet now is")
+        t:eq(sheetTop(overlay), 0, "which is the top of the screen")
     end)
 
     -- =================================================================
@@ -339,7 +340,8 @@ return function(ctx)
         local before_bar = overlay.bar
         Screen.w, Screen.h = SH, SW
         overlay:onScreenResize()
-        t:eq(overlay.transform.screen_w, SH, "the transform follows the screen")
+        t:eq(overlay.sheet_rect.w, SH, "the sheet follows the screen")
+        t:check(overlay.transform ~= nil, "and so does the transform")
         t:check(overlay.bar ~= before_bar, "and the toolbar is rebuilt for it")
         Screen.w, Screen.h = SW, SH
     end)
@@ -464,4 +466,48 @@ return function(ctx)
         t:eq(overlay.placement_label_bb, nil, "the failed buffer was freed")
         t:eq(overlay.placement, "away", "the ink refusal remains authoritative")
     end)
+    t:case("sheet header reserves content and preserves full-view ink at every stop", function()
+        local overlay = fixture{height_pct=100}
+        local scale = overlay.transform.scale
+        for _, pct in ipairs({40,70,100}) do
+            overlay:setHeight(pct)
+            local bar, handle = overlay.bar.dimen, overlay:handleRect()
+            local visible = overlay.transform:canvasRect()
+            t:eq(bar.x, 0, "toolbar starts at the left edge")
+            t:eq(bar.w, SW, "toolbar spans the sheet width")
+            t:eq(bar.y, handle.y + handle.h, "buttons start after the resize strip")
+            t:check(visible.y >= bar.y + bar.h, "no ink is covered by controls")
+            t:eq(overlay:toCanvas(SW / 2, bar.y + 1), nil, "header cannot receive ink")
+            t:eq(overlay.transform.scale, scale, "height only changes translation and clip")
+            for _, entry in ipairs(overlay.bar.entries) do
+                local size = entry.widget:getSize()
+                t:check(size.w <= entry.rect.w and size.h <= entry.rect.h,
+                    "native button budget remains inside its hit region")
+            end
+        end
+        local x,y = overlay.transform:toScreen(CANVAS.logical_w, CANVAS.logical_h)
+        t:check(x <= SW and y <= SH, "old bottom-right ink fits in the complete view")
+    end)
+
+    t:case("height changes are refused while a physical contact is active", function()
+        local overlay, _, plugin = fixture{height_pct=70}
+        plugin.input_lease = {hasActiveContact=function() return true end}
+        local transform = overlay.transform
+        local result, reason = overlay:setHeight(100)
+        t:eq(result, nil, "resize is refused")
+        t:eq(reason, "contact_active", "reason is explicit")
+        t:eq(overlay.transform, transform, "the stroke keeps its original coordinates")
+        t:eq(overlay.height_pct, 70, "no visual movement during the stroke")
+    end)
+
+    t:case("icon selection tracks tool changes without recreating glyphs", function()
+        local overlay, _, plugin = fixture()
+        local icon = overlay.bar.pen_btn.label_widget
+        plugin.eraser = true
+        overlay.bar:update(false)
+        t:eq(overlay.bar.pen_btn.tool_selected, false, "pen deselected")
+        t:eq(overlay.bar.eraser_btn.tool_selected, true, "eraser selected")
+        t:eq(overlay.bar.pen_btn.label_widget, icon, "cached icon is reused")
+    end)
+
 end

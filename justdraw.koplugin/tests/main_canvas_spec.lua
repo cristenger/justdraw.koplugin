@@ -632,14 +632,26 @@ return function(ctx)
         t:eq(p.bar.draw_btn.text, "Draw", "and its own label updates")
     end)
 
-    t:case("changing toolbar side moves the embedded bar and preserves ownership", function()
+    t:case("opening a sheet builds its raster once, at the scale the sheet shows", function()
+        local p = canvasPlugin()
+        local rebuilds = 0
+        p.onCanvasCacheWillRebuild = function() rebuilds = rebuilds + 1 end
+        p:openCanvasHere()
+        local overlay = p.session:overlay()
+        t:eq(rebuilds, 0, "the overlay adopted the raster the session opened")
+        t:eq(p.session.surface_session:transform().scale, overlay.transform.scale,
+            "the session opened with the overlay's scale")
+        t:check(overlay.transform.scale < 1, "the header is reserved above a screen-sized canvas")
+    end)
+
+    t:case("legacy toolbar side preferences preserve top sheet-bar ownership", function()
         local p = canvasPlugin()
         p:openCanvasHere()
         local right_x = p.bar.dimen.x
         p:sideItem("Left", "left").callback()
         t:eq(p.bar, p.session:overlay().bar, "main owns the rebuilt left bar")
         t:eq(p.session:overlay().bar_side, "left", "the overlay keeps the preference")
-        t:check(p.bar.dimen.x < right_x, "the visible bar moved to the left")
+        t:eq(p.bar.dimen.x, right_x, "sheet controls remain anchored across the top")
         t:eq(p.drawing, true, "changing chrome did not interrupt ink")
     end)
 

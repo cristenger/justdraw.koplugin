@@ -14,8 +14,10 @@ it never reaches the sheet underneath. `WidgetContainer` propagates to numeric
 children before its own handler, so the toolbar is `self[1]` and `paintTo`
 draws it at the end.
 
-The sheet occupies the bottom 40, 70 or 100 per cent of the screen and the
-canvas is revealed downwards from its first row. Anything the overlay does not
+The sheet occupies the bottom 40, 70 or 100 per cent of the screen. Its top is a
+header -- the grab strip, then the toolbar (ink_sheet_bar) -- and the canvas is
+revealed downwards from its first row beneath that, never under a control; see
+`geometry`. Anything the overlay does not
 want -- a tap above the sheet, a page-turn key -- is handed to the window below
 by hand, which is what keeps touch navigation alive while the canvas is open.
 Under the plugin's older rule, drawing swallowed every gesture on the screen
@@ -34,7 +36,7 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local _ = require("gettext")
 local T = require("ffi/util").template
 
-local InkBar = require("ink_bar")
+local SheetBar = require("ink_sheet_bar")
 local Compat = require("ink_compat")
 local Stack = require("ink_stack")
 local Transform = require("ink_canvas_transform")
@@ -107,17 +109,59 @@ function InkCanvasOverlay:init()
     self:_rebuild()
 end
 
+--[[--
+Where a sheet goes at a height, and the one transform that puts a canvas in it.
+
+The sheet is the grab strip, then the toolbar, then paper. The canvas is fitted
+to the paper as if the sheet were at 100%, so its scale is the same at every
+stop and a height change only moves and clips it: the raster keeps its buffer,
+because `Cache:needsRebuild` compares scale. The session asks this before the
+overlay exists, so the raster a canvas opens with is already the one the
+overlay shows.
+
+A stop that would leave no paper under the header gives way to the next larger
+one; the controls are never shrunk to make room. Returns the transform, the
+sheet rectangle and the stop actually used, or nil and `bad_geometry`.
+]]
+function InkCanvasOverlay.geometry(canvas, height_pct)
+    local sw, sh = Screen:getWidth(), Screen:getHeight()
+    local header_h = handleHeight() + select(3, SheetBar.metrics(sw))
+    local pct = isStop(height_pct) and height_pct or 100
+    local top = floor(sh * (100 - pct) / 100)
+    for i = 1, #HEIGHT_STOPS do
+        if sh - top > header_h then break end
+        if HEIGHT_STOPS[i] > pct then
+            pct = HEIGHT_STOPS[i]
+            top = floor(sh * (100 - pct) / 100)
+        end
+    end
+    local content_top = top + header_h
+    local transform, err = Transform.new{
+        logical_w = canvas.logical_w,
+        logical_h = canvas.logical_h,
+        fit_rect = { x = 0, y = content_top, w = sw, h = sh - header_h },
+        clip_rect = { x = 0, y = content_top, w = sw, h = sh - content_top },
+        align_x = "center",
+        align_y = "top",
+    }
+    if not transform then return nil, err end
+    return transform, Geom:new{ x = 0, y = top, w = sw, h = sh - top }, pct
+end
+
 --- Rebuild everything that depends on the screen or the height: the
 --- transform, the toolbar's fixed position, and the dirty region.
 function InkCanvasOverlay:_rebuild()
-    local sw, sh = Screen:getWidth(), Screen:getHeight()
-    local transform = Transform.new{
-        logical_w = self.canvas.logical_w,
-        logical_h = self.canvas.logical_h,
-        screen_w = sw,
-        screen_h = sh,
-        sheet_top = floor(sh * (100 - self.height_pct) / 100),
-    }
+    local transform, sheet, pct = InkCanvasOverlay.geometry(self.canvas, self.height_pct)
+    if not transform then
+        -- The session validated this canvas against the screen before the
+        -- overlay was built, so only a later screen change can get here.
+        -- Keep the last geometry: a sheet in the wrong place can still close.
+        assert(self.transform, "JustDraw: sheet geometry refused before the overlay existed")
+        logger.warn("JustDraw: no sheet geometry for this screen:", sheet)
+        return
+    end
+    self.height_pct = pct
+    self.sheet_rect = sheet
 
     -- Rotation changes the raster scale. Stop capture while the old ready
     -- transform still exists, so an in-flight stroke can be repaired before
@@ -128,9 +172,15 @@ function InkCanvasOverlay:_rebuild()
     end
     self.transform = transform
 
-    self.bar = InkBar:new{
+    if self.bar then
+        -- Freed after this event, not now: the rebuild may have been asked
+        -- for by one of the old bar's own buttons.
+        local previous = self.bar
+        UIManager:nextTick(function() previous:free() end)
+    end
+    self.bar = SheetBar:new{
+        top = sheet.y + handleHeight(),
         plugin = self.plugin,
-        side = self.bar_side,
         embedded = true,
         parent = self,
         note_context = self.note_context,
@@ -147,13 +197,8 @@ function InkCanvasOverlay:_rebuild()
         self.bar:update(false)
     end
 
-    local sheet = self.transform:sheetRect()
-    local bar = self.bar.dimen
-    local top = sheet.y < bar.y and sheet.y or bar.y
-    local left = sheet.x < bar.x and sheet.x or bar.x
-    local right = sheet.x + sheet.w
-    if bar.x + bar.w > right then right = bar.x + bar.w end
-    self.dimen = Geom:new{ x = left, y = top, w = right - left, h = sh - top }
+    -- The bar lies inside the sheet now, so the sheet is the whole window.
+    self.dimen = Geom:new{ x = sheet.x, y = sheet.y, w = sheet.w, h = sheet.h }
     -- The handle's width or height may have changed; both constrain the label.
     self:_rebuildPlacementLabel()
 end
@@ -171,7 +216,7 @@ end
 
 --- The grab strip at the top edge of the sheet.
 function InkCanvasOverlay:handleRect()
-    local sheet = self.transform:sheetRect()
+    local sheet = self.sheet_rect
     return { x = sheet.x, y = sheet.y, w = sheet.w, h = handleHeight() }
 end
 
@@ -280,7 +325,7 @@ function InkCanvasOverlay:_rebuildPlacementLabel()
 end
 
 function InkCanvasOverlay:inSheet(x, y)
-    local r = self.transform:sheetRect()
+    local r = self.sheet_rect
     return x >= r.x and x < r.x + r.w and y >= r.y and y < r.y + r.h
 end
 
@@ -300,6 +345,10 @@ end
 -- ------------------------------------------------------------------- height
 
 function InkCanvasOverlay:setHeight(pct)
+    -- A live stroke is mapped through this transform. Moving the paper under
+    -- a pen still on the glass would put the rest of it somewhere else.
+    local lease = self.plugin and self.plugin.input_lease
+    if lease and lease:hasActiveContact() then return nil, "contact_active" end
     pct = snap(pct)
     if pct == self.height_pct then return end
     local was = self.dimen
@@ -335,6 +384,7 @@ function InkCanvasOverlay:paintChromeTo(bb, x, y)
     -- than a border and a grip.
     local h = self:handleRect()
     local rule = Size.border.window
+    bb:paintRect(h.x, h.y, h.w, h.h, Blitbuffer.COLOR_WHITE)
     bb:paintRect(h.x, h.y, h.w, rule, Blitbuffer.COLOR_BLACK)
     local label = self.placement_label_bb
     if label then
@@ -372,7 +422,7 @@ function InkCanvasOverlay:restoreChromeIfIntersecting(bb, rect, x, y)
 end
 
 function InkCanvasOverlay:paintTo(bb, x, y)
-    local sheet = self.transform:sheetRect()
+    local sheet = self.sheet_rect
     -- The whole sheet, letterbox margins included: a stroke left behind in a
     -- margin after a rotation would otherwise never be cleared.
     bb:paintRect(sheet.x, sheet.y, sheet.w, sheet.h, Blitbuffer.COLOR_WHITE)
@@ -466,6 +516,11 @@ InkCanvasOverlay.onSetRotationMode = InkCanvasOverlay.onScreenResize
 --- CloseWidget before removing the window, so this is where it is released.
 --- Deliberately returns nothing: `WidgetContainer` must go on propagating.
 function InkCanvasOverlay:onCloseWidget()
+    -- The bar's rendered status and glyph references go with it, a tick later
+    -- for the same reason as in _rebuild: Hide note closes from inside a tap.
+    -- It stays referenced, and a freed bar paints nothing.
+    local bar = self.bar
+    if bar then UIManager:nextTick(function() bar:free() end) end
     self:_freePlacementLabel()
 end
 
