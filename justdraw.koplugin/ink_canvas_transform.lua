@@ -1,10 +1,10 @@
 --[[--
 The one place canvas coordinates become screen coordinates.
 
-A canvas is born with a geometry -- the screen it was first drawn on -- and it
-keeps it. Every screen it is later shown on gets an aspect-fit rectangle: the
-largest copy of the canvas that fits, never distorted, letterboxed at the sides
-if the shape no longer matches. Rotating the device or opening the book on
+A canvas is born with a geometry -- for a sheet, the paper under its header on
+the screen it was created on -- and it keeps it. Every screen it is later shown
+on gets an aspect-fit rectangle: the largest copy of the canvas that fits, never
+distorted, letterboxed if the shape no longer matches. Rotating the device or opening the book on
 another reader changes the transform, never the stored points.
 
 The vertical alignment is to the *top* of the sheet rather than to its centre,

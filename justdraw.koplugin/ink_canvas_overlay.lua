@@ -100,6 +100,11 @@ local function handleHeight()
     return h
 end
 
+--- The header above a sheet's paper: the grab strip, then the toolbar.
+local function headerHeight(sw)
+    return handleHeight() + select(3, SheetBar.metrics(sw))
+end
+
 function InkCanvasOverlay:init()
     if not isStop(self.height_pct) then
         local saved = Compat.readSetting(G_reader_settings, "canvas_height")
@@ -125,7 +130,7 @@ sheet rectangle and the stop actually used, or nil and `bad_geometry`.
 ]]
 function InkCanvasOverlay.geometry(canvas, height_pct)
     local sw, sh = Screen:getWidth(), Screen:getHeight()
-    local header_h = handleHeight() + select(3, SheetBar.metrics(sw))
+    local header_h = headerHeight(sw)
     local pct = isStop(height_pct) and height_pct or 100
     local top = floor(sh * (100 - pct) / 100)
     for i = 1, #HEIGHT_STOPS do
@@ -146,6 +151,21 @@ function InkCanvasOverlay.geometry(canvas, height_pct)
     }
     if not transform then return nil, err end
     return transform, Geom:new{ x = 0, y = top, w = sw, h = sh - top }, pct
+end
+
+--[[--
+The shape a new sheet is born with: the paper under the header at 100%.
+
+A canvas keeps the logical size it was created with, and `geometry` fits it
+beneath the header. Born with the screen's shape it is taller than that paper,
+so it comes out narrower than the screen with a strip on each side the pen
+cannot use -- 134 px a side on a Scribe. Born with this shape it is drawn 1:1
+from edge to edge at every stop. A rotation, or a header that has changed
+height since, letterboxes it again, as it would any stored shape.
+]]
+function InkCanvasOverlay.paperSize()
+    local sw, sh = Screen:getWidth(), Screen:getHeight()
+    return sw, sh - headerHeight(sw)
 end
 
 --- Rebuild everything that depends on the screen or the height: the

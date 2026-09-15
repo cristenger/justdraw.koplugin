@@ -489,6 +489,27 @@ return function(ctx)
         t:check(x <= SW and y <= SH, "old bottom-right ink fits in the complete view")
     end)
 
+    t:case("a sheet shaped like the paper fills the width at every stop", function()
+        -- A screen-shaped canvas under a header is narrower than the screen:
+        -- the letterbox a new sheet must not be born with.
+        local w, h = Overlay.paperSize()
+        t:eq(w, SW, "as wide as the screen")
+        -- Pinned, not bounded: every new sheet's stored shape follows the
+        -- header, so a header that changes height must fail here rather than
+        -- letterbox every sheet made afterwards.
+        t:eq(h, 650, "and shorter by exactly this header")
+        local canvas = { id = 2, logical_w = w, logical_h = h }
+        for _, pct in ipairs({40,70,100}) do
+            local transform = assert(Overlay.geometry(canvas, pct))
+            t:eq(transform.offset_x, 0, "no left margin at " .. pct .. "%")
+            t:eq(transform.draw_w, SW, "no right margin at " .. pct .. "%")
+            t:eq(transform.scale, 1, "drawn 1:1 at " .. pct .. "%")
+        end
+        local full = assert(Overlay.geometry(canvas, 100))
+        local _, bottom = full:toScreen(w, h)
+        t:eq(bottom, SH, "the whole sheet reaches the bottom edge at 100%")
+    end)
+
     t:case("height changes are refused while a physical contact is active", function()
         local overlay, _, plugin = fixture{height_pct=70}
         plugin.input_lease = {hasActiveContact=function() return true end}

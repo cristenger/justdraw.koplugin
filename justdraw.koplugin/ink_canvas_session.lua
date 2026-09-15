@@ -22,7 +22,6 @@ turns itself off for this book: keying notes on a path loses them the first
 time the book is renamed.
 ]]
 
-local Device = require("device")
 local UIManager = require("ui/uimanager")
 local logger = require("logger")
 local _ = require("gettext")
@@ -32,8 +31,6 @@ local BookDatabase = require("ink_book_database")
 local Index = require("ink_anchor_index")
 local Overlay = require("ink_canvas_overlay")
 local SurfaceSession = require("ink_surface_session")
-
-local Screen = Device.screen
 
 local Session = {}
 Session.__index = Session
@@ -415,8 +412,9 @@ function Session:createHere(page)
         end
     end
 
-    spec.logical_w = Screen:getWidth()
-    spec.logical_h = Screen:getHeight()
+    -- The paper under the sheet's header, not the screen: a screen-shaped
+    -- canvas is fitted beneath the header narrower than the screen (ADR-51).
+    spec.logical_w, spec.logical_h = Overlay.paperSize()
     local canvas, cerr = self.repository:createCanvas(self.book_id, spec)
     if not canvas then return nil, cerr end
 

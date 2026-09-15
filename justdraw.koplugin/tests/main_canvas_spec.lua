@@ -641,7 +641,27 @@ return function(ctx)
         t:eq(rebuilds, 0, "the overlay adopted the raster the session opened")
         t:eq(p.session.surface_session:transform().scale, overlay.transform.scale,
             "the session opened with the overlay's scale")
-        t:check(overlay.transform.scale < 1, "the header is reserved above a screen-sized canvas")
+        t:eq(overlay.transform.scale, 1, "a new sheet has the paper's shape and is drawn 1:1")
+        t:eq(overlay.transform.offset_x, 0, "with no side margins under the header")
+    end)
+
+    t:case("a screen-shaped sheet also builds its raster once, below the header", function()
+        -- A paper-shaped sheet fits to width, so a transform that forgot the
+        -- header would give it the same scale. A screen-shaped one would not.
+        local canvas = {
+            id = 57, anchor_kind = "xpointer", anchor_key = "xp:/body/p[7]",
+            anchor_raw = "/body/p[7]", anchor_normalized = "/body/p[7]",
+            anchor_dom_version = 20240114, logical_w = SW, logical_h = SH,
+        }
+        local p = canvasPlugin{ canvases = { canvas } }
+        local rebuilds = 0
+        p.onCanvasCacheWillRebuild = function() rebuilds = rebuilds + 1 end
+        p:openCanvas(canvas)
+        local overlay = p.session:overlay()
+        t:eq(rebuilds, 0, "the overlay adopted the raster the session opened")
+        t:eq(p.session.surface_session:transform().scale, overlay.transform.scale,
+            "the session opened with the overlay's scale")
+        t:check(overlay.transform.scale < 1, "the header is reserved above a screen-shaped sheet")
     end)
 
     t:case("legacy toolbar side preferences preserve top sheet-bar ownership", function()

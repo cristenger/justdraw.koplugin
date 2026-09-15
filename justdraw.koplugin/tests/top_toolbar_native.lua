@@ -22,10 +22,12 @@ marker. Deliberately not in tests/run.lua, which must run on bare LuaJIT.
 local this = debug.getinfo(1, "S").source:sub(2)
 
 local PROFILES = {
-    { name = "portrait", w = 600, h = 800, dpi = 160 },
-    { name = "landscape", w = 800, h = 600, dpi = 160 },
-    { name = "scribe-portrait", w = 1860, h = 2480, dpi = 300 },
-    { name = "scribe-landscape", w = 2480, h = 1860, dpi = 300 },
+    -- paper_h: the height a new sheet is stored with. Pinned, because a header
+    -- that changes height letterboxes every sheet created afterwards.
+    { name = "portrait", w = 600, h = 800, dpi = 160, paper_h = 650 },
+    { name = "landscape", w = 800, h = 600, dpi = 160, paper_h = 456 },
+    { name = "scribe-portrait", w = 1860, h = 2480, dpi = 300, paper_h = 2122 },
+    { name = "scribe-landscape", w = 2480, h = 1860, dpi = 300, paper_h = 1502 },
 }
 
 local function quote(value)
@@ -247,6 +249,24 @@ end
 
 local x, y = overlay.transform:toScreen(canvas.logical_w, canvas.logical_h)
 check(x <= W and y <= H, "a full-screen sheet's far corner is visible at 100%")
+
+-- A new sheet is born with the shape of the paper under this header: exactly
+-- what the header the real widgets paint leaves of the screen, and pinned.
+local paper_w, paper_h = Overlay.paperSize()
+local pinned
+for _, entry in ipairs(PROFILES) do
+    if entry.name == profile then pinned = entry.paper_h end
+end
+check(paper_w == W and paper_h == pinned, ("a new sheet is stored %dx%s, got %dx%d")
+    :format(W, tostring(pinned), paper_w, paper_h))
+check(overlay.height_pct == 100
+    and paper_h == H - overlay:handleRect().h - overlay.bar.dimen.h,
+    "the stored height is what the painted header leaves")
+for _, pct in ipairs({ 40, 70, 100 }) do
+    local born = assert(Overlay.geometry({ logical_w = paper_w, logical_h = paper_h }, pct))
+    check(born.offset_x == 0 and born.draw_w == W, "a new sheet has no side margins at " .. pct .. "%")
+    check(born.scale == 1, "a new sheet is drawn 1:1 at " .. pct .. "%")
+end
 check(tap(overlay, overlay.bar.eraser_btn), "the sheet eraser tap is consumed")
 check(host.eraser and overlay.bar.eraser_btn.tool_selected, "and reached the plugin")
 check(not overlay.bar.pen_btn.tool_selected, "the pen let go of the selection")

@@ -4,8 +4,8 @@ local.
 
 Painting a canvas by replaying its vectors makes every repaint cost what the
 reader has written. Instead the whole transformed canvas is rasterised once
-into a BB8 buffer and afterwards painted with a single blit. On a Scribe that
-buffer is 1860 x 2480 bytes, about 4.4 MiB, and exactly one exists: it belongs
+into a BB8 buffer and afterwards painted with a single blit. On a Scribe a new
+sheet's buffer is 1860 x 2122 bytes, about 3.8 MiB, and exactly one exists: it belongs
 to the canvas that is open, and it is released when that canvas is closed.
 
 The buffer holds the *whole* canvas, not the visible part of it, which is why
