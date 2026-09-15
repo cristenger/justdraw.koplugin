@@ -279,6 +279,8 @@ function SurfaceSession:addStroke(points, n, width, tool, opts)
     local added, cache_err, painted, left, top, right, bottom =
         self.cache_obj:addStroke({
         id = local_id, seq = seq, paint_seq = paint_seq,
+        -- Once COMMIT drops the points, a rebuild decodes this like a stored row.
+        codec = Codec.VERSION,
         width = width, tool = tool, point_count = n,
         min_x = min_x, min_y = min_y, max_x = max_x, max_y = max_y,
     }, points, n, opts)

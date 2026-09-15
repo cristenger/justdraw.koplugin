@@ -64,6 +64,31 @@ return function(ctx)
         end
     end)
 
+    --[[--
+    At COMMIT the cache swaps a stroke's temporary id for its row id and lets
+    go of its points, so from then on the stroke is read back from the
+    repository like any row it loaded -- which only works if the in-memory
+    meta says how those rows are encoded. A rotation, a page-ink zoom and a
+    notebook resize all rebuild the raster this way, and a meta without its
+    codec turns every one of them into `load_failed` and switches drawing off.
+    ]]
+    t:case("a stroke committed in this session survives a raster rebuild", function()
+        local session, _, sched = fixture()
+        session:open()
+        t:check(session:addStroke({ 100, 100, 300, 400, 500, 200 }, 3, 4, 1) ~= nil, "drawn")
+        t:eq(session:flush(), true, "committed")
+        local cache = session:cache()
+        t:eq(cache:strokes()[1].points, nil, "points released at commit")
+        cache:setTransform(Transform.new{
+            logical_w = SURFACE.logical_w, logical_h = SURFACE.logical_h,
+            fit_rect = { x = 0, y = 0, w = 500, h = 700 },
+            clip_rect = { x = 0, y = 0, w = 500, h = 700 },
+        })
+        sched:drain()
+        t:eq(cache.load_error, nil, "the stored stroke was decodable")
+        t:eq(cache:stateName(), "ready", "rebuilt at the new scale")
+    end)
+
     t:case("opens and edits a surface with no book fields", function()
         local session, store = fixture()
         t:eq(session:open(), true, "opened")
