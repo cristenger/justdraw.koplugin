@@ -22,12 +22,18 @@ marker. Deliberately not in tests/run.lua, which must run on bare LuaJIT.
 local this = debug.getinfo(1, "S").source:sub(2)
 
 local PROFILES = {
-    -- paper_h: the height a new sheet is stored with. Pinned, because a header
-    -- that changes height letterboxes every sheet created afterwards.
-    { name = "portrait", w = 600, h = 800, dpi = 160, paper_h = 650 },
-    { name = "landscape", w = 800, h = 600, dpi = 160, paper_h = 456 },
-    { name = "scribe-portrait", w = 1860, h = 2480, dpi = 300, paper_h = 2122 },
-    { name = "scribe-landscape", w = 2480, h = 1860, dpi = 300, paper_h = 1502 },
+    -- paper_h: the height a new sheet is stored with. page_w/page_h: the shape
+    -- a new notebook page is stored with, in logical units (8 per mm) at this
+    -- profile's density. Both pinned, because a header that changes height
+    -- letterboxes every sheet and every notebook created afterwards.
+    { name = "portrait", w = 600, h = 800, dpi = 160, paper_h = 650,
+        page_w = 762, page_h = 843 },
+    { name = "landscape", w = 800, h = 600, dpi = 160, paper_h = 456,
+        page_w = 1016, page_h = 589 },
+    { name = "scribe-portrait", w = 1860, h = 2480, dpi = 300, paper_h = 2122,
+        page_w = 1260, page_h = 1432 },
+    { name = "scribe-landscape", w = 2480, h = 1860, dpi = 300, paper_h = 1502,
+        page_w = 1680, page_h = 1012 },
 }
 
 local function quote(value)
@@ -102,6 +108,7 @@ local Event = require("ui/event")
 local Geom = require("ui/geometry")
 local Size = require("ui/size")
 local Editor = require("ink_notebook_editor")
+local Layout = require("ink_notebook_layout")
 local Overlay = require("ink_canvas_overlay")
 
 local profile = os.getenv("JUSTDRAW_TOOLBAR_PROFILE")
@@ -155,7 +162,17 @@ local bb = BB.new(W, H, BB.TYPE_BB8)
 
 -- ------------------------------------------------------------ notebook
 
-local page = { id = 1, logical_w = 1184, logical_h = 1680 }
+-- A new notebook page is born with the shape of the paper under this header,
+-- and pinned: the header's height is part of every notebook's shape.
+local pinned_page
+for _, entry in ipairs(PROFILES) do
+    if entry.name == profile then pinned_page = entry end
+end
+local born = assert(Layout.screenPage())
+check(born.logical_w == pinned_page.page_w and born.logical_h == pinned_page.page_h,
+    ("a new notebook page is stored %dx%d, got %dx%d")
+        :format(pinned_page.page_w, pinned_page.page_h, born.logical_w, born.logical_h))
+local page = { id = 1, logical_w = born.logical_w, logical_h = born.logical_h }
 local snapshot = {
     state = "ready", writable = true, can_ink = true, can_undo = true, can_close = true,
     can_navigate = true, has_previous = false, has_next = true, page_count = 2, page_position = 1,
@@ -189,6 +206,17 @@ for _, entry in ipairs(editor.control_entries) do
     check(entry.rect.y + entry.rect.h <= geometry.paper_rect.y, "notebook button is above the paper")
     if entry.widget.icon then checkIcon(entry.widget, "notebook") end
 end
+
+-- The page fills the paper the painted header leaves: no strip on either side,
+-- and at most one pixel row of paper under it, because two integers cannot
+-- hold the paper's exact proportion.
+local fit, paper = geometry.fit_rect, geometry.paper_rect
+check(fit.x == 0 and fit.w == W,
+    ("the page spans the screen, got x=%d w=%d"):format(fit.x, fit.w))
+check(fit.y == paper.y and paper.h - fit.h >= 0 and paper.h - fit.h <= 1,
+    ("the page is the paper, got %d px left under it"):format(paper.h - fit.h))
+check(paper.y == geometry.rail_rect.y + geometry.rail_rect.h + geometry.gap,
+    "the paper starts one gap under the painted row")
 
 local pen, eraser = editor.layout[1][2], editor.layout[1][3]
 local px, py = markPoint(pen)
