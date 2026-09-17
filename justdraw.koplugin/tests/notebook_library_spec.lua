@@ -337,7 +337,7 @@ return function(ctx)
                 return dialog
             end
             local dialog = library:showCreateDialog()
-            t:eq(#dialog.paper_options, 2, "both radio groups remain")
+            t:eq(#dialog.paper_options, 1, "the style group remains")
             for _, widget in ipairs(dialog.paper_options) do
                 t:eq(widget.width, (available or math.floor(1072 * 0.72)) - 18,
                     "option group fits the dialog in landscape")
@@ -368,8 +368,7 @@ return function(ctx)
         library:markShown(); library:startLoading(); ctx.env.UIManager:flush()
         local dialog = library:showCreateDialog()
         dialog._values[1] = "A long unsaved notebook name"
-        dialog.paper_options[1]:select("letter_portrait")
-        dialog.paper_options[2]:select("dots")
+        dialog.paper_options[1]:select("dots")
         local viewport = dialog.cropping_widget
         local full_h = viewport[1]:getSize().h
         t:check(viewport:getSize().h < full_h, "options scroll above the keyboard")
@@ -389,7 +388,6 @@ return function(ctx)
         t:eq(library.modal_widgets[dialog], nil, "old form was closed")
         local state = rotated:creationState()
         t:eq(state.title, "A long unsaved notebook name")
-        t:eq(state.preset, "letter_portrait")
         t:eq(state.paper, "dots")
         t:eq(state.keyboard_visible, false, "rotation keeps keyboard hidden")
         t:eq(writes, 0, "rotation does not create a notebook")
@@ -424,11 +422,13 @@ return function(ctx)
         library:shutdown()
     end)
 
-    --- Paper size and paper style are two questions, so they are two radio
-    --- groups: RadioButtonTable keeps one checked button per widget, and one
-    --- table holding both would make choosing Dotted un-choose A5.
-    t:case("paper size and paper style are independent choices", function()
+    --- The dialog asks one question about the paper, its style. The shape is
+    --- not a choice: a notebook is born with the shape of the paper under the
+    --- header on this screen (Layout.screenPage), computed when Create is
+    --- pressed so a form that survived a rotation stores the current screen's.
+    t:case("a new notebook takes the screen's page shape and the chosen style", function()
         ctx.reset()
+        local Layout = require("ink_notebook_layout")
         local controller = {}
         local spec
         function controller:listNotebookBatch()
@@ -455,24 +455,47 @@ return function(ctx)
             return groups
         end
 
+        local expected = assert(Layout.screenPage{ screen = ctx.env.Device.screen })
         local groups = create(nil)
-        t:check(groups["Paper size"] ~= nil, "a paper size group")
+        t:eq(groups["Paper size"], nil, "no paper size question")
         t:check(groups["Paper style"] ~= nil, "a paper style group")
-        t:check(groups["Paper size"] ~= groups["Paper style"],
-            "and they are separate widgets")
         t:eq(spec.template_kind, "blank", "a notebook is blank unless asked")
-        t:eq(spec.logical_w, 1184, "on A5 portrait by default")
+        t:eq(spec.logical_w, expected.logical_w, "as wide as the paper under the header")
+        t:eq(spec.logical_h, expected.logical_h, "and as tall")
+        t:eq(spec.title, "Notes", "with its name")
 
         create(function(g) g["Paper style"].button_select_callback{ value = "dots" } end)
         t:eq(spec.template_kind, "dots", "the chosen style is what gets created")
-        t:eq(spec.logical_w, 1184, "and the size choice is untouched by it")
+        t:eq(spec.logical_w, expected.logical_w, "and the shape is untouched by it")
+    end)
 
-        create(function(g)
-            g["Paper size"].button_select_callback{ value = "a5_landscape" }
-            g["Paper style"].button_select_callback{ value = "ruled" }
-        end)
-        t:eq(spec.template_kind, "ruled", "both choices survive together")
-        t:eq(spec.logical_w, 1680, "landscape")
+    t:case("a dialog rebuilt after rotation stores the shape of the screen it creates on", function()
+        ctx.reset()
+        local Layout = require("ink_notebook_layout")
+        local screen = ctx.env.Device.screen
+        local old_w, old_h = screen.w, screen.h
+        local spec
+        local controller = {}
+        function controller:listNotebookBatch()
+            return { items = {}, has_more = false, writable = true }
+        end
+        function controller:createNotebook(s) spec = s; return { id = 4 } end
+        local library = Library:new{ controller = controller }
+        library:markShown(); library:startLoading(); ctx.env.UIManager:flush()
+        local dialog = library:showCreateDialog()
+        dialog._values[1] = "Rotated"
+        screen.w, screen.h = old_h, old_w
+        library:onSetDimensions()
+        local rotated = library.create_dialog
+        t:check(rotated ~= dialog, "rotation rebuilt the form")
+        rotated._values[1] = "Rotated"
+        rotated.buttons[1][2].callback()
+        ctx.env.UIManager:flush()
+        local expected = assert(Layout.screenPage{ screen = screen })
+        t:eq(spec.logical_w, expected.logical_w, "the landscape paper's width")
+        t:eq(spec.logical_h, expected.logical_h, "and height")
+        screen.w, screen.h = old_w, old_h
+        library:shutdown()
     end)
 
     t:case("shutdown closes every library-owned top-level dialog", function()

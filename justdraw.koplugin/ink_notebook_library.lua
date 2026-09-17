@@ -418,7 +418,6 @@ end
 
 function Library:showCreateDialog(previous)
     if not self.batch or not self.batch.writable then return nil, "read_only" end
-    local selected = previous and previous.preset or "a5_portrait"
     local style = previous and previous.paper or "blank"
     local dialog
     dialog = MultiInputDialog:new{
@@ -436,12 +435,19 @@ function Library:showCreateDialog(previous)
                         or _("Notebook name can’t be empty."))
                     return
                 end
-                local preset = NotebookLayout.preset(selected)
-                preset.title = title
-                -- The presets carry blank; the chooser is what makes a
-                -- notebook ruled, and every later page inherits it.
-                preset.template_kind = style
-                local notebook, err = self.controller:createNotebook(preset)
+                -- The shape is this screen's, taken now: the form may have
+                -- been rebuilt after a rotation, and the notebook has to fit
+                -- the screen it is created on. The chooser is what makes it
+                -- ruled, and every later page inherits both (ADR-52).
+                local spec, shape_err = NotebookLayout.screenPage()
+                if not spec then
+                    logger.warn("JustDraw notebooks: no page shape:", shape_err)
+                    self:_showInfo(_("Couldn’t create this notebook. Try again."))
+                    return
+                end
+                spec.title = title
+                spec.template_kind = style
+                local notebook, err = self.controller:createNotebook(spec)
                 if not notebook then
                     logger.warn("JustDraw notebooks: create failed:", err)
                     self:_showInfo(_("Couldn’t create this notebook. Try again."))
@@ -459,25 +465,8 @@ function Library:showCreateDialog(previous)
         and dialog:getAddedWidgetAvailableWidth()
         or math.floor(math.min(Screen:getWidth(), Screen:getHeight()) * 0.72)
     local option_width = width - ScrollableContainer:getScrollbarWidth()
-    local radio = RadioButtonTable:new{
-        width = option_width,
-        parent = dialog,
-        show_parent = dialog,
-        radio_buttons = {
-        {{ text = _("Paper size"), enabled = false, checkable = false }},
-        {
-            { text = _("A5 portrait"), checked = selected == "a5_portrait", value = "a5_portrait" },
-            { text = _("Letter portrait"), checked = selected == "letter_portrait", value = "letter_portrait" },
-        },
-        {
-            { text = _("A5 landscape"), checked = selected == "a5_landscape", value = "a5_landscape" },
-        }},
-        button_select_callback = function(entry) selected = entry.value end,
-    }
-    -- Its own table, so it is its own radio group: RadioButtonTable keeps one
-    -- checked button per widget, across as many rows as it is given. Two by
-    -- two rather than four across, because four labels do not survive the
-    -- narrowest screen this runs on with the keyboard up.
+    -- Two by two rather than four across, because four labels do not survive
+    -- the narrowest screen this runs on with the keyboard up.
     local style_radio = RadioButtonTable:new{
         width = option_width,
         parent = dialog,
@@ -494,8 +483,8 @@ function Library:showCreateDialog(previous)
         }},
         button_select_callback = function(entry) style = entry.value end,
     }
-    dialog.paper_options = { radio, style_radio }
-    local content = VerticalGroup:new{ align = "left", radio, style_radio }
+    dialog.paper_options = { style_radio }
+    local content = VerticalGroup:new{ align = "left", style_radio }
     local base_height = dialog.dialog_frame:getSize().h
     local viewport = ScrollableContainer:new{
         dimen = Geom:new{ w = width, h = content:getSize().h },
@@ -544,7 +533,7 @@ function Library:showCreateDialog(previous)
         if on_close then on_close(widget, ...) end
     end
     dialog.creationState = function(widget)
-        return { title = widget:getFields()[1], preset = selected, paper = style,
+        return { title = widget:getFields()[1], paper = style,
             keyboard_visible = widget:isKeyboardVisible() }
     end
     self.create_dialog = dialog

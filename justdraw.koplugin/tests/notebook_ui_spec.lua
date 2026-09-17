@@ -200,12 +200,13 @@ return function(ctx)
         end
         for _, required in ipairs({
             "Notebooks", "New notebook", "Loading page…", "Retry saving",
-            "Exit notebook", "Delete notebook", "Read-only", "Paper size",
+            "Exit notebook", "Delete notebook", "Read-only",
             "Paper style", "Blank", "Ruled", "Squared", "Dotted",
         }) do
             t:check(combined:find(required, 1, true) ~= nil, required .. " is present")
         end
-        for _, forbidden in ipairs({ "Cuadernos", "Nuevo cuaderno", "Borrar página" }) do
+        for _, forbidden in ipairs({ "Cuadernos", "Nuevo cuaderno", "Borrar página",
+            "Paper size", "A5 portrait", "Letter portrait" }) do
             t:eq(combined:find(forbidden, 1, true), nil, forbidden .. " is absent")
         end
     end)

@@ -19,20 +19,6 @@ local Size = require("ui/size")
 local Layout = {}
 
 Layout.LOGICAL_UNITS_PER_MM = 8
-Layout.PRESETS = {
-    a5_portrait = {
-        title = "A5 portrait", logical_w = 1184, logical_h = 1680,
-        template_kind = "blank",
-    },
-    letter_portrait = {
-        title = "Letter portrait", logical_w = 1727, logical_h = 2235,
-        template_kind = "blank",
-    },
-    a5_landscape = {
-        title = "A5 landscape", logical_w = 1680, logical_h = 1184,
-        template_kind = "blank",
-    },
-}
 
 local function finite(value)
     return type(value) == "number" and value == value
@@ -85,17 +71,6 @@ function Layout.physicalPixels(mm, screen)
     local pixels = screen:scaleByDPI(mm * 160 / 25.4)
     if not finite(pixels) or pixels <= 0 then return nil, "bad_geometry" end
     return math.max(1, rounded(pixels))
-end
-
-function Layout.preset(name)
-    local value = Layout.PRESETS[name]
-    if not value then return nil, "bad_geometry" end
-    return {
-        title = value.title,
-        logical_w = value.logical_w,
-        logical_h = value.logical_h,
-        template_kind = value.template_kind,
-    }
 end
 
 local function rect(x, y, w, h)
