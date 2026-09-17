@@ -110,6 +110,7 @@ local Size = require("ui/size")
 local Editor = require("ink_notebook_editor")
 local Layout = require("ink_notebook_layout")
 local Overlay = require("ink_canvas_overlay")
+local Transform = require("ink_canvas_transform")
 
 local profile = os.getenv("JUSTDRAW_TOOLBAR_PROFILE")
 local Screen = Device.screen
@@ -207,16 +208,25 @@ for _, entry in ipairs(editor.control_entries) do
     if entry.widget.icon then checkIcon(entry.widget, "notebook") end
 end
 
--- The page fills the paper the painted header leaves: no strip on either side,
--- and at most one pixel row of paper under it, because two integers cannot
--- hold the paper's exact proportion.
-local fit, paper = geometry.fit_rect, geometry.paper_rect
+-- The page fills the paper the painted header leaves. Measured on the
+-- transform the session builds from the viewport the editor publishes --
+-- the layout's own fit_rect reaches no production code -- so this fails if
+-- the paper the reader writes on grows a margin.
+local paper = geometry.paper_rect
+local fit, clip = editor:viewport()
 check(fit.x == 0 and fit.w == W,
-    ("the page spans the screen, got x=%d w=%d"):format(fit.x, fit.w))
-check(fit.y == paper.y and paper.h - fit.h >= 0 and paper.h - fit.h <= 1,
-    ("the page is the paper, got %d px left under it"):format(paper.h - fit.h))
+    ("the published paper spans the screen, got x=%d w=%d"):format(fit.x, fit.w))
 check(paper.y == geometry.rail_rect.y + geometry.rail_rect.h + geometry.gap,
     "the paper starts one gap under the painted row")
+local transform = assert(Transform.new{
+    logical_w = page.logical_w, logical_h = page.logical_h,
+    fit_rect = fit, clip_rect = clip,
+})
+check(transform.offset_x == 0, ("the page has no left strip, got %d"):format(transform.offset_x))
+check(W - transform.draw_w > -0.001 and W - transform.draw_w < 1,
+    ("the page has no right strip, got %.3f px"):format(W - transform.draw_w))
+check(transform.offset_y == paper.y and fit.h - transform.draw_h > -0.001,
+    "the page starts at the paper and does not overrun it")
 
 local pen, eraser = editor.layout[1][2], editor.layout[1][3]
 local px, py = markPoint(pen)

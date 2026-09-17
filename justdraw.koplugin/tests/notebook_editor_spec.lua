@@ -105,14 +105,21 @@ return function(ctx)
         }
         local screen = ctx.env.Device.screen
         local expected = assert(Layout.screenPage{ screen = screen })
-        local geometry = editor.layout_geometry
-        t:eq(geometry.fit_rect.x, 0, "no strip on the left")
-        t:eq(geometry.fit_rect.w, screen.w, "no strip on the right")
-        t:check(geometry.paper_rect.h - geometry.fit_rect.h <= 1,
-            "the frame is the paper")
-        t:check(math.abs(geometry.fit_rect.w / expected.logical_w
-            - geometry.fit_rect.h / expected.logical_h) < 0.002,
-            "and has the new page's shape")
+        -- Through the viewport the editor actually publishes, and the
+        -- transform the session builds from it: the layout's own `fit_rect`
+        -- reaches no production code, so asserting on it proves nothing.
+        local fit, clip = editor:viewport()
+        t:check(fit ~= nil, "the editor publishes a viewport")
+        t:eq(fit.x, 0, "the paper starts at the left edge")
+        t:eq(fit.w, screen.w, "and spans the screen")
+        local transform = assert(require("ink_canvas_transform").new{
+            logical_w = expected.logical_w, logical_h = expected.logical_h,
+            fit_rect = fit, clip_rect = clip,
+        })
+        t:eq(transform.offset_x, 0, "so the page has no strip on the left")
+        t:check(fit.w - transform.draw_w > -0.001 and fit.w - transform.draw_w < 1,
+            "and none on the right")
+        t:check(fit.h - transform.draw_h > -0.001, "and does not overrun the paper")
         editor:shutdown()
     end)
 

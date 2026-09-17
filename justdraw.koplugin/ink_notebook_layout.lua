@@ -98,8 +98,11 @@ end
 The rows above the paper, and the paper they leave, for one screen.
 
 Shared by `compute` and `screenPage` so the shape a page is born with and the
-rectangle that page is later fitted into can never come from two arithmetics
-that drift apart.
+rectangle that page is later fitted into come from one arithmetic rather than
+two that can drift apart. The sharing is of the code, not of the inputs: hand
+the two functions different `screen`, `screen_w/h` or `text_height` and they
+will still describe different papers, so a caller that overrides any of them
+must override it for both.
 ]]
 local function chrome(opts, screen)
     local screen_w = tonumber(opts.screen_w) or (screen and screen:getWidth())
@@ -189,10 +192,11 @@ function Layout.screenPage(opts)
     local dpi = screen:scaleByDPI(160)
     if not finite(dpi) or dpi <= 0 then return nil, "bad_geometry" end
     local units_per_px = Layout.LOGICAL_UNITS_PER_MM * 25.4 / dpi
+    -- Shape only. The ruling is the create dialog's question, and a default
+    -- returned from here would be a second opinion on it.
     return {
         logical_w = math.max(1, rounded(measured.paper.w * units_per_px)),
         logical_h = math.max(1, rounded(measured.paper.h * units_per_px)),
-        template_kind = "blank",
     }
 end
 

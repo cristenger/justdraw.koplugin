@@ -2681,7 +2681,9 @@ do
     -- full ReaderUI smoke checks that the editor wires this fitting in.
     local Editor = require("ink_notebook_editor")
     local Layout = require("ink_notebook_layout")
-    local layout = assert(Layout.compute{ logical_w = 1184, logical_h = 1680 })
+    local born = assert(Layout.screenPage())
+    local layout = assert(Layout.compute{
+        logical_w = born.logical_w, logical_h = born.logical_h })
     local host = { control_entries = {} }
     local rect = { w = layout.rail_rect.w, h = layout.target_size }
     local notebook_fits, notebook_font = true, math.huge

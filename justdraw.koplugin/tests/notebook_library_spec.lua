@@ -484,17 +484,25 @@ return function(ctx)
         library:markShown(); library:startLoading(); ctx.env.UIManager:flush()
         local dialog = library:showCreateDialog()
         dialog._values[1] = "Rotated"
+        -- Everything that runs transposed runs inside this pcall, so a raise
+        -- cannot leave the shared fake screen rotated for every later case.
+        local rebuilt, expected
         screen.w, screen.h = old_h, old_w
-        library:onSetDimensions()
-        local rotated = library.create_dialog
-        t:check(rotated ~= dialog, "rotation rebuilt the form")
-        rotated._values[1] = "Rotated"
-        rotated.buttons[1][2].callback()
-        ctx.env.UIManager:flush()
-        local expected = assert(Layout.screenPage{ screen = screen })
-        t:eq(spec.logical_w, expected.logical_w, "the landscape paper's width")
-        t:eq(spec.logical_h, expected.logical_h, "and height")
+        local ok, err = pcall(function()
+            library:onSetDimensions()
+            rebuilt = library.create_dialog
+            rebuilt._values[1] = "Rotated"
+            rebuilt.buttons[1][2].callback()
+            ctx.env.UIManager:flush()
+            expected = assert(Layout.screenPage{ screen = screen })
+        end)
         screen.w, screen.h = old_w, old_h
+        t:check(ok, "the rotated form was driven without raising: " .. tostring(err))
+        t:check(rebuilt ~= nil and rebuilt ~= dialog, "rotation rebuilt the form")
+        t:eq(spec and spec.logical_w, expected and expected.logical_w,
+            "the landscape paper's width")
+        t:eq(spec and spec.logical_h, expected and expected.logical_h,
+            "and height")
         library:shutdown()
     end)
 

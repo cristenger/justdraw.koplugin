@@ -217,12 +217,22 @@ return function(ctx)
     --- otherwise letterbox every notebook created afterwards in silence.
     --- Under the suite's fakes Size.* does not scale with DPI, so the 300 dpi
     --- rows differ from tests/top_toolbar_native.lua, which pins the runtime.
+    ---
+    --- The strips are asserted on a real Transform built the way the session
+    --- builds one -- `Editor:viewport()` hands it `paper_rect`, never the
+    --- layout's own `fit_rect`, which no production code reads -- so this
+    --- fails if the paper the reader actually writes on grows a margin.
     t:case("a new page takes the shape of the paper and fills its width at every profile", function()
+        local Transform = require("ink_canvas_transform")
         local PINNED = {
             { w = 600, h = 800, dpi = 160, page_w = 762, page_h = 843 },
             { w = 800, h = 600, dpi = 160, page_w = 1016, page_h = 589 },
             { w = 1860, h = 2480, dpi = 300, page_w = 1260, page_h = 1527 },
             { w = 2480, h = 1860, dpi = 300, page_w = 1680, page_h = 1107 },
+            -- reMarkable-class, and the one profile here where height is the
+            -- limiting axis and the width does not divide exactly: without
+            -- fitPage rounding the advisory fit is a pixel short of the paper.
+            { w = 1404, h = 1872, dpi = 227, page_w = 1257, page_h = 1524 },
         }
         for _, p in ipairs(PINNED) do
             local screen = support.newScreen{ w = p.w, h = p.h, dpi = p.dpi }
@@ -230,19 +240,38 @@ return function(ctx)
             local page = assert(Layout.screenPage{ screen = screen, screen_w = p.w, screen_h = p.h })
             t:eq(page.logical_w, p.page_w, where .. " page width in units")
             t:eq(page.logical_h, p.page_h, where .. " page height in units")
-            t:eq(page.template_kind, "blank", where .. " a new page is blank until chosen")
+            t:eq(page.template_kind, nil, where .. " shape carries no ruling")
             local layout = assert(Layout.compute{
                 screen = screen, screen_w = p.w, screen_h = p.h,
                 logical_w = page.logical_w, logical_h = page.logical_h,
             })
-            local paper, fit = layout.paper_rect, layout.fit_rect
+            local paper = layout.paper_rect
             t:check(math.floor(layout.rail_rect.w / 8) >= layout.target_size,
                 where .. " each button keeps its physical target")
-            t:eq(fit.x, 0, where .. " no strip on the left")
-            t:eq(fit.w, p.w, where .. " no strip on the right")
-            t:eq(fit.y, paper.y, where .. " the page starts where the paper starts")
+
+            -- What the reader writes on: the page fitted into the paper the
+            -- editor publishes as its viewport.
+            local transform = assert(Transform.new{
+                logical_w = page.logical_w, logical_h = page.logical_h,
+                fit_rect = paper, clip_rect = paper,
+            })
+            -- Sub-pixel tolerance: the drawn size is `logical * scale` in
+            -- floating point, so an exactly-fitting axis lands an ULP either
+            -- side of the paper's integer edge.
+            local EPS = 0.001
+            t:eq(transform.offset_x, paper.x, where .. " no strip on the left")
+            t:check(paper.w - transform.draw_w > -EPS and paper.w - transform.draw_w < 1,
+                where .. " no strip on the right, got "
+                    .. tostring(paper.w - transform.draw_w))
+            t:eq(transform.offset_y, paper.y, where .. " the page starts where the paper starts")
+            t:check(paper.h - transform.draw_h > -EPS,
+                where .. " and never reaches past the paper's bottom")
+
+            local fit = layout.fit_rect
+            t:eq(fit.x, 0, where .. " the advisory fit has no strip either")
+            t:eq(fit.w, p.w, where .. " across the whole paper")
             t:check(paper.h - fit.h >= 0 and paper.h - fit.h <= 1,
-                where .. " at most one pixel row of paper is left under the page")
+                where .. " at most one pixel row of paper is left under it")
             t:check(math.abs(fit.w / page.logical_w - fit.h / page.logical_h) < 0.002,
                 where .. " aspect fit is preserved to pixel rounding")
         end
