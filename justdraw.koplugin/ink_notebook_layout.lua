@@ -1,7 +1,9 @@
 --[[--
 Physical layout helpers for the standalone notebook editor.
 
-The notebook page keeps its logical dimensions. Screen rotation only changes the
+A notebook page is born with the shape of the paper under the header, in
+millimetres at the density of the screen it was made on (`screenPage`), and
+keeps those logical dimensions for life. Screen rotation only changes the
 chrome and the rectangle into which that page is fitted.
 
 Handedness changes nothing any more. Every persistent control sits in one row
@@ -106,19 +108,27 @@ local function fitPage(page_w, page_h, paper)
     end
     local scale = math.min(paper.w / page_w, paper.h / page_h)
     if not finite(scale) or scale <= 0 then return nil, "no_viewport" end
-    local w = math.max(1, math.floor(page_w * scale))
-    local h = math.max(1, math.floor(page_h * scale))
+    -- Rounded, not floored: a page shaped like the paper (Layout.screenPage)
+    -- must land on the paper's edge, and flooring left a one-pixel strip on
+    -- the limiting side. Rounding cannot overshoot the paper, because
+    -- `scale` is the smaller of the two ratios, so each dimension is at most
+    -- the paper's and rounding is monotonic over an integer bound.
+    local w = math.max(1, rounded(page_w * scale))
+    local h = math.max(1, rounded(page_h * scale))
     return rect(paper.x + math.floor((paper.w - w) / 2),
         paper.y + math.floor((paper.h - h) / 2), w, h)
 end
 
-function Layout.compute(opts)
-    opts = opts or {}
-    local screen = opts.screen or Device.screen
+--[[--
+The rows above the paper, and the paper they leave, for one screen.
+
+Shared by `compute` and `screenPage` so the shape a page is born with and the
+rectangle that page is later fitted into can never come from two arithmetics
+that drift apart.
+]]
+local function chrome(opts, screen)
     local screen_w = tonumber(opts.screen_w) or (screen and screen:getWidth())
     local screen_h = tonumber(opts.screen_h) or (screen and screen:getHeight())
-    local page_w = tonumber(opts.logical_w)
-    local page_h = tonumber(opts.logical_h)
     if not finite(screen_w) or not finite(screen_h) or screen_w <= 0 or screen_h <= 0 then
         return nil, "no_viewport"
     end
@@ -140,22 +150,74 @@ function Layout.compute(opts)
     if screen_w < target * 8 or paper_h < target * 3 then
         return nil, "no_viewport"
     end
-    local paper = rect(0, info_h + target + gap, paper_w, paper_h)
-    local fit, fit_err = fitPage(page_w, page_h, paper)
+    return {
+        screen_w = screen_w, screen_h = screen_h,
+        info_h = info_h, target = target, gap = gap,
+        paper = rect(0, info_h + target + gap, paper_w, paper_h),
+    }
+end
+
+function Layout.compute(opts)
+    opts = opts or {}
+    local screen = opts.screen or Device.screen
+    local measured, chrome_err = chrome(opts, screen)
+    if not measured then return nil, chrome_err end
+    local fit, fit_err = fitPage(tonumber(opts.logical_w), tonumber(opts.logical_h),
+        measured.paper)
     if not fit then return nil, fit_err end
-    local rail = rect(0, info_h, screen_w, target)
-    local info = rect(0, 0, screen_w, info_h)
+    local rail = rect(0, measured.info_h, measured.screen_w, measured.target)
+    local info = rect(0, 0, measured.screen_w, measured.info_h)
 
     return {
-        screen_rect = rect(0, 0, screen_w, screen_h),
+        screen_rect = rect(0, 0, measured.screen_w, measured.screen_h),
         rail_rect = rail,
         info_rect = info,
-        paper_rect = paper,
+        paper_rect = measured.paper,
         fit_rect = fit,
         clip_rect = fit:copy(),
-        target_size = target,
+        target_size = measured.target,
         rail_side = "top",
-        gap = gap,
+        gap = measured.gap,
+    }
+end
+
+--[[--
+The page a notebook made on this screen is born with.
+
+A notebook page has a physical size -- its units are millimetres, eight to
+one -- because the ruling is pitched in millimetres and the export renders it
+at a real 300 dpi. But which size was the plugin's to choose, and no size from
+a paper catalogue has the proportion of the area under the header, so every
+page was fitted with a strip down each side that the pen could not use: 185 px
+a side for A5 on a Kindle Scribe in portrait, 714 in landscape.
+
+This is that area instead, converted to millimetres at this screen's density,
+so on the screen it was made on the page fills the paper's width. It is what
+the create dialog stores, and every later page of the notebook inherits it
+(`Session:appendPage`). The header's height is therefore part of the shape:
+changing the header is a decision rather than a layout detail (ADR-52), and
+`tests/notebook_ui_spec.lua` and `tests/top_toolbar_native.lua` pin the
+resulting sizes so it cannot happen quietly.
+
+`screen:scaleByDPI(160)` is this screen's density in dots per inch: KOReader
+defines `scaleByDPI(dp)` as `ceil(dp * dpi / 160)`, and the editor already
+uses the same expression as its density fingerprint.
+]]
+function Layout.screenPage(opts)
+    opts = opts or {}
+    local screen = opts.screen or Device.screen
+    if not screen or type(screen.scaleByDPI) ~= "function" then
+        return nil, "bad_geometry"
+    end
+    local measured, chrome_err = chrome(opts, screen)
+    if not measured then return nil, chrome_err end
+    local dpi = screen:scaleByDPI(160)
+    if not finite(dpi) or dpi <= 0 then return nil, "bad_geometry" end
+    local units_per_px = Layout.LOGICAL_UNITS_PER_MM * 25.4 / dpi
+    return {
+        logical_w = math.max(1, rounded(measured.paper.w * units_per_px)),
+        logical_h = math.max(1, rounded(measured.paper.h * units_per_px)),
+        template_kind = "blank",
     }
 end
 

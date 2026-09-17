@@ -25,8 +25,6 @@ return function(ctx)
         t:check(right.paper_rect.y >= right.rail_rect.y + right.rail_rect.h,
             "paper starts below the toolbar")
         t:eq(left.paper_rect.w, 1860, "landscape paper also has no side rail")
-        t:eq(Layout.preset("a5_portrait").logical_w, 1184, "A5 preset exact")
-        t:eq(Layout.preset("letter_portrait").logical_h, 2235, "Letter preset exact")
         local compact = Layout.compute{
             screen = support.newScreen{ w = 600, h = 800, dpi = 160 },
             screen_w = 600, screen_h = 800,
@@ -211,24 +209,51 @@ return function(ctx)
             t:eq(combined:find(forbidden, 1, true), nil, forbidden .. " is absent")
         end
     end)
-    t:case("top toolbar fits physical targets in both orientations without distorting pages", function()
-        for _, profile in ipairs({{1860,2480,300},{2480,1860,300},{600,800,160},{800,600,160}}) do
-            for _, preset in ipairs({"a5_portrait", "a5_landscape", "letter_portrait"}) do
-                local page = Layout.preset(preset)
-                local layout = Layout.compute{
-                    screen = support.newScreen{w=profile[1],h=profile[2],dpi=profile[3]},
-                    logical_w=page.logical_w,logical_h=page.logical_h,
-                }
-                t:check(layout ~= nil, "supported geometry " .. preset)
-                t:check(math.floor(layout.rail_rect.w / 8) >= layout.target_size,
-                    "each button keeps its physical target")
-                t:eq(layout.paper_rect.x, 0, "left edge is available")
-                t:eq(layout.paper_rect.w, profile[1], "right edge is available")
-                t:check(math.abs(layout.fit_rect.w / page.logical_w
-                    - layout.fit_rect.h / page.logical_h) < 0.002,
-                    "aspect fit is preserved to pixel rounding")
-            end
+    --- A notebook page is born with the shape of the paper under the header,
+    --- in millimetres at this screen's density, so it fills the paper's width
+    --- on the screen it was made on. The numbers are pinned: the header's
+    --- height is part of the shape, and a header that changes height would
+    --- otherwise letterbox every notebook created afterwards in silence.
+    --- Under the suite's fakes Size.* does not scale with DPI, so the 300 dpi
+    --- rows differ from tests/top_toolbar_native.lua, which pins the runtime.
+    t:case("a new page takes the shape of the paper and fills its width at every profile", function()
+        local PINNED = {
+            { w = 600, h = 800, dpi = 160, page_w = 762, page_h = 843 },
+            { w = 800, h = 600, dpi = 160, page_w = 1016, page_h = 589 },
+            { w = 1860, h = 2480, dpi = 300, page_w = 1260, page_h = 1527 },
+            { w = 2480, h = 1860, dpi = 300, page_w = 1680, page_h = 1107 },
+        }
+        for _, p in ipairs(PINNED) do
+            local screen = support.newScreen{ w = p.w, h = p.h, dpi = p.dpi }
+            local where = p.w .. "x" .. p.h .. "@" .. p.dpi
+            local page = assert(Layout.screenPage{ screen = screen, screen_w = p.w, screen_h = p.h })
+            t:eq(page.logical_w, p.page_w, where .. " page width in units")
+            t:eq(page.logical_h, p.page_h, where .. " page height in units")
+            t:eq(page.template_kind, "blank", where .. " a new page is blank until chosen")
+            local layout = assert(Layout.compute{
+                screen = screen, screen_w = p.w, screen_h = p.h,
+                logical_w = page.logical_w, logical_h = page.logical_h,
+            })
+            local paper, fit = layout.paper_rect, layout.fit_rect
+            t:check(math.floor(layout.rail_rect.w / 8) >= layout.target_size,
+                where .. " each button keeps its physical target")
+            t:eq(fit.x, 0, where .. " no strip on the left")
+            t:eq(fit.w, p.w, where .. " no strip on the right")
+            t:eq(fit.y, paper.y, where .. " the page starts where the paper starts")
+            t:check(paper.h - fit.h >= 0 and paper.h - fit.h <= 1,
+                where .. " at most one pixel row of paper is left under the page")
+            t:check(math.abs(fit.w / page.logical_w - fit.h / page.logical_h) < 0.002,
+                where .. " aspect fit is preserved to pixel rounding")
         end
+    end)
+
+    t:case("a screen too small for the controls refuses a page shape too", function()
+        local page, reason = Layout.screenPage{
+            screen = support.newScreen{ w = 600, h = 800, dpi = 300 },
+            screen_w = 600, screen_h = 800,
+        }
+        t:eq(page, nil, "no shape without a viewport")
+        t:eq(reason, "no_viewport", "for the same reason compute refuses")
     end)
 
 end
