@@ -100,9 +100,11 @@ reader's toolbar; a sheet keeps its controls on top), **Input mode**
 
 1. **Tools → Notebooks** from the file browser, or **JustDraw → Notebooks**
    while reading.
-2. **New notebook** asks for a name, a paper size (*A5 portrait*,
-   *Letter portrait*, *A5 landscape*) and a paper style (*Blank*, *Ruled*,
-   *Squared*, *Dotted*).
+2. **New notebook** asks for a name and a paper style (*Blank*, *Ruled*,
+   *Squared*, *Dotted*). The page takes the shape of the paper under the
+   editor's controls on the screen it is created on, so it reaches both
+   edges; on a Kindle Scribe in portrait that is 158 × 179 mm, and an export
+   keeps that size. Every page added later has the same shape.
 3. The editor fills the screen. A line across the top shows the notebook's
    title, **Page N of M** and the current pen; under it one row holds
    **Exit notebook · Pen · Eraser · Undo · Previous page · Next page ·
