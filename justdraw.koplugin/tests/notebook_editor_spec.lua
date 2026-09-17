@@ -83,6 +83,39 @@ return function(ctx)
             runtime, scheduler
     end
 
+    --- With no page open yet the frame is still painted; it must have the
+    --- shape a page made on this screen will have, or the empty paper shows
+    --- exactly the side strips this shape exists to remove.
+    t:case("an editor without a page frames the paper edge to edge", function()
+        ctx.reset()
+        local Layout = require("ink_notebook_layout")
+        local controller = {}
+        function controller:activeSession() return nil end
+        function controller:uiSnapshot()
+            return { state = "loading", writable = false, can_ink = false,
+                can_navigate = false, can_close = true, page_count = 0,
+                can_undo = false, pending_writes = 0 }
+        end
+        function controller:onScreenResize() return true end
+        -- Editor:init defaults every host callback, so the controller and the
+        -- notebook are all this case has to supply.
+        local editor = Editor:new{
+            controller = controller,
+            notebook = { id = 1, title = "Notes", page_count = 0 },
+        }
+        local screen = ctx.env.Device.screen
+        local expected = assert(Layout.screenPage{ screen = screen })
+        local geometry = editor.layout_geometry
+        t:eq(geometry.fit_rect.x, 0, "no strip on the left")
+        t:eq(geometry.fit_rect.w, screen.w, "no strip on the right")
+        t:check(geometry.paper_rect.h - geometry.fit_rect.h <= 1,
+            "the frame is the paper")
+        t:check(math.abs(geometry.fit_rect.w / expected.logical_w
+            - geometry.fit_rect.h / expected.logical_h) < 0.002,
+            "and has the new page's shape")
+        editor:shutdown()
+    end)
+
     t:case("page position is painted from the snapshot without a lookup", function()
         ctx.reset()
         local editor, _, snapshot = newEditor()

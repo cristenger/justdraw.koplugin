@@ -128,12 +128,28 @@ function Editor:onTap() return true end
 function Editor:onHold() return true end
 function Editor:onSwipe() return true end
 
+--[[--
+The shape of the page to lay out.
+
+The open page's, or -- before there is one, and during a rotation that finds
+no session -- the shape a page created on this screen is born with, so the
+empty frame is already the paper rather than a letterboxed guess at some
+paper size (ADR-52).
+]]
+local function pageShape(self)
+    local session = self.controller:activeSession()
+    local page = session and session:currentPage() or nil
+    if page then return page.logical_w, page.logical_h end
+    local born, err = NotebookLayout.screenPage()
+    if not born then return nil, err end
+    return born.logical_w, born.logical_h
+end
+
 function Editor:_computeLayout()
-    local page = self.controller:activeSession()
-        and self.controller:activeSession():currentPage() or nil
+    local logical_w, logical_h = pageShape(self)
+    if not logical_w then return nil, logical_h end
     local computed, err = NotebookLayout.compute{
-        logical_w = page and page.logical_w or 1184,
-        logical_h = page and page.logical_h or 1680,
+        logical_w = logical_w, logical_h = logical_h,
     }
     if not computed then return nil, err end
     self.layout_geometry = computed
@@ -1867,9 +1883,10 @@ function Editor:onSetDimensions()
     self:_clearCoveredRepaint()
     self:_resetQualityRefresh()
     local old_modal = self.interactive_regions.modal
+    local logical_w, logical_h = pageShape(self)
+    if not logical_w then return nil, logical_h end
     local computed, compute_err = NotebookLayout.compute{
-        logical_w = self:_currentSession() and self:_currentSession():currentPage().logical_w or 1184,
-        logical_h = self:_currentSession() and self:_currentSession():currentPage().logical_h or 1680,
+        logical_w = logical_w, logical_h = logical_h,
     }
     if not computed then return nil, compute_err end
     self.layout_geometry = computed
