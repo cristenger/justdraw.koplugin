@@ -2628,8 +2628,10 @@ do
         widths[#widths + 1] = tostring(width)
         if width > available then fits = false end
     end
+    -- One group: the paper style. Its shape is no longer a question (ADR-52).
+    -- The count is asserted so the claim cannot pass with no options at all.
     claim("production notebook options fit InputDialog's available width",
-        true, fits and #widths == 2,
+        true, fits and #widths == 1,
         table.concat(widths, ", ") .. " <= " .. available
             .. " on " .. Device.screen:getWidth() .. "x" .. Device.screen:getHeight())
     dialog:onShowKeyboard()
