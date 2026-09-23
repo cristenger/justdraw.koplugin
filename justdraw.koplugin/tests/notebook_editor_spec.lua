@@ -312,12 +312,15 @@ return function(ctx)
         for i = 1, #chooser.buttons do
             labels[#labels + 1] = chooser.buttons[i][1].text
         end
-        t:eq(table.concat(labels, "|"), "Ink pen · Thin|Graphite · Thin|Marker · Thin|Round ink · Thin|Highlighter · Thin|Textured graphite · Thin|Close",
-            "every style, in English")
+        t:eq(table.concat(labels, "|"), "Ink pen|Graphite|Marker|Round ink|Highlighter|Textured graphite|Close",
+            "every style heads its row, in English")
+        t:eq(chooser.buttons[1][1].enabled, false, "a row's name is a heading, not a choice")
 
         for i = 1, #chooser.buttons do
-            if chooser.buttons[i][1].text == "Marker · Thin" then
-                chooser.buttons[i][1].callback()
+            if chooser.buttons[i][1].text == "Marker" then
+                t:eq(chooser.buttons[i][2].text, "Thin", "the width cell says only the width")
+                t:eq(chooser.buttons[i][2].help_text, "Marker · Thin", "a hold names both")
+                chooser.buttons[i][2].callback()
             end
         end
         t:eq(picked, 3, "the choice reaches the injected seam")
@@ -341,11 +344,11 @@ return function(ctx)
         runtime.active_contact = false
         local dialog = editor:showPenSettings()
         runtime.active_contact = true
-        dialog.buttons[2][3].callback()
+        dialog.buttons[2][4].callback()
         t:eq(width, 4, "selection rechecks contact")
         t:eq(editor.modal_widgets[dialog], true, "rejected panel retained")
         runtime.active_contact = false
-        dialog.buttons[2][3].callback()
+        dialog.buttons[2][4].callback()
         t:eq(style, 65, "graphite preference")
         t:eq(width, 7, "thick preference")
         t:eq(editor.layout[1][2].tool_label,
@@ -354,7 +357,7 @@ return function(ctx)
         t:eq(editor.layout_geometry.paper_rect, paper, "paper geometry not rebuilt")
         dialog = editor:showPenWidth()
         controller.activeSession = function() return {} end
-        dialog.buttons[1][1].callback()
+        dialog.buttons[1][2].callback()
         t:eq(width, 7, "old session cannot apply a preference")
         editor:_closeModal(dialog)
     end)
@@ -375,7 +378,7 @@ return function(ctx)
         local entry
         for i = 1, #more.buttons do
             local button = more.buttons[i][1]
-            if button.text == "Paper for this page" then entry = button end
+            if button.text == "Paper style" then entry = button end
         end
         t:check(entry ~= nil, "Paper style is reachable from More")
         t:eq(entry.enabled, true, "and enabled on a writable notebook")
@@ -471,7 +474,7 @@ return function(ctx)
         local more = editor:showMore()
         for i = 1, #more.buttons do
             local button = more.buttons[i][1]
-            if button.text == "Paper for this page" then
+            if button.text == "Paper style" then
                 t:eq(button.enabled, false, "Paper style is disabled")
             end
         end

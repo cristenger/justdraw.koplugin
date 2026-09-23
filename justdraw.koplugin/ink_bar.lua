@@ -31,6 +31,7 @@ local _ = require("gettext")
 
 local Stack = require("ink_stack")
 local PenDialog = require("ink_pen_dialog")
+local ToolButton = require("ink_tool_button")
 
 local Screen = Device.screen
 
@@ -55,6 +56,23 @@ function InkBar:mkButton(text, width, cb)
     }
 end
 
+--[[--
+A control that is an icon rather than a word, `height` tall (see init for
+why), named by a hold (see ink_tool_button).
+]]
+function InkBar:mkIconButton(icon, label, width, height, cb)
+    local button = Button:new{
+        text = label,
+        help_text = label,
+        width = width,
+        height = height,
+        radius = Size.radius.button,
+        show_parent = self,
+        callback = cb,
+    }
+    return ToolButton.decorate(button, icon, false, label)
+end
+
 -- Button:setText's same-width shortcut does not fit a newly longer label.
 -- Context controls change from Draw to Loading/Read-only and Show to Go;
 -- rebuild only the changed label, keeping the original frame height.
@@ -74,8 +92,11 @@ function InkBar:init()
     local controls = VerticalGroup:new{align="center"}
     if self.note_return then
         self.show_btn = self:mkButton(_("Show note"), w, function() p:showNote() end)
-        self.notes_btn = self:mkButton(_("Notes"), w, function() p:onShowDocumentNotes() end)
-        self.dismiss_btn = self:mkButton(_("Dismiss"), w, function() p:dismissNoteReturnBar() end)
+        local row_h = math.max(self.show_btn.label_widget:getSize().h, math.floor(w / 2))
+        self.notes_btn = self:mkIconButton("notes", _("Document notes"), w, row_h,
+            function() p:onShowDocumentNotes() end)
+        self.dismiss_btn = self:mkIconButton("close", _("Dismiss"), w, row_h,
+            function() p:dismissNoteReturnBar() end)
         controls[1], controls[2], controls[3] = self.show_btn, self.notes_btn, self.dismiss_btn
     else
         self.draw_btn = self:mkButton(_("Draw"), w, function()
@@ -85,24 +106,29 @@ function InkBar:init()
                 p:setDrawing(not p.drawing)
             end
         end)
-        self.pen_btn = self:mkButton(_("Pen"), w, function()
+        -- Every other control is an icon: the words they used to carry -- a
+        -- pen's full name among them -- only fitted a column this narrow at a
+        -- font nobody could read. At least half as tall as the column is wide,
+        -- so the glyph is not a speck and the target is not a sliver.
+        local row_h = math.max(self.draw_btn.label_widget:getSize().h, math.floor(w / 2))
+        self.pen_btn = self:mkIconButton("pen", _("Pen"), w, row_h, function()
             if not p.eraser and p.drawing then p:showPenSettingsDialog()
             else p:setEraser(false) end
         end)
-        -- Keep the existing outer geometry when the longer state label is fitted.
-        self.pen_btn.height = self.draw_btn.label_widget:getSize().h
-        self.pen_font_size = self.pen_btn.text_font_size
-        self.pen_btn.avoid_text_truncation = true
-        self.pen_btn.help_text = _("Tap the selected pen to change its style and width.")
-        self.eraser_btn = self:mkButton(_("Eraser"), w, function() p:setEraser(true) end)
-        self.undo_btn = self:mkButton(_("Undo"), w, function() p:onJustDrawUndo() end)
-        self.more_btn = self:mkButton(_("More"), w, function() p:showBarMenu() end)
-        self.hide_btn = self:mkButton(self.embedded and _("Hide note") or _("Hide"), w,
+        self.eraser_btn = self:mkIconButton("eraser", _("Eraser"), w, row_h,
+            function() p:setEraser(true) end)
+        self.undo_btn = self:mkIconButton("undo", _("Undo"), w, row_h,
+            function() p:onJustDrawUndo() end)
+        self.more_btn = self:mkIconButton("more", _("More"), w, row_h,
+            function() p:showBarMenu() end)
+        self.hide_btn = self:mkIconButton("close",
+            self.embedded and _("Hide note") or _("Hide toolbar"), w, row_h,
             function() p:setBarShown(false) end)
         controls[1], controls[2], controls[3], controls[4] =
             self.draw_btn, self.pen_btn, self.eraser_btn, self.undo_btn
         if self.note_context then
-            self.notes_btn = self:mkButton(_("Notes"), w, function() p:onShowDocumentNotes() end)
+            self.notes_btn = self:mkIconButton("notes", _("Document notes"), w, row_h,
+                function() p:onShowDocumentNotes() end)
             controls[#controls + 1] = self.notes_btn
         end
         controls[#controls + 1], controls[#controls + 2] = self.more_btn, self.hide_btn
@@ -151,23 +177,13 @@ function InkBar:update(refresh)
     end
     if self.note_context then self:setContextText(self.draw_btn, draw_text)
     else self.draw_btn:setText(draw_text, self.draw_btn.width) end
-    -- The active-tool check rides in the label, not in `checked_func`: a
-    -- Button refreshes that checkmark only after its own tap, and the tool
-    -- also flips from outside the bar -- the menu, or a bound eraser gesture.
-    -- setText is the relabel path every other state change here already uses.
-    local mark = Button.checkmark
-    local pen_text = PenDialog.label(p:effectiveStyle(), p.pen_width)
-        .. (p.eraser and "" or mark)
-    if pen_text ~= self.pen_btn.text then
-        -- setText's same-width shortcut skips fitting a newly long label.
-        self.pen_btn.label_widget:free()
-        self.pen_btn.text = pen_text
-        self.pen_btn.text_font_size = self.pen_font_size
-        self.pen_btn:init()
-        PenDialog.fitButton(self.pen_btn)
-    end
-    self.eraser_btn:setText(p.eraser and _("Eraser") .. mark or _("Eraser"),
-        self.eraser_btn.width)
+    -- The active tool is the bar under its icon, set here because the tool
+    -- also flips from outside the bar -- the menu, or a bound eraser
+    -- gesture. The pen's full name is what a hold on it shows.
+    local pen_label = PenDialog.label(p:effectiveStyle(), p.pen_width)
+    ToolButton.setState(self.pen_btn, pen_label .. "\n"
+        .. _("Tap the selected pen to change its style and width."), not p.eraser)
+    ToolButton.setState(self.eraser_btn, _("Eraser"), p.eraser)
     if self.note_context and session then
         local ready = cache and cache:isReady()
         self.draw_btn:enableDisable(p.drawing or session:loadFailed()

@@ -1040,8 +1040,9 @@ return function(ctx)
         t:eq(p:diagnosticSource(), "page_ink",
             "and a trace taken here is not labelled direct ink")
         local palette = p:showPenSettingsDialog()
-        for _, cell in ipairs(palette.buttons[3]) do
-            t:eq(cell.enabled, true, "PDF palette offers the marker at every width")
+        for column = 2, #palette.buttons[3] do
+            t:eq(palette.buttons[3][column].enabled, true,
+                "PDF palette offers the marker at every width")
         end
         p:closeReaderModal(palette)
         local plain = documentPlugin{ stylus_api = false }

@@ -2649,7 +2649,8 @@ do
     library:free()
 end
 
--- Long tool labels must fit without moving the document bar or its hitboxes.
+-- The document bar's pen is an icon: no style or width may move the bar, its
+-- hitboxes, or rebuild the glyph. The name goes where a hold shows it.
 do
     local Bar = require("ink_bar")
     local PenDialog = require("ink_pen_dialog")
@@ -2658,24 +2659,26 @@ do
     local plugin = { pen_style = Style.PEN, pen_width = 4, eraser = false }
     function plugin:effectiveStyle() return self.pen_style end
     local bar = Bar:new{ plugin = plugin }
-    local before = bar.pen_btn:getSize()
-    local fits, min_font = true, math.huge
+    local before, glyph = bar.pen_btn:getSize(), bar.pen_btn.label_widget
+    local steady, named = bar.pen_btn.icon == "pen", true
     for _, style in ipairs({ Style.PEN, Style.GRAPHITE, Style.MARKER, Style.ROUND, Style.HIGHLIGHTER, Style.TEXTURED }) do
         for _, width in ipairs({ 2, 4, 7 }) do
             for _, eraser in ipairs({ false, true }) do
                 plugin.pen_style, plugin.pen_width, plugin.eraser = style, width, eraser
                 bar:update(false)
-                local size, label = bar.pen_btn:getSize(), bar.pen_btn.label_widget
-                fits = fits and size.w == before.w and size.h == before.h
-                    and label:getSize().h <= bar.pen_btn.height
-                    and label.line_with_ellipsis == nil
-                if label.isTruncated then fits = fits and not label:isTruncated() end
-                if label.face then min_font = math.min(min_font, label.face.orig_size) end
+                local size = bar.pen_btn:getSize()
+                steady = steady and size.w == before.w and size.h == before.h
+                    and bar.pen_btn.label_widget == glyph
+                    and bar.pen_btn.tool_selected == not eraser
+                    and bar.eraser_btn.tool_selected == eraser
+                named = named and bar.pen_btn.tool_label:find(
+                    PenDialog.label(style, width), 1, true) == 1
             end
         end
     end
-    claim("document pen labels preserve real Button geometry and fit all eighteen choices",
-        true, fits, before.w .. "x" .. before.h .. "; minimum font " .. min_font)
+    claim("document pen icon keeps its geometry and glyph through all eighteen choices",
+        true, steady, before.w .. "x" .. before.h)
+    claim("document pen names its style and width for a hold", true, named)
 
     -- Real notebook button sizing, including longer localized labels. The
     -- full ReaderUI smoke checks that the editor wires this fitting in.
@@ -2712,7 +2715,9 @@ do
     }
     local relayed, marks = true, 0
     for row = 1, 6 do
-        for column = 1, 3 do
+        -- Column 1 is the style's name, a heading; the widths follow it.
+        relayed = relayed and palette.layout[row][1].enabled == false
+        for column = 2, 4 do
             local button = palette.layout[row][column]
             relayed = relayed and button.checked_func == nil
                 and button.no_refresh_checkmark == true

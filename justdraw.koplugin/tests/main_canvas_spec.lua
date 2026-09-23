@@ -456,7 +456,7 @@ return function(ctx)
         local function row(dialog, text)
             for _, r in ipairs(dialog and dialog.buttons or {}) do
                 for _, btn in ipairs(r) do
-                    if btn.text == text then return btn end
+                    if btn.text == text or btn.help_text == text then return btn end
                 end
             end
             return nil
@@ -477,7 +477,7 @@ return function(ctx)
         local function row(dialog, text)
             for _, r in ipairs(dialog and dialog.buttons or {}) do
                 for _, btn in ipairs(r) do
-                    if btn.text == text then return btn end
+                    if btn.text == text or btn.help_text == text then return btn end
                 end
             end
             return nil

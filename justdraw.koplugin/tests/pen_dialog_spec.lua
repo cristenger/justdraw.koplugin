@@ -31,7 +31,9 @@ return function(ctx)
                 local dialog, state = fixture()
                 local marks = 0
                 for row = 1, 6 do
-                    for column = 1, 3 do
+                    t:eq(dialog.buttons[row][1].enabled, false, "the style name heads its row")
+                    t:eq(dialog.buttons[row][1].callback, nil, "and chooses nothing")
+                    for column = 2, 4 do
                         local cell = dialog.buttons[row][column]
                         t:eq(cell.checked_func, nil, "no post-close check refresh on legacy Button")
                         t:eq(cell.no_refresh_checkmark, true, "newer Button opt-out retained")
@@ -39,7 +41,9 @@ return function(ctx)
                     end
                 end
                 t:eq(marks, 1, "only the current combination is marked")
-                dialog.buttons[i][j].callback()
+                t:eq(dialog.buttons[i][j + 1].help_text, Dialog.label(style, width),
+                    "a hold names the style and the width")
+                dialog.buttons[i][j + 1].callback()
                 t:eq(state.style, style, "style belongs to this cell")
                 t:eq(state.width, width, "width belongs to this cell")
                 t:eq(state.writes, 1, "one pair applied")
@@ -53,21 +57,21 @@ return function(ctx)
         dialog.buttons[#dialog.buttons][1].callback()
         t:eq(state.writes, 0, "Close does not select")
         dialog, state = fixture{ refuse = true }
-        dialog.buttons[2][1].callback()
+        dialog.buttons[2][2].callback()
         t:eq(state.writes, 0, "refused choice does not write")
         t:eq(state.closes, 0, "refused choice keeps the panel")
         dialog, state = fixture{ marker = false, style = Style.MARKER }
         for _, cell in ipairs(dialog.buttons[3]) do
             t:eq(cell.enabled, false, "legacy marker disabled")
-            cell.callback()
+            if cell.callback then cell.callback() end
         end
         t:eq(state.writes, 0, "disabled callbacks cannot bypass host capability")
         t:eq(state.style, Style.MARKER, "opening preserves the global preference")
-        t:eq(dialog.buttons[1][2].text, Dialog.label(Style.PEN, 4) .. Button.checkmark,
+        t:eq(dialog.buttons[1][3].text, "Medium" .. Button.checkmark,
             "effective fallback marked without persisting it")
         dialog, state = fixture()
         state.marker = false
-        dialog.buttons[3][1].callback()
+        dialog.buttons[3][2].callback()
         t:eq(state.writes, 0, "capability rechecked when selecting")
     end)
 
@@ -76,7 +80,7 @@ return function(ctx)
         for row=4,6 do
             for _,cell in ipairs(dialog.buttons[row]) do
                 t:eq(cell.enabled,false,"modern cell is disabled")
-                cell.callback()
+                if cell.callback then cell.callback() end
             end
         end
         t:eq(state.writes,0,"disabled modern callbacks do not change preferences")
@@ -91,7 +95,7 @@ return function(ctx)
             end
         end
         t:eq(state.width, 5.5, "opening does not normalize preferences")
-        dialog.buttons[2][2].callback()
+        dialog.buttons[2][3].callback()
         t:eq(state.width, 4, "explicit choice replaces custom width")
     end)
 end

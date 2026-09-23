@@ -21,7 +21,9 @@ repair once per segment.
 local Blitbuffer = require("ffi/blitbuffer")
 local Button = require("ui/widget/button")
 local IconWidget = require("ui/widget/iconwidget")
+local Notification = require("ui/widget/notification")
 local Size = require("ui/size")
+local UIManager = require("ui/uimanager")
 
 local floor = math.floor
 
@@ -53,8 +55,13 @@ end
 --[[--
 Replace a freshly built Button's text label with the named plugin icon.
 
-`label` is the tool's full name, kept for whoever describes the control;
-`selected` draws the selection bar. Call before the button is first painted.
+`label` is the tool's full name; `selected` draws the selection bar. Call
+before the button is first painted.
+
+An icon has to be able to say what it is, and a KOReader Button does not show
+its `help_text` on a hold. So a hold shows the current label as a
+Notification: a toast, which never takes a place in the window stack that the
+plugin's input rules read, and closes itself.
 ]]
 function ToolButton.decorate(button, name, selected, label)
     local size = button:getSize()
@@ -75,6 +82,15 @@ function ToolButton.decorate(button, name, selected, label)
     button.tool_label = label or button.help_text
     button.tool_selected = selected == true
     button.paintTo = paintTool
+    if not button.hold_callback then
+        -- A greyed icon is exactly the one somebody needs named.
+        button.allow_hold_when_disabled = true
+        button.hold_callback = function()
+            if button.tool_label then
+                UIManager:show(Notification:new{ text = button.tool_label })
+            end
+        end
+    end
     return button
 end
 

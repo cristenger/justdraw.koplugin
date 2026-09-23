@@ -8,6 +8,8 @@ even when that callback has closed the dialog (ADR-35).
 ]]
 local Button = require("ui/widget/button")
 local ButtonDialog = require("ui/widget/buttondialog")
+local Notification = require("ui/widget/notification")
+local UIManager = require("ui/uimanager")
 local Style = require("ink_style")
 local T = require("ffi/util").template
 local _ = require("gettext")
@@ -42,6 +44,15 @@ function Dialog.fitButton(button)
     end
 end
 
+--[[--
+One row per style: its name, then its three widths. Each width cell says only
+"Thin", "Medium" or "Thick" -- the row already says whose -- so no label has
+to shrink to fit, where eighteen "Style · Width" labels in three columns did.
+The name is a disabled cell, the way the export form heads its groups. A hold
+on a cell names both, the way a Button's `help_text` would -- ButtonTable does
+not pass `help_text` through, and Button would not show it anyway -- so the
+cell carries its own `hold_callback`, the toolbar icons' Notification.
+]]
 function Dialog.show(opts)
     local marker_allowed = opts.marker_allowed()
     local current_style = Style.resolve(opts.get_style(), nil, marker_allowed)
@@ -49,12 +60,18 @@ function Dialog.show(opts)
     local dialog
     local rows = {}
     for _, style in ipairs(styles) do
-        local row = {}
+        local available = (style ~= Style.MARKER and not Style.isModern(style)) or marker_allowed
+        local row = {{ text = style_names[style], enabled = false }}
         for _, width in ipairs(widths) do
             local selected = current_style == style and current_width == width
+            local label = Dialog.label(style, width)
             row[#row + 1] = {
-                text = Dialog.label(style, width) .. (selected and Button.checkmark or ""),
-                enabled = (style ~= Style.MARKER and not Style.isModern(style)) or marker_allowed,
+                text = width_names[width] .. (selected and Button.checkmark or ""),
+                help_text = label,
+                hold_callback = function()
+                    UIManager:show(Notification:new{ text = label })
+                end,
+                enabled = available,
                 no_refresh_checkmark = true,
                 callback = function()
                     if (style == Style.MARKER or Style.isModern(style))

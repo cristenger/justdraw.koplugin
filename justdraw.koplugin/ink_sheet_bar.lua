@@ -98,7 +98,10 @@ function SheetBar:init()
             p:setDrawing(not p.drawing)
         end
     end)
-    self.hide_btn = place(_("Hide note"), 0, 3, 3, function() p:setBarShown(false) end)
+    -- The way out is the cross every panel closes with; a hold names it,
+    -- and the name differs between a sheet and a note.
+    self.hide_btn = place(self.note_context and _("Hide note") or _("Close sheet"), 0, 3, 3,
+        function() p:setBarShown(false) end, "close")
 
     self.pen_btn = tool(_("Pen"), 1, function()
         if not p.eraser and p.drawing then p:showPenSettingsDialog()
@@ -106,8 +109,8 @@ function SheetBar:init()
     end, "pen")
     self.eraser_btn = tool(_("Eraser"), 2, function() p:setEraser(true) end, "eraser")
     self.undo_btn = tool(_("Undo"), 3, function() p:onJustDrawUndo() end, "undo")
-    self.notes_btn = tool(_("Notes"), 4, function() p:onShowDocumentNotes() end)
-    self.more_btn = tool(_("More"), 5, function() p:showBarMenu() end)
+    self.notes_btn = tool(_("Document notes"), 4, function() p:onShowDocumentNotes() end, "notes")
+    self.more_btn = tool(_("More"), 5, function() p:showBarMenu() end, "more")
     self.height_btn = tool(T(_("%1 %"), overlay.height_pct), 6, function()
         -- A height change replaces this bar. Let the tap finish with the
         -- button first, and ignore a second tap on a bar already replaced.

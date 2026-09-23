@@ -969,6 +969,8 @@ function Editor:_rebuildControls()
         function() self:_runDomain("add") end, rects.add)
     local more = self:_button(_("More"), snapshot.state ~= "loading",
         function() self:showMore() end, rects.more)
+    ToolButton.decorate(exit, "exit", false, _("Exit notebook"))
+    ToolButton.decorate(more, "more", false, _("More"))
     ToolButton.decorate(undo, "undo", false, _("Undo"))
     ToolButton.decorate(previous, "previous", false, _("Previous page"))
     ToolButton.decorate(next_button, "next", false, _("Next page"))
@@ -1655,12 +1657,12 @@ function Editor:showMore()
             {{ text = _("Pen settings"), callback = function()
                 self:_closeModal(dialog); self:showPenSettings()
             end }},
-            {{ text = _("Paper for this page"), enabled = writable, callback = function()
+            {{ text = _("Paper style"), enabled = writable, callback = function()
                 self:_closeModal(dialog); self:showPaperStyle()
             end }},
             {{ text = _("Export…"), enabled = self.snapshot.state ~= "loading",
                 callback = function() self:_closeModal(dialog); self:showExport() end }},
-            {{ text = _("Rename notebook"), enabled = writable, callback = function()
+            {{ text = _("Rename"), enabled = writable, callback = function()
                 self:_closeModal(dialog); self:showRename()
             end }},
             {{ text = _("Drawing refresh"), callback = function()

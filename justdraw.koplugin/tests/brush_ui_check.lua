@@ -32,6 +32,6 @@ for _,row in ipairs(dialog.buttontable.buttons_layout) do
     end
 end
 Screen.bb:writePNG(assert(arg[1],"PNG path required"))
-dialog.buttons[5][2].callback()
+dialog.buttons[5][3].callback()
 assert(selected==Style.HIGHLIGHTER and width==4,"native selector applies the pair")
 print(string.format("PASS brush UI: dialog %dx%d, screen %dx%d",d.w,d.h,Screen:getWidth(),Screen:getHeight()))
