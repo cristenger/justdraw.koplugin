@@ -454,7 +454,10 @@ function Controller:showDetail(id, sheet_index)
                     #group.sheets
                 ) or Note.kindLabel(item.kind)),
                 has_previous = position > 1 or (sheet_index or 1) > 1,
-                has_next = position < #sequence or group.sheets and (sheet_index or 1) < #group.sheets,
+                -- A boolean either way: a lone sheet has no `sheets`, and an
+                -- `enabled = nil` Button is an enabled one.
+                has_next = position < #sequence
+                    or (group.sheets ~= nil and (sheet_index or 1) < #group.sheets),
                 previous_label = group.sheets and (sheet_index or 1) > 1 and _("Previous sheet") or nil,
                 next_label = group.sheets and (sheet_index or 1) < #group.sheets and _("Next sheet") or nil,
                 show_view_on_page = item.kind == "sheet" or item.kind == "page_ink",
