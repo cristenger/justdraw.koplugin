@@ -69,9 +69,10 @@ the menu, KOReader's Gesture Manager lists the plugin's actions under
 
 1. Open a book, then **Tools → JustDraw → Start drawing**. (**Show toolbar**
    brings up the toolbar without starting.)
-2. A small toolbar appears at the side of the screen:
-   **Draw · Pen · Eraser · Undo · More · Hide**. While you are drawing, **Draw**
-   reads **Stop**.
+2. A small toolbar appears at the side of the screen: **Draw**, then icons for
+   **Pen · Eraser · Undo · More · Hide** (the ✕). While you are drawing, **Draw**
+   reads **Stop**. The selected tool is underlined; hold any icon to see its
+   name, and hold the pen to see which style and width it has.
 3. Write. Touch is ignored while the stylus is on the glass.
 
 **In a PDF or other fixed-layout document,** your ink goes on the current page
@@ -82,9 +83,10 @@ under **JustDraw → Page notes**, which offers *Delete this page note* and
 **In an EPUB,** open a panel first: **JustDraw → Drawing sheet → Open sheet
 here**. The sheet is anchored to the passage you were reading. Its controls sit
 across its top, above the paper, so neither hand rests on them:
-**Draw · Hide note** with the current pen between them, then **Pen · Eraser ·
-Undo · Notes · More** and the sheet's height (**40 % · 70 % · 100 %**). Tap or
-drag the strip above them to resize it; close it with **More → Close sheet**.
+**Draw** and a ✕ that puts the sheet away, with the current pen between them,
+then icons for **Pen · Eraser · Undo · Document notes · More** and the sheet's
+height (**40 % · 70 % · 100 %**). Tap or drag the strip above them to resize
+it.
 
 Because a sheet belongs to a passage and not to a page, you can keep reading
 with one open. When the page behind it changes, the sheet's top edge says which
@@ -106,11 +108,11 @@ reader's toolbar; a sheet keeps its controls on top), **Input mode**
    edges; on a Kindle Scribe in portrait that is 158 × 179 mm, and an export
    keeps that size. Every page added later has the same shape.
 3. The editor fills the screen. A line across the top shows the notebook's
-   title, **Page N of M** and the current pen; under it one row holds
+   title, **Page N of M** and the current pen; under it one row of icons holds
    **Exit notebook · Pen · Eraser · Undo · Previous page · Next page ·
-   Add page at end · More**, with icons for the six in the middle. The page
-   takes the rest of the screen, so no control sits under a resting hand.
-4. **More** offers *Go to page…*, *Paper for this page*, *Rename notebook*,
+   Add page at end · More**. Hold an icon to see its name. The page takes the
+   rest of the screen, so no control sits under a resting hand.
+4. **More** offers *Go to page…*, *Paper style* (for this page), *Rename*,
    *Delete page*, *Delete notebook*, *Export…* and the shared pen and refresh
    settings.
 5. Back in the library, each notebook's **Actions** button offers *Rename*,
@@ -216,7 +218,42 @@ luajit test.lua
 ```
 
 Some checks need a real KOReader build instead, because they exercise the actual
-widgets, SQLite and PDF code. They live in `justdraw.koplugin/tests/`.
+widgets, SQLite and PDF code. They live in `justdraw.koplugin/tests/`. Any
+Linux build of KOReader v2026.07 or newer works; the release tarball needs no
+compiling:
+
+```sh
+curl -LO https://github.com/koreader/koreader/releases/download/v2026.07.1/koreader-linux-x86_64-v2026.07.1.tar.xz
+tar xf koreader-linux-x86_64-v2026.07.1.tar.xz
+cd lib/koreader
+```
+
+From there, `tests/buttons_native.lua` presses every button and menu entry of
+the side toolbar, a drawing sheet, the notebook library and the notebook
+editor, and checks what each one did and that nothing it opened stays open. It
+needs `sample.pdf` and `juliet.epub` from
+[koreader/test-data](https://github.com/koreader/test-data):
+
+```sh
+SDL_VIDEODRIVER=dummy JUSTDRAW_PDF=/path/to/sample.pdf JUSTDRAW_EPUB=/path/to/juliet.epub \
+  ./luajit /path/to/justdraw.koplugin/tests/buttons_native.lua
+```
+
+`JUSTDRAW_SHOTS=1` also saves a picture of every dialog it opens. The same
+check runs in CI. What each button is expected to do is listed in
+`justdraw.koplugin/tests/buttons_plan.md`.
+
+To try the plugin by hand in the emulator, link it into a data directory of
+its own and start the reader there:
+
+```sh
+mkdir -p /tmp/ko-home/plugins
+ln -s /path/to/justdraw.koplugin /tmp/ko-home/plugins/
+KO_HOME=/tmp/ko-home ./reader.lua /path/to/sample.pdf
+```
+
+The mouse is a finger. The **Automatic** input mode draws with it; pick
+**Stylus** only with a graphics tablet.
 
 ## Origin and license
 
