@@ -1201,6 +1201,7 @@ function JustDraw:_applyScreenResize()
         end
     end
     if self.is_docless then return end
+    self:closeReaderModalsForResize()
     local overlay = self.session and self.session:overlay()
     if overlay then
         overlay:onScreenResize()
@@ -4273,10 +4274,13 @@ function JustDraw:showBarMenu()
             callback = pick(function() self:confirmDeleteCanvas(active) end) } }
     end
     if not self.canvas_open then
+        -- Through `pick` like every other row: moving the side rebuilds the
+        -- toolbar, which goes back on the stack above this dialog and would
+        -- leave it open underneath, painted over and still taking the taps.
         rows[#rows + 1] = { { text = _("Toolbar side"),
-            callback = function()
+            callback = pick(function()
                 self:setBarSide(self.bar_side == "left" and "right" or "left")
-            end } }
+            end) } }
     end
     rows[#rows + 1] = { { text = _("Close"),
         callback = function() self:closeReaderModal(dialog) end } }
@@ -4694,6 +4698,23 @@ function JustDraw:showReaderModal(widget)
     widget.show_parent = widget
     UIManager:show(widget)
     return widget
+end
+
+--[[--
+Close the reader modals a screen change strands: More and what it opens, laid
+out for the old screen. They would also end up *under* the toolbar the resize
+rebuilds, which goes back on the stack last -- open, painted over and still
+taking the taps forwarded to it. The notes browser's own windows are left to
+the notes controller, which relays the browser and closes its children itself.
+]]
+function JustDraw:closeReaderModalsForResize()
+    if not self.reader_modals then return end
+    local owned = self.notes_controller and self.notes_controller.modals or {}
+    local stranded = {}
+    for widget in pairs(self.reader_modals) do
+        if not owned[widget] then stranded[#stranded + 1] = widget end
+    end
+    for _, widget in ipairs(stranded) do self:closeReaderModal(widget) end
 end
 
 function JustDraw:closeReaderModal(widget)

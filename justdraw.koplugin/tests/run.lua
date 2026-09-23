@@ -2274,11 +2274,30 @@ t:case("the dialog swaps the toolbar side", function()
     local p, bar = realBarPlugin()
     local before_x = p.bar.dimen.x
     bar.more_btn.callback()
-    dialogButton(env.dialogs[#env.dialogs], "Toolbar side").callback()
+    local more = env.dialogs[#env.dialogs]
+    dialogButton(more, "Toolbar side").callback()
     t:eq(p.bar_side, "left", "the side flipped")
+    t:eq(p.reader_modals[more], nil,
+        "More closes first: the rebuilt bar would otherwise cover it, still open")
     t:eq(_G.G_reader_settings.data.justdraw_bar_side, "left", "and was saved")
     env.UIManager:flush()   -- rebuildBar re-shows the bar on the next tick
     t:check(p.bar.dimen.x < before_x, "the bar really moved")
+end)
+
+t:case("a screen resize closes More rather than stranding it under the rebuilt bar", function()
+    local p, bar = realBarPlugin()
+    bar.more_btn.callback()
+    local more = env.dialogs[#env.dialogs]
+    t:eq(p.reader_modals[more], true, "More is open")
+    p:onScreenResize()
+    t:eq(p.reader_modals[more], nil, "the resize closed it")
+    local owned = {}
+    p.notes_controller = { modals = { [owned] = true }, onScreenResize = function() end }
+    p:showReaderModal(owned)
+    p:onScreenResize()
+    t:eq(p.reader_modals[owned], true, "the notes browser's windows are its controller's to relay")
+    p:closeReaderModal(owned)
+    p.notes_controller = nil
 end)
 
 t:case("closing the settings dialog twice is a no-op (ADR-28)", function()
