@@ -47,3 +47,45 @@ jobs:
         env:
           JUSTDRAW_PDF_EXTERNAL_STRICT: "1"
         run: luajit justdraw.koplugin/tests/pdf_external_check.lua
+
+  # Every button and menu entry pressed on a real KOReader, through the real
+  # window stack (tests/buttons_native.lua), plus the toolbars' geometry at
+  # four screen profiles. Pinned: a KOReader release with the stylus API
+  # (v2026.07+) and a test-data commit, so a red run means the plugin moved.
+  native:
+    runs-on: ubuntu-latest
+    env:
+      KOREADER: v2026.07.1
+      TEST_DATA: c3b5d06e1ae8ea088bd898b0e7f9da3753d0d86c
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch KOReader and the fixtures
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/ko" "$RUNNER_TEMP/fixtures"
+          curl -sSfL "https://github.com/koreader/koreader/releases/download/$KOREADER/koreader-linux-x86_64-$KOREADER.tar.xz" \
+            | tar xJ -C "$RUNNER_TEMP/ko"
+          for f in sample.pdf juliet.epub; do
+            curl -sSfLo "$RUNNER_TEMP/fixtures/$f" \
+              "https://raw.githubusercontent.com/koreader/test-data/$TEST_DATA/$f"
+          done
+
+      - name: Buttons and menus
+        run: |
+          set -o pipefail
+          cd "$RUNNER_TEMP/ko/lib/koreader"
+          SDL_VIDEODRIVER=dummy TMPDIR="$RUNNER_TEMP" \
+            JUSTDRAW_PDF="$RUNNER_TEMP/fixtures/sample.pdf" \
+            JUSTDRAW_EPUB="$RUNNER_TEMP/fixtures/juliet.epub" \
+            ./luajit "$GITHUB_WORKSPACE/justdraw.koplugin/tests/buttons_native.lua" \
+            | tee "$RUNNER_TEMP/buttons.txt" | grep -E '^(OK|FAIL|SKIP|SUMMARY|BUTTONS)|^       '
+          grep -q '^BUTTONS_NATIVE_OK' "$RUNNER_TEMP/buttons.txt"
+
+      - name: Toolbar geometry
+        run: |
+          set -o pipefail
+          cd "$RUNNER_TEMP/ko/lib/koreader"
+          TMPDIR="$RUNNER_TEMP" ./luajit "$GITHUB_WORKSPACE/justdraw.koplugin/tests/top_toolbar_native.lua" \
+            | tee "$RUNNER_TEMP/toolbar.txt"
+          grep -q '^TOP_TOOLBAR_CHECK_OK' "$RUNNER_TEMP/toolbar.txt"
