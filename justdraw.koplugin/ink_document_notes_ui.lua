@@ -271,7 +271,8 @@ function Browser:showFilters()
     rows[#rows + 1] = {{text = _("KOReader annotations"), callback = function()
         self.controller:closeModal(dialog); self.controller:showNativeAnnotations()
     end}}
-    rows[#rows + 1] = {{text = _("Close"), callback = function() self.controller:closeModal(dialog) end}}
+    -- No Close row: the Menu's own title-bar ✕ closes it, and one more row
+    -- pushed the list onto a second page on a 600x800 screen.
     local items = {}
     for _, row in ipairs(rows) do items[#items + 1] = row[1] end
     dialog = Menu:new{ title = _("Filter notes"), item_table = items,

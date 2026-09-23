@@ -1107,12 +1107,8 @@ function Controller:showExportOptions()
                 end,
             } }
     end
-    rows[#rows + 1] = { {
-        text = _("Close"),
-        callback = function()
-            self:closeModal(dialog)
-        end,
-    } }
+    -- No Close row: the Menu's own title-bar ✕ closes it, and a row for it
+    -- pushed the last choices onto a second page on a 600x800 screen.
     local items = {}
     for _, row in ipairs(rows) do
         local item = row[1]
