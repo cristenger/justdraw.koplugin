@@ -212,6 +212,7 @@ function Selection:contactBegin(cx, cy)
         return nil, "unavailable"
     end
     self.identity = self.presenter:identity()
+    self:_watchRebuilds(session)
     self.path:reset(Selection.PATH_STEP_PX / transform.scale)
     self.path:add(cx, cy)
     self.path_full = false
@@ -262,6 +263,20 @@ function Selection:contactAbort()
         self:_revertDrag()
     end
     return true
+end
+
+--[[--
+Hear the surface's rebuilds -- rotation, paper, reload -- so the mask is put
+back while the old raster still exists (§D.6.6). One subscription per
+surface; a new surface drops the old one.
+]]
+function Selection:_watchRebuilds(session)
+    if self.watched == session or type(session.onBeforeRebuild) ~= "function" then return end
+    if self.unwatch then self.unwatch() end
+    self.watched = session
+    self.unwatch = session:onBeforeRebuild(function()
+        if self.state ~= "idle" then self:clear("rebuild") end
+    end)
 end
 
 -- ------------------------------------------------------------ lasso

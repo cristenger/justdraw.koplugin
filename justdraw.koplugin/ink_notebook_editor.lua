@@ -12,6 +12,7 @@ local Geom = require("ui/geometry")
 local GestureRange = require("ui/gesturerange")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
+local Notification = require("ui/widget/notification")
 local Size = require("ui/size")
 local TextWidget = require("ui/widget/textwidget")
 local UIManager = require("ui/uimanager")
@@ -21,6 +22,7 @@ local T = require("ffi/util").template
 local _ = require("gettext")
 local N_ = _.ngettext
 
+local Clipboard = require("ink_clipboard")
 local Errors = require("ink_notebook_errors")
 local ExportDialog = require("ink_export_dialog")
 local ExportSource = require("ink_export_source")
@@ -29,6 +31,8 @@ local NotebookLayout = require("ink_notebook_layout")
 local ToolButton = require("ink_tool_button")
 local RefreshDialog = require("ink_refresh_dialog")
 local PenDialog = require("ink_pen_dialog")
+local Render = require("ink_render")
+local Selection = require("ink_selection")
 local Stack = require("ink_stack")
 local Style = require("ink_style")
 
@@ -125,6 +129,13 @@ function Editor:init()
     self:_computeLayout()
     self:_registerEvents()
     self:_rebuildControls()
+    -- A tool change from anywhere -- this rail, a gesture, a menu -- ends a
+    -- selection or placement in progress (§D.6.6).
+    if self.observe_tool then
+        self.unobserve_tool = self.observe_tool(function(name, previous)
+            self:onToolChanged(name, previous)
+        end)
+    end
 end
 
 function Editor:_registerEvents()
@@ -901,6 +912,7 @@ function Editor:stylusPassthrough(x, y)
         or inside(self.interactive_regions.rail, x, y)
         or inside(self.interactive_regions.error_band, x, y)
         or inside(self.interactive_regions.modal, x, y)
+        or inside(self.interactive_regions.selection_menu, x, y)
 end
 
 function Editor:touchPassthrough(x, y)
@@ -1026,6 +1038,11 @@ function Editor:_rebuildControls()
                     old_region:combine(self.interactive_regions.error_band))
             end, minimize_rect)
         self.layout[#self.layout + 1] = { minimize, retry }
+    end
+    -- A floating selection menu is part of the window's children too: a
+    -- rebuild of the rail must not drop it from gesture dispatch.
+    for _, entry in ipairs(self.selection_menu_entries or {}) do
+        self[#self + 1] = entry.widget
     end
     local selected = self.selected or { x = 1, y = 1 }
     selected.y = math.max(1, math.min(selected.y, #self.layout))
@@ -1183,6 +1200,9 @@ function Editor:_runDomain(action, argument)
         self:_reportBlockedAction(action, blocked_reason)
         return nil, blocked_reason or "disabled"
     end
+    -- Undo, redo and every page change end a selection or placement first
+    -- (§D.6.6): the keys it holds may not survive what comes next.
+    self:clearEditing(action == "undo" and "undo" or action == "redo" and "undo" or "page")
     local ok, err
     if action == "undo" then
         ok, err = self.controller:undo()
@@ -1367,6 +1387,209 @@ function Editor:repaintScreenBox(x0, y0, x1, y1)
     return true
 end
 
+-- ---------------------------------------------------------- editing tools
+
+--- Largest floating preview this window will build, in bytes (§D.3). A
+--- whole Scribe page is about 11 MiB of preview; beyond this the selection is
+--- refused while its ink is still on the page.
+Editor.MAX_PREVIEW_BYTES = 16 * 1024 * 1024
+
+--[[--
+The controller that handles contacts for an editing tool, or nil when the tool
+is not wired on this build. Built on first use and owned by this window: it
+dies with it.
+]]
+function Editor:editController(tool)
+    if self.closed or not self.edit_tools_ready(tool) then return nil end
+    if tool == "select" then
+        if not self.selection then
+            self.selection = Selection.new{
+                presenter = self:selectionPresenter(),
+                schedule = function(delay, fn) UIManager:scheduleIn(delay, fn) end,
+                unschedule = function(fn) UIManager:unschedule(fn) end,
+                can_work = function() return not self.has_active_contact() end,
+                clipboard = Clipboard,
+                on_changed = function() self:_onEditingChanged() end,
+            }
+        end
+        return self.selection
+    end
+    return nil
+end
+
+--- End every editing interaction in progress. Safe from anywhere, any number
+--- of times.
+function Editor:clearEditing(reason)
+    if self.selection and self.selection:isActive() then
+        local ok, err = pcall(self.selection.clear, self.selection, reason)
+        if not ok then logger.err("JustDraw notebooks: clearing a selection failed:", err) end
+    end
+    if self.placement and self.placement:isActive() then
+        local ok, err = pcall(self.placement.cancel, self.placement, reason)
+        if not ok then logger.err("JustDraw notebooks: cancelling a placement failed:", err) end
+    end
+end
+
+function Editor:onToolChanged(name, previous)
+    if self.closed then return end
+    self:clearEditing("tool")
+end
+
+function Editor:onSuspend()
+    self:clearEditing("suspend")
+end
+
+function Editor:_onEditingChanged()
+    -- The Edit glyph and Paste's availability follow the clipboard and the
+    -- tool; nothing else on the rail changes with a selection.
+end
+
+--[[--
+How the lasso controller paints, refreshes and places things on this screen.
+The same contract a document sheet implements (Phase 7): see ink_selection.
+]]
+function Editor:selectionPresenter()
+    local editor = self
+    local presenter = {}
+    function presenter:session()
+        local session = editor:_currentSession()
+        local surface = session and session:surface()
+        if not surface or not surface:isReady() then return nil end
+        return surface
+    end
+    function presenter:transform()
+        local surface = self:session()
+        return surface and surface:transform() or nil
+    end
+    --- The surface and the transform together: a new page, a rotation or a
+    --- reload makes a job's work stale.
+    function presenter:identity()
+        local session = editor:_currentSession()
+        local surface = session and session:surface()
+        if not surface then return nil end
+        editor.edit_identity_serial = editor.edit_identity_serial or 0
+        if editor.edit_identity_surface ~= surface
+            or editor.edit_identity_transform ~= surface:transform() then
+            editor.edit_identity_surface = surface
+            editor.edit_identity_transform = surface:transform()
+            editor.edit_identity_serial = editor.edit_identity_serial + 1
+        end
+        return editor.edit_identity_serial
+    end
+    function presenter:repaint(x0, y0, x1, y1)
+        return editor:repaintScreenBox(x0, y0, x1, y1)
+    end
+    function presenter:presentCacheBox(box)
+        local transform = self:transform()
+        if not box or not transform then return false end
+        local sx, sy = transform:fromCache(box.x, box.y)
+        return editor:repaintScreenBox(sx, sy, sx + box.w, sy + box.h)
+    end
+    function presenter:drawPath(x0, y0, x1, y1)
+        if editor.closed or not Screen.bb or Stack.visualAbove(editor) then return end
+        local paper = editor.layout_geometry.paper_rect
+        local view = Screen.bb:viewport(paper.x, paper.y, paper.w, paper.h)
+        local painted, l, t, r, b = Render.segment(view, x0 - paper.x, y0 - paper.y,
+            x1 - paper.x, y1 - paper.y, 2, Blitbuffer.COLOR_BLACK)
+        if painted then
+            editor.live_refresh:add("fast", l + paper.x, t + paper.y, r + paper.x, b + paper.y)
+        end
+    end
+    function presenter:setPainter(painter) editor:setOverlayPainter(painter) end
+    function presenter:showMenu(frame, items) return editor:_showSelectionMenu(frame, items) end
+    function presenter:hideMenu() return editor:_hideSelectionMenu() end
+    function presenter:paintMenu(bb, clip) return editor:_paintSelectionMenu(bb, clip) end
+    function presenter:notify(text)
+        UIManager:nextTick(function()
+            if not editor.closed then UIManager:show(Notification:new{ text = text }) end
+        end)
+    end
+    function presenter:mmToPixels(mm)
+        return NotebookLayout.physicalPixels(mm) or mm * 8
+    end
+    function presenter:budget(bytes)
+        if bytes > Editor.MAX_PREVIEW_BYTES then return nil, "preview_too_large" end
+        return true
+    end
+    return presenter
+end
+
+--[[--
+Lay the selection menu out next to the frame: above it, else below it, else
+inside its top edge, always on the paper (§D.6.5). One row of four when the
+paper is wide enough, two rows of two otherwise; never a control below the
+10 mm target. The rectangle is published as `selection_menu` before the
+buttons can be pressed, so the pen passes through it to them.
+]]
+function Editor:_showSelectionMenu(frame, items)
+    self:_hideSelectionMenu()
+    local paper = self.layout_geometry.paper_rect
+    local target = self.layout_geometry.target_size
+    local cols = #items
+    if cols * target > paper.w then cols = math.ceil(#items / 2) end
+    local rows = math.ceil(#items / cols)
+    local w, h = cols * target, rows * target
+    local gap = math.max(2, math.floor(target / 8))
+    local y
+    if frame.y - gap - h >= paper.y then
+        y = frame.y - gap - h
+    elseif frame.y + frame.h + gap + h <= paper.y + paper.h then
+        y = frame.y + frame.h + gap
+    else
+        y = math.max(paper.y, math.min(frame.y + gap, paper.y + paper.h - h))
+    end
+    local x = math.max(paper.x, math.min(frame.x, paper.x + paper.w - w))
+    local rect = Geom:new{ x = x, y = y, w = w, h = h }
+    self.interactive_regions.selection_menu = rect
+    self.selection_menu_entries = {}
+    for i, item in ipairs(items) do
+        local col, row = (i - 1) % cols, math.floor((i - 1) / cols)
+        local slot = Geom:new{ x = x + col * target, y = y + row * target, w = target, h = target }
+        local button = Button:new{
+            text = item.text,
+            help_text = item.help or item.text,
+            show_parent = self,
+            width = slot.w,
+            height = NotebookLayout.buttonLabelHeight(slot.h),
+            margin = NotebookLayout.BUTTON_MARGIN,
+            padding = Size.padding.button,
+            enabled = item.enabled ~= false,
+            callback = function()
+                if not self.closed and item.enabled ~= false then item.callback() end
+            end,
+        }
+        self.selection_menu_entries[#self.selection_menu_entries + 1] = { widget = button, rect = slot }
+        self[#self + 1] = button
+    end
+    return rect
+end
+
+function Editor:_hideSelectionMenu()
+    local entries = self.selection_menu_entries
+    if not entries then return nil end
+    self.selection_menu_entries = nil
+    local old = self.interactive_regions.selection_menu
+    self.interactive_regions.selection_menu = nil
+    for _, entry in ipairs(entries) do
+        for i = #self, 1, -1 do
+            if self[i] == entry.widget then table.remove(self, i) end
+        end
+        if entry.widget.free then entry.widget:free() end
+    end
+    return old
+end
+
+function Editor:_paintSelectionMenu(bb, clip)
+    for _, entry in ipairs(self.selection_menu_entries or {}) do
+        local r = entry.rect
+        if r.x < clip.x + clip.w and clip.x < r.x + r.w
+            and r.y < clip.y + clip.h and clip.y < r.y + r.h then
+            bb:paintRect(r.x, r.y, r.w, r.h, Blitbuffer.COLOR_WHITE)
+            entry.widget:paintTo(bb, r.x, r.y)
+        end
+    end
+end
+
 function Editor:onEditChanged(session)
     if self.closed or session ~= self:_currentSession() then return end
     -- A stroke has just ended: its held tail goes out now rather than waiting
@@ -1403,6 +1626,7 @@ end
 
 function Editor:onPageReady()
     if self.closed then return end
+    self:clearEditing("page")
     self:_clearCoveredRepaint()
     self:_resetQualityRefresh()
     self:_computeLayout()
@@ -1418,6 +1642,7 @@ function Editor:onStateChanged()
     local previous_state = self.snapshot and self.snapshot.state
     local previous_error = self.snapshot and self.snapshot.error_code
     self:_refreshSnapshot()
+    if self.snapshot.state ~= "ready" then self:clearEditing("state") end
     -- Publish an error band before capture can classify the next contact.
     self:_publishErrorRegion()
     self:_rebuildControls()
@@ -2065,6 +2290,7 @@ end
 
 function Editor:onSetDimensions()
     if self.closed then return true end
+    self:clearEditing("rebuild")
     self:_clearCoveredRepaint()
     self:_resetQualityRefresh()
     local old_modal = self.interactive_regions.modal
@@ -2107,6 +2333,9 @@ function Editor:shutdown()
         pcall(self.edit_controller.clear, self.edit_controller, "close")
     end
     self.edit_controller = nil
+    self:clearEditing("close")
+    self.selection = nil
+    if self.unobserve_tool then self.unobserve_tool(); self.unobserve_tool = nil end
     self.overlay_painter = nil
     self:_clearCoveredRepaint()
     self:_resetQualityRefresh()

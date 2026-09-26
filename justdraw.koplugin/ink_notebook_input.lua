@@ -26,6 +26,7 @@ local PalmGate = require("ink_wacom_palm")
 local Sequence = require("ink_stylus_sequence")
 local Style = require("ink_style")
 local StylusGeometry = require("ink_stylus_geometry")
+local ToolState = require("ink_tool_state")
 
 local Adapter = {}
 Adapter.__index = Adapter
@@ -56,6 +57,10 @@ function Adapter.new(opts)
         get_mode = opts.get_mode or function() return "auto" end,
         get_pen_width = opts.get_pen_width or function() return 4 end,
         get_eraser = opts.get_eraser or function() return false end,
+        --- The tool name (ADR-54) and the controller that handles an editing
+        --- tool's contacts; both optional, absent means pen and eraser only.
+        get_tool = opts.get_tool,
+        get_edit_controller = opts.get_edit_controller,
         eraser_radius = opts.eraser_radius or 18,
         touch_passthrough = opts.touch_passthrough,
         stylus_passthrough = opts.stylus_passthrough,
@@ -89,6 +94,12 @@ function Adapter.new(opts)
         -- from -- so a style flipped mid-contact cannot retroactively
         -- restyle it. See _stylusContactStart / _stylusContactEnd.
         contact_style = nil,
+        --- The tool latched at the true contact-down frame, like the style.
+        contact_tool = nil,
+        --- The controller that owns this contact, or "rejected" when it
+        --- refused it: a refused contact stays consumed until its lift and
+        --- never falls back to ink (§D.8).
+        edit_contact = nil,
         edit_pending = false,
         contacts = {},
         contact_count = 0,
@@ -107,6 +118,7 @@ function Adapter:configure(opts)
     opts = opts or {}
     local keys = {
         "get_mode", "get_pen_width", "get_pen_style", "get_eraser", "eraser_radius",
+        "get_tool", "get_edit_controller",
         "touch_passthrough", "stylus_passthrough", "on_dirty",
         "on_edit_changed", "on_physical_contact_end", "on_stylus_frame", "on_error",
         "on_domain_error", "get_stylus_trace",
@@ -205,9 +217,15 @@ function Adapter:_resetInk()
     self.stroke = nil
     self.erase_ctx = nil
     self.erase_radius = nil
+    self.edit_contact = nil
 end
 
 function Adapter:_discardLiveInk()
+    local edit = self.edit_contact
+    if edit then
+        self.edit_contact = nil
+        if edit ~= "rejected" then edit:contactAbort() end
+    end
     local surface = self:_surface()
     if self.erase_ctx and surface then surface:endErase(self.erase_ctx) end
     if self.stroke and surface then
@@ -226,6 +244,22 @@ function Adapter:_beginInk(sx, sy, tool)
     local cx, cy = self.transform:toCanvas(sx, sy)
     local erasing = tool == Capture.TOOL_ERASER
         or truthy(self.get_eraser, self.active_session)
+    local contact_tool = self.contact_tool
+        or (self.get_tool and self.get_tool(self.active_session)) or nil
+    if tool == Capture.TOOL_ERASER and self.get_edit_controller then
+        -- The physical eraser always wins (ADR-54), and ends any selection
+        -- or placement before it cuts.
+        for _, name in ipairs({ "select", "shape", "paste" }) do
+            local controller = self.get_edit_controller(name, self.active_session)
+            if controller and controller:isActive() then controller:clear("eraser") end
+        end
+    elseif not erasing and ToolState.isEditing(contact_tool) then
+        local controller = self.get_edit_controller
+            and self.get_edit_controller(contact_tool, self.active_session)
+        local taken = controller and controller:contactBegin(cx, cy)
+        self.edit_contact = taken and controller or "rejected"
+        return true
+    end
     if erasing then
         self.erase_ctx = surface:beginErase()
         self.erase_radius = (tonumber(self.eraser_radius) or 18)
@@ -273,6 +307,12 @@ end
 
 function Adapter:_continueInk(sx, sy, tool)
     if not self:_accepts(sx, sy) then return nil, "outside" end
+    local edit = self.edit_contact
+    if edit == "rejected" then return true end
+    if edit then
+        edit:contactMove(self.transform:toCanvas(sx, sy))
+        return true
+    end
     local surface = self:_surface()
     if not surface or not surface:isReady() then return nil, "not_ready" end
     local cx, cy = self.transform:toCanvas(sx, sy)
@@ -311,6 +351,14 @@ function Adapter:_continueInk(sx, sy, tool)
 end
 
 function Adapter:_finishInk()
+    local edit = self.edit_contact
+    if edit then
+        -- The logical end: the pen lifted or left the paper. What the
+        -- controller commits waits for the physical end (can_work).
+        self.edit_contact = nil
+        if edit ~= "rejected" then edit:contactEnd() end
+        return true
+    end
     local surface = self:_surface()
     if self.erase_ctx then
         if surface then surface:endErase(self.erase_ctx) end
@@ -394,6 +442,7 @@ function Adapter:abort(session)
     self.pending_domain_reason = nil
     self.pending_domain_session = nil
     self.contact_style = nil
+    self.contact_tool = nil
     self.contacts = {}
     self.contact_count = 0
     self.finger_slot = nil
@@ -489,6 +538,7 @@ function Adapter:_stylusContactStart()
     local style_from_seam = tonumber(self.get_pen_style and self.get_pen_style())
     self.contact_style = Style.resolve(style_from_seam,
         tonumber(self.sequence and self.sequence.current_tool), true)
+    self.contact_tool = self.get_tool and self.get_tool(self.active_session) or nil
     self:_markPhysicalContact()
     return true
 end
@@ -553,6 +603,7 @@ end
 function Adapter:_stylusContactEnd(reason)
     self.last_stylus_lift_time = self.now()
     self.contact_style = nil
+    self.contact_tool = nil
     -- Logical ink end is not physical contact end: a palm or a finger may
     -- still be down, and the editor must not re-enable anything until the
     -- glass is clear.
@@ -724,7 +775,7 @@ function Adapter:_fingerFrame(slots)
             elseif not state.suspended and self.finger_slot == key
                 and event.x ~= nil and event.y ~= nil then
                 local sx, sy = Capture.toScreen(event.x, event.y)
-                if self.stroke or self.erase_ctx then
+                if self.stroke or self.erase_ctx or self.edit_contact then
                     local ok, reason = self:_continueInk(sx, sy, Capture.TOOL_FINGER)
                     if not ok and reason == "outside" then
                         self:_finishInk()

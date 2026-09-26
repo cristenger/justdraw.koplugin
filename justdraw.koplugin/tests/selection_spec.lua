@@ -262,7 +262,6 @@ return function(ctx)
         draw(session, { 700, 700, 800, 700 })
         lasso(sel, contact, 150, 150, 350, 260)
         sched:advance(0.2)
-        session:onBeforeRebuild(function(reason) sel:clear("rebuild") end)
         contact.down = true
         sel:contactBegin(250, 200)
         sel:contactMove(260, 210)

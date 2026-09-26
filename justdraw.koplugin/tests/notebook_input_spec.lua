@@ -61,6 +61,8 @@ return function(ctx)
                 end
             end,
             get_stylus_trace = opts.get_stylus_trace,
+            get_tool = opts.get_tool,
+            get_edit_controller = opts.get_edit_controller,
         }
         local spec = adapter:captureSpec(session, session:currentPage(),
             session:surface():transform())
@@ -848,5 +850,140 @@ return function(ctx)
         local _, _, _, with_wacom = fixture("auto")
         t:eq(with_wacom.backend, "stylus", "known Wacom route selects stylus")
         ctx.env.Device.input.wacom_protocol = previous
+    end)
+
+    t:describe("ink_notebook_input / editing contacts")
+
+    --- A recording edit controller: every call, in order, in canvas units.
+    local function recorder(opts)
+        opts = opts or {}
+        local c = { calls = {}, active = false }
+        function c:contactBegin(x, y)
+            self.calls[#self.calls + 1] = "begin"
+            if opts.refuse then return nil, "busy" end
+            self.active = true
+            return true
+        end
+        function c:contactMove() self.calls[#self.calls + 1] = "move"; return true end
+        function c:contactEnd() self.calls[#self.calls + 1] = "end"; self.active = false; return true end
+        function c:contactAbort() self.calls[#self.calls + 1] = "abort"; self.active = false; return true end
+        function c:isActive() return self.active or opts.selected end
+        function c:clear(reason) self.calls[#self.calls + 1] = "clear:" .. reason; opts.selected = false end
+        return c
+    end
+
+    local function pen(spec, points, tool)
+        for i, q in ipairs(points) do
+            spec.stylus_handler{ slot = 4, id = 9, x = q[1], y = q[2], tool = tool or 1 }
+        end
+        spec.stylus_handler{ slot = 4, id = -1, x = points[#points][1],
+            y = points[#points][2], tool = 0 }
+    end
+
+    t:case("an editing tool's contact goes to its controller, never to ink", function()
+        local controller = recorder()
+        local tool = "select"
+        local session, _, adapter, spec = fixture("stylus", {
+            get_tool = function() return tool end,
+            get_edit_controller = function(name) return name == "select" and controller or nil end,
+        })
+        pen(spec, { { 10, 10 }, { 20, 30 }, { 40, 60 }, { 80, 90 } })
+        t:eq(controller.calls[1], "begin", "the contact began in the controller")
+        t:eq(controller.calls[#controller.calls], "end", "and ended there")
+        t:eq(#session:surface():cache():strokes(), 0, "no ink was drawn")
+        t:eq(session:surface():pendingWrites(), 0, "nothing queued")
+        t:eq(adapter:hasActiveContact(session), false, "lift cleared the gate")
+    end)
+
+    t:case("the tool is latched at contact down: a change mid-contact reaches nothing", function()
+        local controller = recorder()
+        local tool = "select"
+        local session, _, _, spec = fixture("stylus", {
+            get_tool = function() return tool end,
+            get_edit_controller = function() return controller end,
+        })
+        spec.stylus_handler{ slot = 4, id = 9, x = 10, y = 10, tool = 1 }
+        tool = "pen"
+        spec.stylus_handler{ slot = 4, id = 9, x = 20, y = 30, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 9, x = 40, y = 60, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 40, y = 60, tool = 0 }
+        t:eq(controller.calls[1], "begin", "the controller still owned it")
+        t:eq(#session:surface():cache():strokes(), 0, "and no ink leaked")
+    end)
+
+    t:case("a refused contact stays consumed until its lift and never becomes ink", function()
+        local controller = recorder{ refuse = true }
+        local session, _, _, spec = fixture("stylus", {
+            get_tool = function() return "select" end,
+            get_edit_controller = function() return controller end,
+        })
+        pen(spec, { { 10, 10 }, { 20, 30 }, { 40, 60 }, { 80, 90 } })
+        t:eq(#controller.calls, 1, "asked once, refused, never asked again this contact")
+        t:eq(#session:surface():cache():strokes(), 0, "no fallback to ink")
+    end)
+
+    t:case("leaving the paper ends the edit contact logically; the lift ends nothing more", function()
+        local controller = recorder()
+        local session, _, adapter, spec = fixture("stylus", {
+            get_tool = function() return "select" end,
+            get_edit_controller = function() return controller end,
+            fit_rect = { x = 0, y = 0, w = 500, h = 700 },
+        })
+        spec.stylus_handler{ slot = 4, id = 9, x = 10, y = 10, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 9, x = 20, y = 30, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 9, x = 40, y = 60, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 9, x = 900, y = 1300, tool = 1 }
+        t:eq(controller.calls[#controller.calls], "end", "ended at the paper's edge")
+        t:eq(adapter:hasActiveContact(session), true, "while the pen is physically still down")
+        spec.stylus_handler{ slot = 4, id = 9, x = 30, y = 30, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 30, y = 30, tool = 0 }
+        local ends = 0
+        for _, c in ipairs(controller.calls) do if c == "end" then ends = ends + 1 end end
+        t:eq(ends, 1, "coming back and lifting does not start or end another edit")
+    end)
+
+    t:case("the physical eraser ends a selection and erases", function()
+        local controller = recorder{ selected = true }
+        local session, _, _, spec = fixture("stylus", {
+            get_tool = function() return "select" end,
+            get_edit_controller = function() return controller end,
+        })
+        session:surface():addStroke({ 100, 100, 200, 100 }, 2, 4, 1)
+        pen(spec, { { 90, 100 }, { 150, 100 }, { 210, 100 } }, 2)
+        t:eq(controller.calls[1], "clear:eraser", "the selection ended first")
+        t:check(#session:surface():cache():strokes() ~= 1
+            or session:surface():cache():strokes()[1].min_x ~= 100, "and the eraser cut")
+    end)
+
+    t:case("an aborted edit contact is aborted in the controller", function()
+        local controller = recorder()
+        local _, _, adapter, spec = fixture("stylus", {
+            get_tool = function() return "select" end,
+            get_edit_controller = function() return controller end,
+        })
+        spec.stylus_handler{ slot = 4, id = 9, x = 10, y = 10, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 9, x = 20, y = 30, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 9, x = 40, y = 60, tool = 1 }
+        adapter:abort()
+        t:eq(controller.calls[#controller.calls], "abort", "aborted, not committed")
+    end)
+
+    t:case("a finger contact takes the same editing route", function()
+        local controller = recorder()
+        local session, _, _, spec = fixture("finger", {
+            get_tool = function() return "select" end,
+            get_edit_controller = function() return controller end,
+        })
+        local frame = spec.finger_handler or spec.frame_handler
+        if frame then
+            frame{ { slot = 0, id = 1, x = 100, y = 100 } }
+            frame{ { slot = 0, id = 1, x = 150, y = 160 } }
+            frame{ { slot = 0, id = -1 } }
+            t:eq(controller.calls[1], "begin", "the finger began an edit contact")
+            t:eq(controller.calls[#controller.calls], "end", "and ended it")
+            t:eq(#session:surface():cache():strokes(), 0, "no ink")
+        else
+            t:check(true, "no finger route in this spec build")
+        end
     end)
 end
