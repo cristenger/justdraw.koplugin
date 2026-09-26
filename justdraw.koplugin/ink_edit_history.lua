@@ -377,10 +377,13 @@ function History:record(entry, opts)
     local ap, ab = costOf(entry.after or {})
     points = bp + ap
     bytes = bytes + bb + ab
+    -- Kept by value: the caller's tables stay the caller's (§D.1.3).
+    local copy = copyEntry{ label = entry.label, before = entry.before or {},
+        after = entry.after or {} }
     local stored = {
         label = entry.label or "edit",
-        before = entry.before or {},
-        after = entry.after or {},
+        before = copy.before,
+        after = copy.after,
         points = points,
         bytes = bytes,
     }
@@ -454,18 +457,43 @@ function History:frontierKey()
     return self.frontier[#self.frontier]
 end
 
---- Consume the newest frontier stroke: it has just been taken back, and its
---- snapshot becomes a redo entry so the reader can have it again.
-function History:commitFrontierUndo(snap)
+--[[--
+Reserve the redo entry for taking back the frontier stroke `key`, *before*
+the stroke is removed (§D.1.9). Reserving can evict this history's own oldest
+entry, and that trims the frontier; then the stroke must not be taken back at
+all, so this answers nil and holds nothing. Returns a reservation for
+`commitFrontierUndo`, or for `cancelFrontierUndo` if the removal is refused.
+]]
+function History:reserveFrontierUndo(snap, key)
     if not self.frontier or #self.frontier == 0 then return nil, "no_frontier" end
     local points, bytes = costOf({ snap })
     bytes = bytes + History.ENTRY_OVERHEAD
     local ok, err = self.pool:reserve(self, points, bytes)
     if not ok then return nil, err end
-    table.remove(self.frontier)
+    if self:frontierKey() ~= key then
+        self.pool:_sub(points, bytes)
+        return nil, "history_trimmed"
+    end
+    return { points = points, bytes = bytes, snap = snap }
+end
+
+function History:cancelFrontierUndo(reservation)
+    if reservation and not reservation.settled then
+        reservation.settled = true
+        self.pool:_sub(reservation.points, reservation.bytes)
+    end
+end
+
+--- Consume the newest frontier stroke: it has just been taken back, and its
+--- snapshot becomes a redo entry so the reader can have it again. The room
+--- was reserved beforehand, so nothing here can fail or evict.
+function History:commitFrontierUndo(reservation)
+    if not reservation or reservation.settled then return nil, "no_reservation" end
+    reservation.settled = true
+    if self.frontier and #self.frontier > 0 then table.remove(self.frontier) end
     self.redo_stack[#self.redo_stack + 1] = {
-        label = "legacy", before = {}, after = { snap },
-        points = points, bytes = bytes,
+        label = "legacy", before = {}, after = { reservation.snap },
+        points = reservation.points, bytes = reservation.bytes,
     }
     return true
 end

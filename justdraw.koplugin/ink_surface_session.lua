@@ -1103,9 +1103,17 @@ function SurfaceSession:_undoFrontier(key)
     if not self.history:admits(sp, sb + History.ENTRY_OVERHEAD) then
         return nil, "history_budget"
     end
+    -- Room for the redo entry first: once the stroke is gone, nothing may
+    -- fail (§D.1.9). A reservation that trimmed the frontier refuses here,
+    -- with the stroke still on the page.
+    local reservation, reserve_err = self.history:reserveFrontierUndo(snap, key)
+    if not reservation then return nil, reserve_err end
     local result, replace_err = self:replaceStrokes({ key }, {}, { record = false })
-    if not result then return nil, replace_err end
-    self.history:commitFrontierUndo(snap)
+    if not result then
+        self.history:cancelFrontierUndo(reservation)
+        return nil, replace_err
+    end
+    self.history:commitFrontierUndo(reservation)
     return result.box or true
 end
 

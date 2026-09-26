@@ -180,9 +180,46 @@ return function(ctx)
         t:eq(h:frontierKey(), nil, "not while a session edit is undoable")
         h:commitUndo()
         t:eq(h:frontierKey(), 2, "offered again")
-        h:commitFrontierUndo(snap(2, { 5, 5 }))
+        local r = assert(h:reserveFrontierUndo(snap(2, { 5, 5 }), 2))
+        h:commitFrontierUndo(r)
         t:eq(h:frontierKey(), 1, "the frontier advanced")
         t:eq(h:canRedo(), true, "and the taken-back stroke can be redone")
+    end)
+
+    t:case("taking back the frontier reserves first; an eviction that trims it refuses", function()
+        -- Three points of pool: the second frontier undo needs room that only
+        -- evicting the first one's redo entry can give, and eviction trims the
+        -- frontier -- so it must refuse before anything leaves the page.
+        local pool = History.newPool{ max_points = 3, max_bytes = 1024 * 1024 }
+        local h = History.new{ pool = pool }
+        h:setFrontier({ 1, 2, 3 })
+        local r1 = assert(h:reserveFrontierUndo(snap(3, { 1, 1, 2, 2 }), 3))
+        h:commitFrontierUndo(r1)
+        local r2, why = h:reserveFrontierUndo(snap(2, { 3, 3, 4, 4 }), 2)
+        t:eq(r2, nil, "refused")
+        t:eq(why, "history_trimmed", "because the frontier was trimmed to make room")
+        t:eq(pool.points, 0, "holding nothing")
+        -- A refused removal gives its reservation back.
+        local h2 = History.new()
+        h2:setFrontier({ 7 })
+        local r = assert(h2:reserveFrontierUndo(snap(7, { 1, 1 }), 7))
+        local held = h2.pool.points
+        h2:cancelFrontierUndo(r); h2:cancelFrontierUndo(r)
+        t:eq(h2.pool.points, held - 1, "cancelled once, whatever the calls")
+        t:eq(h2:frontierKey(), 7, "and the frontier is untouched")
+        t:eq(select(2, h2:commitFrontierUndo(r)), "no_reservation", "a settled reservation commits nothing")
+    end)
+
+    t:case("record keeps copies: the caller's tables stay the caller's", function()
+        local h = History.new()
+        local s1 = snap(h:newKey(), { 1, 1, 2, 2 })
+        local entry = { before = {}, after = { s1 } }
+        h:record(entry)
+        s1.width = 99
+        entry.after[2] = snap(h:newKey(), { 3, 3 })
+        local seen = h:peekUndo()
+        t:eq(#seen.after, 1, "one snapshot, as recorded")
+        t:eq(seen.after[1].width, 4, "with the width it had")
     end)
 
     t:describe("ink_edit_history / residency")
@@ -208,6 +245,11 @@ return function(ctx)
         t:check(pool.bytes > 0, "counted something")
         t:check(grown <= pool.bytes * 1.5, "measured growth " .. math.floor(grown)
             .. " B stays within 1.5x the estimate " .. pool.bytes .. " B")
-        t:check(pool.bytes <= grown * 2, "and the estimate is not padded beyond 2x")
+        -- Only a loose floor: inside the shared suite, heap growth also moves
+        -- with string interning and with whatever the collector had pending
+        -- (measured 186-378 KB for one 460 KB estimate), so a 2x floor was a
+        -- coin toss. What matters is the ceiling above; this only catches an
+        -- estimate padded out of all proportion.
+        t:check(pool.bytes <= grown * 4, "and the estimate is not padded beyond 4x")
     end)
 end
