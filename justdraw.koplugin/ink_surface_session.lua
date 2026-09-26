@@ -8,8 +8,11 @@ controllers; this module only knows an id and persistent logical geometry.
 
 local Cache = require("ink_canvas_cache")
 local Codec = require("ink_canvas_codec")
+local History = require("ink_edit_history")
 local Limits = require("ink_limits")
 local Queue = require("ink_canvas_queue")
+local Style = require("ink_style")
+local logger = require("logger")
 
 local SurfaceSession = {}
 SurfaceSession.__index = SurfaceSession
@@ -71,6 +74,15 @@ function SurfaceSession.new(opts)
         --- (ADR-42).
         can_work = opts.can_work,
         max_open_points = opts.max_open_points or Limits.MAX_OPEN_POINTS,
+        --- Optional (ADR-53). A surface with a history records every edit as
+        --- a reversible replacement and gains redo; one without keeps the
+        --- legacy undo exactly (page ink).
+        history = opts.history,
+        --- Something the owner should tell the reader about the history:
+        --- `history_stale` after a failed re-attach, `erase_limit` when an
+        --- erase contact stopped cutting at its budget.
+        on_history_notice = opts.on_history_notice,
+        by_key = {},
         cache_obj = nil,
         queue = nil,
         next_seq = nil,
@@ -197,6 +209,7 @@ function SurfaceSession:open()
                 return
             end
             self.load_error = nil
+            self:_bindKeys()
             if self.on_ready then self.on_ready(self) end
             notifyState(self)
         end,
@@ -264,6 +277,27 @@ function SurfaceSession:addStroke(points, n, width, tool, opts)
         or paint_seq == math.huge or paint_seq < 1
         or paint_seq ~= math.floor(paint_seq) then return nil, "bad_stroke" end
 
+    -- With a history, a drawn stroke is an entry of its own. Its snapshot is
+    -- taken before anything is queued, so a stroke the history could not
+    -- keep is refused rather than drawn without a way back.
+    local snap, key
+    local history = self.history
+    if history and not (opts and opts.no_record) then
+        key = history:newKey()
+        local snap_err
+        snap, snap_err = History.snapshot({
+            key = key, version = 1, points = points, n = n,
+            width = width, tool = tool, paint_seq = paint_seq,
+        }, self.surface_obj.logical_w, self.surface_obj.logical_h, { clamp = true })
+        if not snap then return nil, snap_err end
+        local sp, sb = History.costOf({ snap })
+        if not history:admits(sp, sb + History.ENTRY_OVERHEAD) then
+            return nil, "history_budget"
+        end
+    elseif history then
+        key = history:newKey()
+    end
+
     local local_id, err = self.queue:addStroke(self.surface_obj, {
         seq = seq, paint_seq = paint_seq, width = width, tool = tool, points = points, n = n,
     })
@@ -297,16 +331,75 @@ function SurfaceSession:addStroke(points, n, width, tool, opts)
     end
     self.next_seq = seq + 1
     self.edited = true
+    if key then
+        local meta = self.cache_obj:metaById(row_id or local_id)
+        if meta then
+            meta.key, meta.version = key, 1
+            self.by_key[key] = meta
+        end
+        if snap then
+            local recorded, record_err = history:record{
+                label = "draw", before = {}, after = { snap },
+            }
+            if not recorded then
+                logger.warn("JustDraw: history could not keep a stroke:", record_err)
+            end
+        end
+    end
     return local_id, nil, painted, left, top, right, bottom
 end
 
 function SurfaceSession:beginErase()
     if not self:isReady() then return nil end
-    return self.cache_obj:beginErase()
+    local ctx = self.cache_obj:beginErase()
+    if ctx and self.history then
+        -- One contact, one entry (D.1.5). `before` holds strokes that existed
+        -- before the contact; `after` holds the fragments still alive. A
+        -- fragment the same contact cuts again never existed before it, so it
+        -- leaves `after` and never reaches `before`.
+        ctx.group = {
+            before = {}, before_at = {}, after = {}, after_at = {},
+            before_points = 0, before_bytes = 0,
+            after_points = 0, after_bytes = 0,
+            limited = false,
+        }
+    end
+    return ctx
 end
 
+local function groupList(list, at)
+    local out = {}
+    for i = 1, #list do
+        if list[i] and at[list[i].key] == i then out[#out + 1] = list[i] end
+    end
+    return out
+end
+
+--[[--
+Close an erase contact. With a history the accepted cuts become one entry --
+also when the contact was aborted, since what it already changed is on the
+page and must stay reversible. The reservation made while the contact grew
+is handed to the entry, never counted twice.
+]]
 function SurfaceSession:endErase(ctx)
     if self.cache_obj then self.cache_obj:endErase(ctx) end
+    local group = ctx and ctx.group
+    if not group or group.closed then return end
+    group.closed = true
+    local history = self.history
+    if not history then return end
+    local before = groupList(group.before, group.before_at)
+    local after = groupList(group.after, group.after_at)
+    if #before > 0 or #after > 0 then
+        local ok, err = history:record({ label = "erase", before = before, after = after },
+            { reserved = true })
+        if not ok then logger.warn("JustDraw: erase entry not kept:", err) end
+    else
+        history:releaseOpen()
+    end
+    if group.limited and self.on_history_notice then
+        self.on_history_notice("erase_limit", self)
+    end
 end
 
 --[[--
@@ -336,7 +429,18 @@ function SurfaceSession:eraseAt(cx, cy, radius, ctx)
     if not hits then return nil, sweep_err end
     local union = nil
     for i = 1, #hits do
-        local box, err = self:_applySplit(hits[i])
+        local box, err
+        if self.history and ctx and ctx.group then
+            box, err = self:_applySplitRecorded(hits[i], ctx.group)
+            if err == "erase_limit" then
+                -- Stop cutting, keep what this contact already cut; the
+                -- reader hears about it once, at the lift.
+                if ctx then ctx.sweep_x, ctx.sweep_y = x0, y0 end
+                return union
+            end
+        else
+            box, err = self:_applySplit(hits[i])
+        end
         if not box then
             if ctx then ctx.sweep_x, ctx.sweep_y = x0, y0 end
             return union, err
@@ -404,6 +508,7 @@ function SurfaceSession:_withdrawFragments(added)
 end
 
 function SurfaceSession:undo()
+    if self.history then return self:_historyUndo() end
     if not self:isWritable() then return nil, "read_only" end
     if self:saveFailed() then return nil, "save_failed" end
     if not self:isReady() then return nil, self:stateName() end
@@ -427,6 +532,575 @@ function SurfaceSession:undo()
     return box or true
 end
 
+-- ------------------------------------------------------ replacements (ADR-53)
+
+local function finiteNumber(v)
+    return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
+end
+
+local function boundsOf(points, n)
+    local min_x, min_y = points[1], points[2]
+    local max_x, max_y = min_x, min_y
+    for i = 2, n do
+        local x, y = points[i * 2 - 1], points[i * 2]
+        if x < min_x then min_x = x elseif x > max_x then max_x = x end
+        if y < min_y then min_y = y elseif y > max_y then max_y = y end
+    end
+    return min_x, min_y, max_x, max_y
+end
+
+--- Grow a stroke-shaped canvas box {min_x, min_y, max_x, max_y, width}.
+local function growBox(box, min_x, min_y, max_x, max_y, width)
+    if not box then
+        return { min_x = min_x, min_y = min_y, max_x = max_x, max_y = max_y,
+            width = width or 0 }
+    end
+    if min_x < box.min_x then box.min_x = min_x end
+    if min_y < box.min_y then box.min_y = min_y end
+    if max_x > box.max_x then box.max_x = max_x end
+    if max_y > box.max_y then box.max_y = max_y end
+    if (width or 0) > box.width then box.width = width end
+    return box
+end
+
+--- The live meta that carries a logical key, or nil.
+function SurfaceSession:metaByKey(key)
+    local m = self.by_key[key]
+    if m and self.cache_obj and self.cache_obj:metaById(m.id) == m then return m end
+    return nil
+end
+
+function SurfaceSession:hasHistory()
+    return self.history ~= nil
+end
+
+--[[--
+Give every loaded stroke its logical key.
+
+Runs after each completed build. A rebuild after a rotation keeps the same
+meta tables, so their keys survive and nothing happens. A reopened page hands
+its detached history's `row -> key` map back (`History:resolve`); if the page
+no longer matches, the history is invalidated and told about -- it is never
+resolved "mostly", since a half-mapped history could undo ink it never
+recorded. A brand-new history records the loaded strokes as the pre-session
+frontier (D.1.9).
+]]
+function SurfaceSession:_bindKeys()
+    local history = self.history
+    if not history or not self.cache_obj then return end
+    local metas = self.cache_obj:strokes()
+    if history.attached == false then
+        local resolved = history:resolve(metas)
+        if resolved then
+            for m, v in pairs(resolved) do m.key, m.version = v.key, v.version end
+        else
+            history:invalidate("history_stale")
+            for i = 1, #metas do metas[i].key = nil end
+            if self.on_history_notice then
+                self.on_history_notice("history_stale", self)
+            end
+        end
+    end
+    local fresh = {}
+    self.by_key = {}
+    for i = 1, #metas do
+        local m = metas[i]
+        if not m.key then
+            m.key, m.version = history:newKey(), 1
+            fresh[#fresh + 1] = m.key
+        end
+        self.by_key[m.key] = m
+    end
+    if not history.frontier_initialised then
+        history.frontier_initialised = true
+        if not history.invalid then history:setFrontier(fresh) end
+    end
+end
+
+--[[--
+Hand the history back to its owner, with the row each live key sits on.
+
+Only a fully persisted surface can do this: a pending insert has no row the
+reopened page could recognise it by. The owner flushes first and refuses to
+leave the page when that fails (D.1.7).
+]]
+function SurfaceSession:detachHistory()
+    local history = self.history
+    if not history then return nil end
+    if not self.cache_obj then return nil, "closed" end
+    local live = {}
+    local metas = self.cache_obj:strokes()
+    for i = 1, #metas do
+        local m = metas[i]
+        local row_id = m.id > 0 and m.id or (self.queue and self.queue:realId(m.id))
+        if not row_id or not m.key then return nil, "unsaved" end
+        live[row_id] = { key = m.key, version = m.version or 1 }
+    end
+    history:detach(live)
+    self.history = nil
+    self.by_key = {}
+    return history
+end
+
+--[[--
+Validate one incoming stroke description. `trusted` specs come from the
+history's own snapshots, whose points are already the stored quantised
+values; everything else -- a move, a paste, a shape -- has to lie inside the
+page before it is snapped, because the codec would otherwise clamp it
+somewhere it was never painted.
+]]
+function SurfaceSession:_prepareSpec(spec)
+    if type(spec) ~= "table" then return nil, "bad_stroke" end
+    local n = spec.n
+    if not finiteNumber(n) or n < 1 or n ~= math.floor(n)
+        or n > self.max_open_points then return nil, "bad_stroke" end
+    if type(spec.points) ~= "table" then return nil, "bad_stroke" end
+    local width, tool = tonumber(spec.width), tonumber(spec.tool)
+    if not finiteNumber(width) or width < 0 or not finiteNumber(tool)
+        or Style.normalize(tool) ~= tool then return nil, "bad_stroke" end
+    local w, h = self.surface_obj.logical_w, self.surface_obj.logical_h
+    local points, err = Codec.snap(spec.points, n, w, h,
+        spec.trusted and { clamp = true } or nil)
+    if not points then return nil, err end
+    if spec.paint_seq ~= nil and (not finiteNumber(spec.paint_seq)
+        or spec.paint_seq < 1 or spec.paint_seq ~= math.floor(spec.paint_seq)) then
+        return nil, "bad_stroke"
+    end
+    if spec.key ~= nil and (not finiteNumber(spec.key) or spec.key < 1) then
+        return nil, "bad_stroke"
+    end
+    if spec.version ~= nil and (not finiteNumber(spec.version) or spec.version < 1) then
+        return nil, "bad_stroke"
+    end
+    return {
+        key = spec.key, version = spec.version, points = points, n = n,
+        width = width, tool = tool, paint_seq = spec.paint_seq,
+    }
+end
+
+--[[--
+Prepare a replacement without changing anything (D.2 steps 1-2).
+
+Returns a plan, or nil and a reason. Everything that can refuse runs here: the
+surface's state, the keys, every point, the history's room for the entry and
+the queue's exact cost. After this returns a plan, `_publishPlan` only does
+table work.
+]]
+function SurfaceSession:_prepareReplace(remove_keys, add_specs, opts)
+    opts = opts or {}
+    if not self.history then return nil, "no_history" end
+    if not self:isWritable() then return nil, "read_only" end
+    if self:saveFailed() then return nil, "save_failed" end
+    if not self:isReady() then return nil, self:stateName() end
+    remove_keys, add_specs = remove_keys or {}, add_specs or {}
+    if #remove_keys == 0 and #add_specs == 0 then return nil, "empty_edit" end
+    local w, h = self.surface_obj.logical_w, self.surface_obj.logical_h
+
+    local removed, removing, remove_ids = {}, {}, {}
+    local expect = opts.expect_versions
+    for i = 1, #remove_keys do
+        local key = remove_keys[i]
+        local m = self:metaByKey(key)
+        if not m or removing[key] then return nil, "unknown_stroke" end
+        if expect and expect[key] ~= nil and expect[key] ~= (m.version or 1) then
+            return nil, "stale_version"
+        end
+        removing[key] = true
+        removed[#removed + 1] = m
+        remove_ids[#remove_ids + 1] = m.id
+    end
+
+    local specs, adding = {}, {}
+    for i = 1, #add_specs do
+        local spec, err = self:_prepareSpec(add_specs[i])
+        if not spec then return nil, err end
+        if spec.key then
+            if adding[spec.key] or (self:metaByKey(spec.key) and not removing[spec.key]) then
+                return nil, "duplicate_key"
+            end
+            adding[spec.key] = true
+        end
+        specs[i] = spec
+    end
+
+    local seq = self.next_seq
+    if not seq then return nil, "no_seq" end
+    local inserts = {}
+    for i = 1, #specs do
+        local spec = specs[i]
+        inserts[i] = {
+            seq = seq + i - 1, paint_seq = spec.paint_seq or (seq + i - 1),
+            width = spec.width, tool = spec.tool, points = spec.points, n = spec.n,
+        }
+    end
+
+    -- Snapshots of both sides, before anything moves: a stroke that cannot
+    -- be read refuses the edit rather than vanishing from it (D.1.3).
+    local entry
+    if opts.record ~= false then
+        local before, after = {}, {}
+        for i = 1, #removed do
+            local m = removed[i]
+            local points, n = self.cache_obj:readPoints(m)
+            if not points then return nil, n end
+            local snap, err = History.snapshot({
+                key = m.key, version = m.version or 1, points = points, n = n,
+                width = m.width, tool = m.tool, paint_seq = m.paint_seq or m.seq,
+            }, w, h, { clamp = true })
+            if not snap then return nil, err end
+            before[#before + 1] = snap
+        end
+        for i = 1, #specs do
+            local spec = specs[i]
+            local snap, err = History.snapshot({
+                key = spec.key or 1, version = spec.version or 1,
+                points = spec.points, n = spec.n, width = spec.width,
+                tool = spec.tool, paint_seq = inserts[i].paint_seq,
+            }, w, h, { clamp = true })
+            if not snap then return nil, err end
+            after[#after + 1] = snap
+        end
+        local bp, bb = History.costOf(before)
+        local ap, ab = History.costOf(after)
+        if not self.history:admits(bp + ap, bb + ab + History.ENTRY_OVERHEAD) then
+            return nil, "history_budget"
+        end
+        entry = { label = opts.label or "edit", before = before, after = after }
+    end
+
+    local plan, plan_err = self.queue:prepareBatch(self.surface_obj, remove_ids, inserts)
+    if not plan then return nil, plan_err end
+    return {
+        queue_plan = plan, removed = removed, specs = specs, inserts = inserts,
+        entry = entry, repair = opts.repair,
+    }
+end
+
+--[[--
+Publish a prepared plan (D.2 step 3): queue, cache, keys, history and the
+edited mark move together, and nothing in here refuses. Painting follows in
+`_repaintPlan`, after the edit is accepted.
+]]
+function SurfaceSession:_publishPlan(plan)
+    local ids, err = self.queue:publishBatch(plan.queue_plan)
+    if not ids then return nil, err end
+    local history = self.history
+    for i = 1, #plan.removed do
+        local m = plan.removed[i]
+        if m.id > 0 or self.queue:realId(m.id) then self.maintenance_pending = true end
+        self.cache_obj:forgetStroke(m.id)
+        if m.key and self.by_key[m.key] == m then self.by_key[m.key] = nil end
+    end
+    local metas = {}
+    for i = 1, #plan.specs do
+        local spec, insert = plan.specs[i], plan.inserts[i]
+        local min_x, min_y, max_x, max_y = boundsOf(insert.points, insert.n)
+        local key = spec.key or history:newKey()
+        local meta = {
+            id = ids[i], seq = insert.seq, paint_seq = insert.paint_seq,
+            codec = Codec.VERSION, width = insert.width, tool = insert.tool,
+            point_count = insert.n,
+            min_x = min_x, min_y = min_y, max_x = max_x, max_y = max_y,
+            key = key, version = spec.version or 1,
+        }
+        self.cache_obj:addStroke(meta, insert.points, insert.n, { defer_paint = true })
+        local row_id = self.queue:realId(ids[i])
+        if row_id then
+            self.cache_obj:markPersisted(ids[i], row_id)
+            self.queue:forgetReal(ids[i], row_id)
+        end
+        self.by_key[key] = meta
+        metas[i] = meta
+        if plan.entry then
+            -- The snapshot took a placeholder key; it is the allocated one.
+            plan.entry.after[i].key = key
+        end
+    end
+    self.next_seq = self.next_seq + #plan.specs
+    self.edited = true
+    if plan.entry then
+        local recorded, record_err = history:record(plan.entry)
+        if not recorded then logger.warn("JustDraw: history entry not kept:", record_err) end
+    end
+    return metas
+end
+
+--- Repaint what a published plan touched. Returns the union cache box, or
+--- nil and the repaint error: the edit stays accepted either way (D.2 step 4).
+function SurfaceSession:_repaintPlan(plan, metas)
+    local removed_box, added_box = plan.repair, nil
+    if not removed_box then
+        for i = 1, #plan.removed do
+            local m = plan.removed[i]
+            removed_box = growBox(removed_box, m.min_x, m.min_y, m.max_x, m.max_y, m.width)
+        end
+    end
+    for i = 1, #metas do
+        local m = metas[i]
+        added_box = growBox(added_box, m.min_x, m.min_y, m.max_x, m.max_y, m.width)
+    end
+    local union
+    for _, box in ipairs({ removed_box or false, added_box or false }) do
+        if box then
+            local painted, err = self.cache_obj:repair(box)
+            if not painted then return union, err or "repaint_failed" end
+            union = unionBox(union, painted)
+        end
+    end
+    return union
+end
+
+--[[--
+Replace the strokes carrying `remove_keys` with `add_specs`, all or nothing.
+
+  add_specs[i]  {points, n, width, tool, paint_seq?, key?, version?, trusted?}
+  opts.label    history label ("move", "cut", "paste", "shape", ...)
+  opts.record   false for undo/redo, which move existing entries instead
+  opts.expect_versions  {[key] = version}; a stale one refuses the edit
+  opts.repair   canvas box to repair instead of the removed strokes' boxes
+
+Returns `{accepted = true, metas, box, repaint_error}` or nil and a reason.
+A refusal leaves queue, cache, keys, counters and history exactly as they
+were. A repaint failure after acceptance does not undo anything: the cache
+is failed and blocks further edits until the owner rebuilds it from the
+accepted model (D.2). Persistence is the later flush's business.
+]]
+function SurfaceSession:replaceStrokes(remove_keys, add_specs, opts)
+    local plan, err = self:_prepareReplace(remove_keys, add_specs, opts)
+    if not plan then return nil, err end
+    local metas, publish_err = self:_publishPlan(plan)
+    if not metas then return nil, publish_err end
+    local box, repaint_err = self:_repaintPlan(plan, metas)
+    notifyState(self)
+    return { accepted = true, metas = metas, box = box, repaint_error = repaint_err }
+end
+
+--[[--
+Whether a replacement of this shape fits, flushing first when it would only
+fit an emptier queue. Only for deferred work that `can_work()` allows: this
+may run a SQLite transaction, which never happens under a contact (ADR-42).
+Shares `_prepareReplace` with the edit itself, so the two cannot disagree.
+]]
+function SurfaceSession:ensureCapacity(remove_keys, add_specs, opts)
+    local probe = {}
+    for k, v in pairs(opts or {}) do probe[k] = v end
+    probe.record = false
+    local plan, err = self:_prepareReplace(remove_keys, add_specs, probe)
+    if plan then return true end
+    if err ~= "queue_backpressure" then return nil, err end
+    if self.can_work and not self.can_work() then return nil, "contact_active" end
+    local flushed, flush_err = self:flush()
+    if not flushed then return nil, flush_err end
+    plan, err = self:_prepareReplace(remove_keys, add_specs, probe)
+    if not plan then return nil, err end
+    return true
+end
+
+--[[--
+One cut of an erase contact on a surface with a history. The same split as
+`_applySplit`, made through the replacement primitive so it is atomic and
+recorded into the contact's group. Before each cut the group's final size is
+checked in both directions -- undo re-inserts `before`, redo re-inserts
+`after` -- against the history's budget and the queue's hard bounds; a cut
+whose inverse could never be admitted is not made (D.1.5).
+]]
+function SurfaceSession:_applySplitRecorded(hit, group)
+    if group.limited then return nil, "erase_limit" end
+    local m = hit.meta
+    local w, h = self.surface_obj.logical_w, self.surface_obj.logical_h
+    local frags = {}
+    for f = 1, #hit.fragments do
+        local range = hit.fragments[f]
+        local count = range.n or (range.last - range.first + 1)
+        local frag = range.points
+        if not frag then
+            frag = {}
+            local at = 0
+            for p = range.first, range.last do
+                at = at + 1
+                frag[at * 2 - 1] = hit.points[p * 2 - 1]
+                frag[at * 2] = hit.points[p * 2]
+            end
+        end
+        frags[f] = {
+            points = frag, n = count, width = m.width, tool = m.tool,
+            paint_seq = m.paint_seq or m.seq, trusted = true,
+        }
+    end
+
+    -- What this cut would add to the group.
+    local intermediate = group.after_at[m.key] ~= nil
+    local before_snap
+    if not intermediate then
+        local err
+        before_snap, err = History.snapshot({
+            key = m.key, version = m.version or 1, points = hit.points, n = hit.n,
+            width = m.width, tool = m.tool, paint_seq = m.paint_seq or m.seq,
+        }, w, h, { clamp = true })
+        if not before_snap then return nil, err end
+    end
+    local frag_snaps, frag_points, frag_bytes = {}, 0, 0
+    for f = 1, #frags do
+        local snap, err = History.snapshot({
+            key = 1, version = 1, points = frags[f].points, n = frags[f].n,
+            width = m.width, tool = m.tool, paint_seq = frags[f].paint_seq,
+        }, w, h, { clamp = true })
+        if not snap then return nil, err end
+        frag_snaps[f] = snap
+    end
+    frag_points, frag_bytes = History.costOf(frag_snaps)
+    local bp, bb = 0, 0
+    if before_snap then bp, bb = History.costOf({ before_snap }) end
+    -- The inverse batches, as they would be after this cut.
+    local before_count = #groupList(group.before, group.before_at) + (before_snap and 1 or 0)
+    local after_count = #groupList(group.after, group.after_at) + #frags
+        - (intermediate and 1 or 0)
+    local before_bytes = group.before_bytes + bb
+    local after_bytes = group.after_bytes + frag_bytes
+    local q = self.queue
+    if before_count + after_count > q.hard_ops
+        or before_bytes > q.hard_bytes or after_bytes > q.hard_bytes then
+        group.limited = true
+        return nil, "erase_limit"
+    end
+    local reserved_bytes = bb + frag_bytes
+        + ((group.before_points == 0 and group.after_points == 0)
+            and History.ENTRY_OVERHEAD or 0)
+    local reserved = self.history:reserveOpen(bp + frag_points, reserved_bytes)
+    if not reserved then
+        group.limited = true
+        return nil, "erase_limit"
+    end
+
+    local repair = hit.exact and m or hit.removed
+    local plan, err = self:_prepareReplace({ m.key }, frags, {
+        record = false,
+        repair = { min_x = repair.min_x, min_y = repair.min_y,
+            max_x = repair.max_x, max_y = repair.max_y, width = m.width },
+    })
+    if not plan then
+        -- Give the reservation of a cut that was never made back.
+        self.history:unreserveOpen(bp + frag_points, reserved_bytes)
+        return nil, err
+    end
+    local metas, publish_err = self:_publishPlan(plan)
+    if not metas then return nil, publish_err end
+    for i = 1, #metas do metas[i].from_erase = true end
+
+    if intermediate then
+        group.after_at[m.key] = nil
+    else
+        group.before[#group.before + 1] = before_snap
+        group.before_at[m.key] = #group.before
+        group.before_points = group.before_points + bp
+        group.before_bytes = group.before_bytes + bb
+    end
+    for f = 1, #metas do
+        local snap = frag_snaps[f]
+        snap.key = metas[f].key
+        group.after[#group.after + 1] = snap
+        group.after_at[snap.key] = #group.after
+    end
+    group.after_points = group.after_points + frag_points
+    group.after_bytes = group.after_bytes + frag_bytes
+
+    local box, repaint_err = self:_repaintPlan(plan, {})
+    if not box and repaint_err then return nil, repaint_err end
+    return box
+end
+
+--- Take back the pre-session stroke at the frontier (D.1.9).
+function SurfaceSession:_undoFrontier(key)
+    local m = self:metaByKey(key)
+    if not m then
+        -- The page no longer matches what the frontier described.
+        self.history.frontier = nil
+        return nil
+    end
+    local points, n = self.cache_obj:readPoints(m)
+    if not points then return nil, n end
+    local snap, err = History.snapshot({
+        key = m.key, version = m.version or 1, points = points, n = n,
+        width = m.width, tool = m.tool, paint_seq = m.paint_seq or m.seq,
+    }, self.surface_obj.logical_w, self.surface_obj.logical_h, { clamp = true })
+    if not snap then return nil, err end
+    local sp, sb = History.costOf({ snap })
+    if not self.history:admits(sp, sb + History.ENTRY_OVERHEAD) then
+        return nil, "history_budget"
+    end
+    local result, replace_err = self:replaceStrokes({ key }, {}, { record = false })
+    if not result then return nil, replace_err end
+    self.history:commitFrontierUndo(snap)
+    return result.box or true
+end
+
+local function specsFrom(snaps, w, h)
+    local specs = {}
+    for i = 1, #snaps do
+        local s = snaps[i]
+        local points, n = History.points(s, w, h)
+        if not points then return nil, n end
+        specs[i] = {
+            key = s.key, version = s.version, points = points, n = n,
+            width = s.width, tool = s.tool, paint_seq = s.paint_seq, trusted = true,
+        }
+    end
+    return specs
+end
+
+local function keysAndVersions(snaps)
+    local keys, versions = {}, {}
+    for i = 1, #snaps do
+        keys[i] = snaps[i].key
+        versions[snaps[i].key] = snaps[i].version
+    end
+    return keys, versions
+end
+
+--- Reverse one entry through the replacement primitive; `commit` moves the
+--- entry across stacks only once the surface accepted the change.
+function SurfaceSession:_applyEntry(entry, from, to, commit)
+    local w, h = self.surface_obj.logical_w, self.surface_obj.logical_h
+    local keys, versions = keysAndVersions(entry[from])
+    local specs, err = specsFrom(entry[to], w, h)
+    if not specs then return nil, err end
+    local result, replace_err = self:replaceStrokes(keys, specs, {
+        record = false, expect_versions = versions,
+    })
+    if not result then return nil, replace_err end
+    commit(self.history)
+    return result.box or true
+end
+
+function SurfaceSession:_historyUndo()
+    if not self:isWritable() then return nil, "read_only" end
+    if self:saveFailed() then return nil, "save_failed" end
+    if not self:isReady() then return nil, self:stateName() end
+    local entry = self.history:peekUndo()
+    if entry then
+        return self:_applyEntry(entry, "after", "before", function(h) h:commitUndo() end)
+    end
+    local key = self.history:frontierKey()
+    if key then return self:_undoFrontier(key) end
+    return nil
+end
+
+function SurfaceSession:redo()
+    if not self.history then return nil end
+    if not self:isWritable() then return nil, "read_only" end
+    if self:saveFailed() then return nil, "save_failed" end
+    if not self:isReady() then return nil, self:stateName() end
+    local entry = self.history:peekRedo()
+    if not entry then return nil end
+    return self:_applyEntry(entry, "before", "after", function(h) h:commitRedo() end)
+end
+
+function SurfaceSession:canRedo()
+    if not self.history or not self:isReady() or not self:isWritable()
+        or self:saveFailed() then return false end
+    return self.history:canRedo()
+end
+
 function SurfaceSession:repair(min_x, min_y, max_x, max_y, width)
     if not self.cache_obj then return nil end
     return self.cache_obj:repair{
@@ -442,6 +1116,11 @@ end
 function SurfaceSession:canUndo()
     if not self:isReady() or not self:isWritable() or self:saveFailed()
         or not self.cache_obj then return false end
+    if self.history then
+        if self.history:canUndo() then return true end
+        local key = self.history:frontierKey()
+        return key ~= nil and self:metaByKey(key) ~= nil
+    end
     local strokes = self.cache_obj:strokes()
     for i = #strokes, 1, -1 do
         if not strokes[i].from_erase then return true end
@@ -473,6 +1152,26 @@ function SurfaceSession:retryLoad()
     if self.queue and self.queue:pendingCount() > 0 then
         local saved, save_err = self.queue:flush()
         if not saved then notifyState(self); return nil, save_err end
+    end
+    local history = self.history
+    if history and history.attached ~= false then
+        -- Reopening reads fresh metas from the store. Hand the history the
+        -- row each key sits on, so the reload can give the keys back; a
+        -- surface that was never fully keyed cannot, and starts over.
+        local live, complete = {}, true
+        local metas = self.cache_obj:strokes()
+        for i = 1, #metas do
+            local m = metas[i]
+            local row_id = m.id > 0 and m.id or (self.queue and self.queue:realId(m.id))
+            if not row_id or not m.key then complete = false; break end
+            live[row_id] = { key = m.key, version = m.version or 1 }
+        end
+        if complete then
+            history:detach(live)
+        else
+            history:invalidate("history_stale")
+        end
+        self.by_key = {}
     end
     self.load_error = nil
     local ok, err = self.cache_obj:retryOpen()
