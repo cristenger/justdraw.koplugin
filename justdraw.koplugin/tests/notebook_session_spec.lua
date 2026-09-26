@@ -677,6 +677,26 @@ return function(ctx)
         t:eq(#session:surface():cache():strokes(), 0, "erased again")
     end)
 
+    t:case("a page changed by someone else while we were away does not get its keys back", function()
+        local session, store, sched = fixture()
+        store.pages[1].revision = 1
+        session:open(1)
+        sched:drain()
+        session:surface():addStroke({ 100, 100, 200, 200 }, 2, 4, 1)
+        t:eq(session:goNext(), true, "to B")
+        sched:drain()
+        -- Another writer (another process, a restored backup) moves page A on
+        -- -- same rows, new content revision.
+        store.pages[1].revision = 99
+        t:eq(session:goPrevious(), true, "back to A")
+        sched:drain()
+        t:eq(session:uiSnapshot().can_undo, false, "its history was not handed back")
+        t:eq(#session:surface():cache():strokes(), 1, "and no ink was removed on the way")
+        -- Unchanged pages still get theirs: B was left at its revision.
+        t:eq(session:goNext(), true, "to B again")
+        sched:drain()
+    end)
+
     t:case("a flush between edits changes ids but not what undo finds", function()
         local session, _, sched = fixture()
         session:open(1)

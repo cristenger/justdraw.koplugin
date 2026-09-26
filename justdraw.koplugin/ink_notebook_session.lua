@@ -85,6 +85,12 @@ function Session:_historyFor(page)
         h = History.new{ pool = self.history_pool, identity = key }
         self.histories[key] = h
     end
+    if h.attached == false and h.detached_revision ~= nil and page.revision ~= nil
+        and page.revision ~= h.detached_revision then
+        -- Not the page we left: its keys resolve to nothing, so binding
+        -- invalidates the history and tells the reader (history_stale).
+        h.live = nil
+    end
     self.history_pool:touch(h)
     for _, evicted in ipairs(self.history_pool:enforceCount(h)) do
         if evicted.identity then self.histories[evicted.identity] = nil end
@@ -124,6 +130,14 @@ function Session:_closeSurface(surface)
     if not closed then
         if history then surface:reattachHistory(history) end
         return nil, close_err
+    end
+    if history then
+        -- The page's content revision as committed now (schema v3): row ids
+        -- alone are not an identity, and a page changed by anyone else while
+        -- we were away must not be handed these keys back (§D.1.7).
+        local page = surface:surface()
+        local row = page and self.repository.getPage and self.repository:getPage(page.id)
+        history.detached_revision = row and row.revision or nil
     end
     return true
 end
