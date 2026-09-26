@@ -121,7 +121,10 @@ local function validTitle(value)
     return title
 end
 
-local KNOWN_TEMPLATES = { blank = true, ruled = true, grid = true, dots = true }
+local KNOWN_TEMPLATES = {
+    blank = true, ruled = true, ruled_narrow = true, grid = true, dots = true,
+    checklist = true,
+}
 local function storedTemplate(value)
     if type(value) ~= "string" or value == "" or #value > 64 then return "blank" end
     return value

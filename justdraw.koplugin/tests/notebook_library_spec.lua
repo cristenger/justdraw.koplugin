@@ -467,6 +467,30 @@ return function(ctx)
         create(function(g) g["Paper style"].button_select_callback{ value = "dots" } end)
         t:eq(spec.template_kind, "dots", "the chosen style is what gets created")
         t:eq(spec.logical_w, expected.logical_w, "and the shape is untouched by it")
+
+        -- Every kind the renderer can draw is offered, once, and none else.
+        local Paper = require("ink_paper")
+        local offered, labels = {}, {}
+        for _, row in ipairs(groups["Paper style"].radio_buttons) do
+            for _, button in ipairs(row) do
+                if button.value then
+                    offered[button.value] = (offered[button.value] or 0) + 1
+                    labels[button.value] = button.text
+                end
+            end
+        end
+        for kind in pairs(Paper.KINDS) do
+            t:eq(offered[kind], 1, kind .. " is offered once")
+        end
+        for kind in pairs(offered) do
+            t:eq(Paper.KINDS[kind], true, kind .. " is a kind that draws")
+        end
+        t:eq(labels.ruled_narrow, "Narrow ruled", "narrow ruled, in English")
+        t:eq(labels.checklist, "Checklist", "checklist, in English")
+        for _, kind in ipairs({ "ruled_narrow", "checklist" }) do
+            create(function(g) g["Paper style"].button_select_callback{ value = kind } end)
+            t:eq(spec.template_kind, kind, kind .. " is what gets created")
+        end
     end)
 
     t:case("a dialog rebuilt after rotation stores the shape of the screen it creates on", function()

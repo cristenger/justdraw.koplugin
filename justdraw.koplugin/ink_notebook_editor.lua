@@ -2053,6 +2053,10 @@ function Editor:showPaperStyle()
                 callback = function() choose("grid") end }},
             {{ text = _("Dotted"), no_refresh_checkmark = true, checked_func = function() return current == "dots" end,
                 callback = function() choose("dots") end }},
+            {{ text = _("Narrow ruled"), no_refresh_checkmark = true, checked_func = function() return current == "ruled_narrow" end,
+                callback = function() choose("ruled_narrow") end }},
+            {{ text = _("Checklist"), no_refresh_checkmark = true, checked_func = function() return current == "checklist" end,
+                callback = function() choose("checklist") end }},
             {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }},
         },
     }

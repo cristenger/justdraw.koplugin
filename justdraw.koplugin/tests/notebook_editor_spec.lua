@@ -396,7 +396,8 @@ return function(ctx)
             end
         end
         t:eq(table.concat(labels, "|"),
-            "Blank|Ruled|Squared|Dotted|Close", "every kind, in English")
+            "Blank|Ruled|Squared|Dotted|Narrow ruled|Checklist|Close",
+            "every kind, in English")
         t:eq(checked, "Ruled", "the page's own ruling is the checked one")
 
         for i = 1, #chooser.buttons do
@@ -407,6 +408,29 @@ return function(ctx)
         t:eq(controller.calls[#controller.calls], "paper:dots",
             "the choice reaches the domain")
         t:eq(editor.modal_widget, nil, "and the chooser closed")
+    end)
+
+    t:case("narrow ruled and checklist are chosen like any other paper", function()
+        for _, pick in ipairs({
+            { "Narrow ruled", "ruled_narrow" }, { "Checklist", "checklist" },
+        }) do
+            ctx.reset()
+            local editor, controller, snapshot = newEditor()
+            snapshot.template_kind = pick[2]
+            editor:onStateChanged()
+            local chooser = editor:showPaperStyle()
+            local entry
+            for i = 1, #chooser.buttons do
+                if chooser.buttons[i][1].text == pick[1] then
+                    entry = chooser.buttons[i][1]
+                end
+            end
+            t:check(entry ~= nil, pick[1] .. " is offered")
+            t:eq(entry.checked_func(), true, pick[1] .. " is checked on its own page")
+            entry.callback()
+            t:eq(controller.calls[#controller.calls], "paper:" .. pick[2],
+                pick[1] .. " reaches the domain as " .. pick[2])
+        end
     end)
 
     t:case("a refused paper change says why and leaves the page alone", function()

@@ -465,7 +465,7 @@ function Library:showCreateDialog(previous)
         and dialog:getAddedWidgetAvailableWidth()
         or math.floor(math.min(Screen:getWidth(), Screen:getHeight()) * 0.72)
     local option_width = width - ScrollableContainer:getScrollbarWidth()
-    -- Two by two rather than four across, because four labels do not survive
+    -- Two across rather than six, because even four labels do not survive
     -- the narrowest screen this runs on with the keyboard up.
     local style_radio = RadioButtonTable:new{
         width = option_width,
@@ -480,6 +480,12 @@ function Library:showCreateDialog(previous)
         {
             { text = _("Squared"), checked = style == "grid", value = "grid" },
             { text = _("Dotted"), checked = style == "dots", value = "dots" },
+        },
+        {
+            { text = _("Narrow ruled"), checked = style == "ruled_narrow",
+                value = "ruled_narrow" },
+            { text = _("Checklist"), checked = style == "checklist",
+                value = "checklist" },
         }},
         button_select_callback = function(entry) style = entry.value end,
     }

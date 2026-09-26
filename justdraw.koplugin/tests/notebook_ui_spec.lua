@@ -202,6 +202,7 @@ return function(ctx)
             "Notebooks", "New notebook", "Loading page…", "Retry saving",
             "Exit notebook", "Delete notebook", "Read-only",
             "Paper style", "Blank", "Ruled", "Squared", "Dotted",
+            "Narrow ruled", "Checklist",
         }) do
             t:check(combined:find(required, 1, true) ~= nil, required .. " is present")
         end

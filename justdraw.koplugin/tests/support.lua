@@ -1631,8 +1631,8 @@ function support.newNotebookStore(opts)
         if not n or not p or p.notebook_id ~= notebook_id then
             return nil, "not_found"
         end
-        if kind ~= "blank" and kind ~= "ruled"
-            and kind ~= "grid" and kind ~= "dots" then
+        if kind ~= "blank" and kind ~= "ruled" and kind ~= "ruled_narrow"
+            and kind ~= "grid" and kind ~= "dots" and kind ~= "checklist" then
             return nil, "bad_template"
         end
         p.template_kind = kind

@@ -49,12 +49,17 @@ survives a round trip through SQLite, this decides what can be drawn -- and
 `tests/paper_spec.lua` pins them equal, because a kind that persists but does
 not draw is a page that silently comes back blank.
 ]]
-Paper.KINDS = { blank = true, ruled = true, grid = true, dots = true }
+Paper.KINDS = {
+    blank = true, ruled = true, ruled_narrow = true, grid = true, dots = true,
+    checklist = true,
+}
 
---- Ruling pitch in logical units: ruled 6 mm, squared and dotted 5 mm, which
---- is what the paper notebooks this imitates use. `blank` is absent on
---- purpose; it is the whole of the "nothing to draw" test below.
-Paper.PITCH = { ruled = 48, grid = 40, dots = 40 }
+--- Ruling pitch in logical units: ruled 6 mm, narrow ruled 5.5 mm, squared
+--- and dotted 5 mm, which is what the paper notebooks this imitates use. A
+--- checklist row is 8 mm because it has to hold a box and a line of writing
+--- beside it. `blank` is absent on purpose; it is the whole of the "nothing
+--- to draw" test below.
+Paper.PITCH = { ruled = 48, ruled_narrow = 44, grid = 40, dots = 40, checklist = 64 }
 
 --[[--
 Below this the ruling stops being paper and becomes texture: at a five-pixel
@@ -71,6 +76,13 @@ local MIN_PITCH_PX = 8
 local DOT_UNITS = 2
 local RULE_UNITS = 1
 local MAX_MARK_PX = 4
+
+--- A checklist box is 4 mm square, its left edge 6 mm in from the sheet's
+--- edge, and it sits 1 mm above its row's rule: the rule is where the item is
+--- written, the box is beside it, not on it.
+local BOX_UNITS = 32
+local BOX_LEFT_UNITS = 48
+local BOX_GAP_UNITS = 8
 
 local function finite(v)
     return type(v) == "number" and v == v
@@ -159,6 +171,57 @@ local function paintDots(bb, pitch_px, size, x, y, right, bottom, color)
 end
 
 --[[--
+One outlined box per checklist row, drawn with the rules' own thickness.
+
+Every edge is a function of the row index and the scale alone, exactly as the
+rules are: the bottom is rounded from its own logical position, never from the
+rule's already rounded pixel row, and the side is one rounded length shared by
+all four edges so the box stays square in pixels. The vertical edges stop short
+of the horizontal ones, so no pixel is written twice.
+
+Rows are bounded from the region the same way `paintRows` bounds them, widened
+by the box's reach above its rule, because a box belongs to the rule below it
+and a region can hold the box without the rule.
+
+For the same reason a box whose rule would fall off the sheet is not drawn: a
+tick box with no line to write on is not a row, it is a stray square at the
+foot of the page. `sheet_h` is the buffer's height, which is the page's, so the
+cut is a property of the sheet and not of the region -- a repair near the
+bottom agrees with the whole-page pass about which is the last row.
+]]
+local function paintBoxes(bb, pitch, scale, thickness, sheet_h,
+                          x, y, right, bottom, color)
+    local pitch_px = pitch * scale
+    local size = floor(BOX_UNITS * scale + 0.5)
+    local left = floor(BOX_LEFT_UNITS * scale + 0.5)
+    -- The column of boxes is narrow and most of the page is to its right, so
+    -- a region that misses it visits no row at all.
+    if left >= right or left + size <= x then return false end
+    local reach = (BOX_GAP_UNITS + BOX_UNITS) * scale + 1
+    local first = floor(y / pitch_px)
+    if first < 1 then first = 1 end
+    local last = floor((bottom + reach) / pitch_px) + 1
+    local painted = false
+    for k = first, last do
+        -- Rows only move down the sheet, so the first that is off it ends
+        -- the column.
+        if floor(k * pitch_px + 0.5) >= sheet_h then break end
+        local box_bottom = floor((k * pitch - BOX_GAP_UNITS) * scale + 0.5)
+        local top = box_bottom - size
+        if paintMark(bb, left, top, size, thickness,
+            x, y, right, bottom, color) then painted = true end
+        if paintMark(bb, left, box_bottom - thickness, size, thickness,
+            x, y, right, bottom, color) then painted = true end
+        if paintMark(bb, left, top + thickness, thickness, size - 2 * thickness,
+            x, y, right, bottom, color) then painted = true end
+        if paintMark(bb, left + size - thickness, top + thickness,
+            thickness, size - 2 * thickness,
+            x, y, right, bottom, color) then painted = true end
+    end
+    return painted
+end
+
+--[[--
 Paint `kind`'s marks over a region the caller has already cleared.
 
 The paper colour stays the caller's business: `_build` fills the whole buffer
@@ -210,6 +273,10 @@ function Paper.paint(bb, kind, scale, x, y, w, h, color)
         local columns = paintColumns(bb, pitch_px, thickness,
             x, y, right, bottom, color)
         painted = painted or columns
+    elseif kind == "checklist" then
+        local boxes = paintBoxes(bb, pitch, scale, thickness, bh,
+            x, y, right, bottom, color)
+        painted = painted or boxes
     end
     return painted
 end

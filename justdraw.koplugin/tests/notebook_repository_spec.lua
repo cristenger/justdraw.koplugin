@@ -209,6 +209,31 @@ return function(ctx)
         end
     end)
 
+    --- A kind the reader can pick has to come back as itself: a read that
+    --- folded it to blank would lose the paper the next time the page opens.
+    t:case("narrow ruled and checklist pages round-trip as themselves", function()
+        for _, kind in ipairs({ "ruled_narrow", "checklist" }) do
+            local repo, driver = openRepo{ answers = function(conn)
+                conn:answer("ORDER BY sort_key, id LIMIT 1 OFFSET", {
+                    { 40, 7, 4096, 1000, 1400, kind, 1, 1 },
+                })
+                conn:answer("SELECT last_insert_rowid", { { 5 } })
+            end }
+            t:eq(repo:setPageTemplate(1, 11, kind), true, kind .. " accepted")
+            t:eq(driver.last():bindsFor("UPDATE notebook_pages SET template_kind")[3],
+                kind, kind .. " is what gets stored")
+            t:eq(repo:pageAtPosition(7, 1).template_kind, kind,
+                kind .. " is what a read returns")
+            local _, page = repo:createNotebook{
+                title = "Lists", logical_w = 1000, logical_h = 1400,
+                template_kind = kind,
+            }
+            t:eq(page.template_kind, kind, kind .. " a new notebook's first page")
+            t:eq(driver.last():bindsFor("INSERT INTO notebook_pages")[5], kind,
+                kind .. " is inserted as itself")
+        end
+    end)
+
     t:case("a ruling change on a missing page is not reported as done", function()
         -- Its own driver: openRepo scripts one changed row for every case,
         -- and the fake answers the first pattern that matches.
