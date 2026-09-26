@@ -96,9 +96,11 @@ local function outline(kind, angle, size_px, wing_px)
         -- Ramanujan's perimeter; exact for the circle.
         local h = ((a - b) / (a + b)) ^ 2
         local perimeter = pi * (a + b) * (1 + 3 * h / (10 + sqrt(4 - 3 * h)))
+        -- The closing point counts inside the budget (§6.1): the whole
+        -- curve, closed, is CURVE_MIN..CURVE_MAX points.
         local n = ceil(perimeter / Shapes.CURVE_STEP_PX)
-        if n < Shapes.CURVE_MIN then n = Shapes.CURVE_MIN end
-        if n > Shapes.CURVE_MAX then n = Shapes.CURVE_MAX end
+        if n < Shapes.CURVE_MIN - 1 then n = Shapes.CURVE_MIN - 1 end
+        if n > Shapes.CURVE_MAX - 1 then n = Shapes.CURVE_MAX - 1 end
         for i = 0, n - 1 do
             local th = 2 * pi * i / n
             add(a + a * cos(th), b - b * sin(th))

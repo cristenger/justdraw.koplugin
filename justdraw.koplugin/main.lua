@@ -4020,7 +4020,8 @@ function JustDraw:showSheetEditMenu()
             row(_("Lasso"), "select", true, function() choose("select") end),
             row(_("Shapes…"), "shape", true, function() self:showSheetShapeMenu() end),
             row(_("Paste"), "paste", Clipboard.hasContent(), function() choose("paste") end),
-            {{ text = _("Close"), callback = function() self:closeReaderModal(dialog) end }},
+            {{ text = _("Close"), no_refresh_checkmark = true,
+                callback = function() self:closeReaderModal(dialog) end }},
         },
     }
     return self:showReaderModal(dialog)

@@ -730,7 +730,7 @@ function Library:showHeaderMore()
             no_refresh_checkmark = true,
             callback = function() self:_closeModal(dialog); spec[3]() end }}
     end
-    rows[#rows + 1] = {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }}
+    rows[#rows + 1] = {{ no_refresh_checkmark = true, text = _("Close"), callback = function() self:_closeModal(dialog) end }}
     dialog = ButtonDialog:new{ buttons = rows }
     self:_showModal(dialog)
     return dialog
@@ -1025,7 +1025,7 @@ function Library:showCreateDialog(previous)
         title = _("New notebook"),
         fields = {{ description = _("Notebook name"), text = previous and previous.title or "" }},
         buttons = {{
-            { text = _("Cancel"), id = "close", callback = function() self:_closeModal(dialog) end },
+            { no_refresh_checkmark = true, text = _("Cancel"), id = "close", callback = function() self:_closeModal(dialog) end },
             { text = _("Create"), callback = function()
                 if self.closed or not self.modal_widgets[dialog] then return end
                 local fields = dialog:getFields()
@@ -1159,7 +1159,7 @@ local function nameDialog(self, opts)
         title = opts.title,
         input = opts.input or "",
         buttons = {{
-            { text = _("Cancel"), id = "close", callback = function() self:_closeModal(dialog) end },
+            { no_refresh_checkmark = true, text = _("Cancel"), id = "close", callback = function() self:_closeModal(dialog) end },
             { text = opts.ok_text, callback = function()
                 if self.closed or not self.modal_widgets[dialog] then return end
                 local name, validation = validTitle(dialog:getInputText())
@@ -1185,7 +1185,7 @@ function Library:showRenameDialog(item)
         title = _("Rename notebook"),
         input = item.title,
         buttons = {{
-            { text = _("Cancel"), id = "close", callback = function() self:_closeModal(dialog) end },
+            { no_refresh_checkmark = true, text = _("Cancel"), id = "close", callback = function() self:_closeModal(dialog) end },
             { text = _("Rename"), callback = function()
                 local title, validation = validTitle(dialog:getInputText())
                 if not title then
@@ -1261,7 +1261,7 @@ function Library:showSortMenu()
             end,
         }}
     end
-    rows[#rows + 1] = {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }}
+    rows[#rows + 1] = {{ no_refresh_checkmark = true, text = _("Close"), callback = function() self:_closeModal(dialog) end }}
     dialog = ButtonDialog:new{ title = _("Sort notebooks"), buttons = rows }
     self:_showModal(dialog)
     return dialog
@@ -1271,7 +1271,7 @@ function Library:showActions(item, card)
     local writable = self.batch and self.batch.writable
     local dialog
     local function row(text, enabled, fn)
-        return {{ text = text, enabled = enabled, callback = function()
+        return {{ no_refresh_checkmark = true, text = text, enabled = enabled, callback = function()
             self:_closeModal(dialog); fn()
         end }}
     end
@@ -1285,7 +1285,7 @@ function Library:showActions(item, card)
     if card and card.image_state == "failed" and card.thumb_req then
         buttons[#buttons + 1] = row(_("Retry preview"), true, function() self:retryThumbnail(card) end)
     end
-    buttons[#buttons + 1] = {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }}
+    buttons[#buttons + 1] = {{ no_refresh_checkmark = true, text = _("Close"), callback = function() self:_closeModal(dialog) end }}
     dialog = ButtonDialog:new{ title = BD.auto(shortTitle(item.title)), buttons = buttons }
     self:_showModal(dialog)
     return dialog
@@ -1297,16 +1297,16 @@ function Library:showFolderActions(folder)
     dialog = ButtonDialog:new{
         title = BD.auto(shortTitle(folder.name)),
         buttons = {
-            {{ text = _("Open"), callback = function()
+            {{ no_refresh_checkmark = true, text = _("Open"), callback = function()
                 self:_closeModal(dialog); self:openFolder(folder)
             end }},
-            {{ text = _("Rename"), enabled = writable, callback = function()
+            {{ no_refresh_checkmark = true, text = _("Rename"), enabled = writable, callback = function()
                 self:_closeModal(dialog); self:showRenameFolder(folder)
             end }},
-            {{ text = _("Delete"), enabled = writable, callback = function()
+            {{ no_refresh_checkmark = true, text = _("Delete"), enabled = writable, callback = function()
                 self:_closeModal(dialog); self:confirmDeleteItems({ folder })
             end }},
-            {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }},
+            {{ no_refresh_checkmark = true, text = _("Close"), callback = function() self:_closeModal(dialog) end }},
         },
     }
     self:_showModal(dialog)
@@ -1387,12 +1387,12 @@ function Library:showMoveDialog(items, cursor)
     end
     if more then
         local last = folders[#folders]
-        rows[#rows + 1] = {{ text = _("More folders…"), callback = function()
+        rows[#rows + 1] = {{ no_refresh_checkmark = true, text = _("More folders…"), callback = function()
             self:_closeModal(dialog)
             self:showMoveDialog(items, { name = last.name, id = last.id })
         end }}
     end
-    rows[#rows + 1] = {{ text = _("Cancel"), callback = function() self:_closeModal(dialog) end }}
+    rows[#rows + 1] = {{ no_refresh_checkmark = true, text = _("Cancel"), callback = function() self:_closeModal(dialog) end }}
     dialog = ButtonDialog:new{
         title = T(N_("Move %1 notebook to:", "Move %1 notebooks to:", #items), #items),
         buttons = rows,

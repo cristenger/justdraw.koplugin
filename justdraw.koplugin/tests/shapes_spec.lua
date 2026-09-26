@@ -49,10 +49,10 @@ return function(ctx)
                 kind .. " is closed")
         end
         local small = gen("circle", "S")
-        t:check(small.strokes[1].n >= Shapes.CURVE_MIN + 1, "a small circle has at least 24 segments")
+        t:check(small.strokes[1].n >= Shapes.CURVE_MIN, "a small circle has at least 24 points, closed")
         local huge = assert(Shapes.generate{ kind = "circle", size = "L", mm_to_px = function(v) return v * 1000 end,
             scale = 1, width = 4, tool = 1 })
-        t:check(huge.strokes[1].n <= Shapes.CURVE_MAX + 1, "and a huge one at most 360")
+        t:eq(huge.strokes[1].n, Shapes.CURVE_MAX, "and a huge one exactly 360, the closing point included")
         local rect = gen("rectangle", "M")
         t:check(math.abs(rect.w / rect.h - 1.5) < 1e-9, "rectangle is 3:2")
         local ell = gen("ellipse", "M")

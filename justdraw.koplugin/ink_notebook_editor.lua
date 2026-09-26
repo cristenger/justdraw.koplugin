@@ -1114,7 +1114,7 @@ function Editor:showEditMenu()
             row(_("Paste"), "paste", ready("paste") and self.clipboard_has_content(),
                 function() self:setTool("paste") end),
             -- Like More: a way out a finger can find, besides tapping outside.
-            {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }},
+            {{ no_refresh_checkmark = true, text = _("Close"), callback = function() self:_closeModal(dialog) end }},
         },
     }
     return self:showModalSafely(dialog)
@@ -2062,7 +2062,7 @@ function Editor:showGoToPage()
         input_type = "number",
         input = snapshot.page_position and tostring(snapshot.page_position) or "",
         buttons = {{
-            { text = _("Cancel"), id = "close", callback = function() self:_closeModal(dialog) end },
+            { no_refresh_checkmark = true, text = _("Cancel"), id = "close", callback = function() self:_closeModal(dialog) end },
             { text = _("Go"), callback = function()
                 if self.closed or self:_currentSession() ~= session
                     or not self.modal_widgets[dialog] then return end
@@ -2096,7 +2096,7 @@ function Editor:showRename()
     dialog = InputDialog:new{
         title = _("Rename notebook"), input = self.notebook.title,
         buttons = {{
-            { text = _("Cancel"), callback = function() self:_closeModal(dialog) end },
+            { no_refresh_checkmark = true, text = _("Cancel"), callback = function() self:_closeModal(dialog) end },
             { text = _("Rename"), callback = function()
                 local title = dialog:getInputText():match("^%s*(.-)%s*$")
                 if title == "" then self:_showInfo(_("Notebook name can’t be empty.")); return end
@@ -2187,7 +2187,7 @@ function Editor:showMore()
     -- absent, not disabled, without it.
     local send_row
     if self.send_notebook and self.can_send() then
-        send_row = {{ text = _("Send…"), enabled = self.snapshot.state ~= "loading",
+        send_row = {{ no_refresh_checkmark = true, text = _("Send…"), enabled = self.snapshot.state ~= "loading",
             callback = function()
                 self:_closeModal(dialog)
                 self.send_notebook(self.notebook, self)
@@ -2203,39 +2203,39 @@ function Editor:showMore()
     dialog = ButtonDialog:new{
         title = _("More"),
         buttons = present{
-            {{ text = _("Go to page…"), enabled = self.snapshot.can_navigate,
+            {{ no_refresh_checkmark = true, text = _("Go to page…"), enabled = self.snapshot.can_navigate,
                 callback = function() self:_closeModal(dialog); self:showGoToPage() end }},
-            {{ text = _("Add page at end"),
+            {{ no_refresh_checkmark = true, text = _("Add page at end"),
                 enabled = self:_actionAvailability("add", self.snapshot),
                 callback = function() self:_closeModal(dialog); self:_runDomain("add") end }},
-            {{ text = _("Pen settings"), callback = function()
+            {{ no_refresh_checkmark = true, text = _("Pen settings"), callback = function()
                 self:_closeModal(dialog); self:showPenSettings()
             end }},
-            {{ text = _("Paper style"), enabled = writable, callback = function()
+            {{ no_refresh_checkmark = true, text = _("Paper style"), enabled = writable, callback = function()
                 self:_closeModal(dialog); self:showPaperStyle()
             end }},
-            {{ text = _("Export…"), enabled = self.snapshot.state ~= "loading",
+            {{ no_refresh_checkmark = true, text = _("Export…"), enabled = self.snapshot.state ~= "loading",
                 callback = function() self:_closeModal(dialog); self:showExport() end }},
             send_row or false,
-            {{ text = _("Rename"), enabled = writable, callback = function()
+            {{ no_refresh_checkmark = true, text = _("Rename"), enabled = writable, callback = function()
                 self:_closeModal(dialog); self:showRename()
             end }},
-            {{ text = _("Drawing refresh"), callback = function()
+            {{ no_refresh_checkmark = true, text = _("Drawing refresh"), callback = function()
                 self:_closeModal(dialog); self:showDrawingRefresh()
             end }},
-            {{ text = _("Input mode"), callback = function()
+            {{ no_refresh_checkmark = true, text = _("Input mode"), callback = function()
                 self:_closeModal(dialog); self:showInputMode()
             end }},
-            {{ text = _("Stylus diagnostics"), callback = function()
+            {{ no_refresh_checkmark = true, text = _("Stylus diagnostics"), callback = function()
                 self:_closeModal(dialog)
                 self.show_stylus_diagnostics()
             end }},
-            {{ text = _("Delete page"), enabled = writable and self.snapshot.page_count > 1,
+            {{ no_refresh_checkmark = true, text = _("Delete page"), enabled = writable and self.snapshot.page_count > 1,
                 callback = function() self:_closeModal(dialog); self:confirmDeletePage() end }},
-            {{ text = _("Delete notebook"), enabled = writable, callback = function()
+            {{ no_refresh_checkmark = true, text = _("Delete notebook"), enabled = writable, callback = function()
                 self:_closeModal(dialog); self:confirmDeleteNotebook()
             end }},
-            {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }},
+            {{ no_refresh_checkmark = true, text = _("Close"), callback = function() self:_closeModal(dialog) end }},
         },
     }
     return self:showModalSafely(dialog)
@@ -2359,7 +2359,7 @@ function Editor:showInputMode()
                 callback = function() choose("stylus") end }},
             {{ text = _("Finger"), no_refresh_checkmark = true, checked_func = function() return current == "finger" end,
                 callback = function() choose("finger") end }},
-            {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }},
+            {{ no_refresh_checkmark = true, text = _("Close"), callback = function() self:_closeModal(dialog) end }},
         },
     }
     return self:showModalSafely(dialog)
@@ -2446,7 +2446,7 @@ function Editor:showPaperStyle()
                 callback = function() choose("ruled_narrow") end }},
             {{ text = _("Checklist"), no_refresh_checkmark = true, checked_func = function() return current == "checklist" end,
                 callback = function() choose("checklist") end }},
-            {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }},
+            {{ no_refresh_checkmark = true, text = _("Close"), callback = function() self:_closeModal(dialog) end }},
         },
     }
     return self:showModalSafely(dialog)

@@ -84,7 +84,8 @@ function ShapeDialog.rows(opts)
         end
         if #line > 0 then rows[#rows + 1] = line end
     end
-    rows[#rows + 1] = {{ text = _("Close"), callback = function() opts.close(dialog_ref.dialog) end }}
+    rows[#rows + 1] = {{ text = _("Close"), no_refresh_checkmark = true,
+        callback = function() opts.close(dialog_ref.dialog) end }}
     return rows
 end
 

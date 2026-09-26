@@ -555,12 +555,12 @@ function LocalSend.send(opts)
             #items), #items) .. "\n"
             .. _("PDF is a picture of each page. Xournal++ keeps every stroke editable; some pen styles and papers are approximated."),
         buttons = {
-            {{ text = _("PDF"), callback = function()
+            {{ no_refresh_checkmark = true, text = _("PDF"), callback = function()
                 flow.chosen = true
                 opts.close_modal(dialog)
                 start("pdf")
             end }},
-            {{ text = _("Xournal++"), callback = function()
+            {{ no_refresh_checkmark = true, text = _("Xournal++"), callback = function()
                 flow.chosen = true
                 opts.close_modal(dialog)
                 -- What Xournal++ approximates, once for the whole send.
@@ -575,7 +575,7 @@ function LocalSend.send(opts)
                 }
                 opts.show_modal(box)
             end }},
-            {{ text = _("Cancel"), callback = function()
+            {{ no_refresh_checkmark = true, text = _("Cancel"), callback = function()
                 opts.close_modal(dialog)
             end }},
         },
