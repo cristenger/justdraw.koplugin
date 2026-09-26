@@ -83,6 +83,18 @@ return function(ctx)
         t:eq(controller:activeSession(), second_session, "only second remains")
     end)
 
+    t:case("a durable commit reaches the window for the active session", function()
+        local store = support.newNotebookStore()
+        local heard = {}
+        local controller = Controller.new{ repository = store,
+            on_durable_change = function(session) heard[#heard + 1] = session end }
+        local session = controller:openNotebook(1)
+        session:surface():addStroke({ 1, 1, 2, 2 }, 2, 4, 1)
+        t:eq(controller:onFlushSettings(), true, "committed")
+        t:check(#heard >= 1, "the window heard the commit")
+        t:eq(heard[1], session, "for the session that is open")
+    end)
+
     t:case("a failed active flush does not close or replace the session", function()
         local store = support.newNotebookStore()
         local second = store:createNotebook{

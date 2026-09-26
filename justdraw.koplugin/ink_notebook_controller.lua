@@ -395,10 +395,12 @@ function Controller:openNotebook(id)
             if self.on_library_changed then self.on_library_changed(self) end
             self:schedulePurge()
         end,
-        on_durable_change = function()
+        -- The session passes itself: `session` is not yet in scope inside
+        -- its own constructor table (it read as a nil global before).
+        on_durable_change = function(active)
             if self.on_library_changed then self.on_library_changed(self) end
-            if self.on_durable_change and self.active_session == session then
-                self.on_durable_change(session, self)
+            if self.on_durable_change and active ~= nil and self.active_session == active then
+                self.on_durable_change(active, self)
             end
         end,
         on_maintenance_needed = function() self:schedulePurge() end,

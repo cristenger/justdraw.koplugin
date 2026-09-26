@@ -59,6 +59,10 @@ function Card:_freeImage()
     self.image = nil
 end
 
+local function faces()
+    return Font:getFace("cfont", 18), Font:getFace("cfont", 14)
+end
+
 local function rect(bb, x, y, w, h, color)
     if w > 0 and h > 0 then bb:paintRect(x, y, w, h, color) end
 end
@@ -114,10 +118,6 @@ function Card:_paintPicture(bb, x, y)
         text(bb, self.failed_text or "?", x + self.pad, y + math.floor(h / 2) - 10,
             w - 2 * self.pad, face)
     end
-end
-
-local function faces()
-    return Font:getFace("cfont", 18), Font:getFace("cfont", 14)
 end
 
 --- The height of the two lines under a card's picture, measured with the

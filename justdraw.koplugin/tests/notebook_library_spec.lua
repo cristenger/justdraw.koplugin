@@ -977,6 +977,10 @@ return function(ctx)
         local card = library.cards[2]
         thumbs.wanted[1].cb(nil, card.thumb_key, "disk_full")
         t:eq(card.image_state, "failed", "failed")
+        -- Painted, not just flagged: the placeholder is drawn inside
+        -- KOReader's repaint loop, where an error is a crash.
+        local ok, err = pcall(card.paintTo, card, ctx.env.Device.screen.bb, 0, 0)
+        t:check(ok, "a failed card paints its placeholder: " .. tostring(err))
         local dialog = library:showActions(card.item, card)
         local retry
         for _, row in ipairs(dialog.buttons) do
