@@ -2398,6 +2398,7 @@ for _, spec in ipairs({
     "style_spec",
     "tool_state_spec",
     "i18n_spec",
+    "i18n_catalog_spec",
     "compat_spec",
     "conformance_policy_spec",
     "stylus_sequence_spec",

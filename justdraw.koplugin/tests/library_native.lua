@@ -30,6 +30,9 @@ local PROFILES = {
     { name = "kpw-portrait", w = 1072, h = 1448, dpi = 300, cols = 2 },
     { name = "scribe-portrait", w = 1860, h = 2480, dpi = 300, cols = 3 },
     { name = "scribe-landscape", w = 2480, h = 1860, dpi = 300, cols = 4 },
+    -- Spanish, on the narrowest screen: longer labels, and the selection
+    -- header's folding into More, read in the language that makes it longest.
+    { name = "basic-portrait-es", w = 600, h = 800, dpi = 160, cols = 2, lang = "es" },
 }
 
 local function quote(value)
@@ -58,6 +61,7 @@ if not os.getenv("JUSTDRAW_LIBRARY_PROFILE") then
             "EMULATE_READER_H=" .. profile.h,
             "EMULATE_READER_DPI=" .. profile.dpi,
             "JUSTDRAW_LIBRARY_PROFILE=" .. quote(profile.name),
+            "JUSTDRAW_LIBRARY_LANG=" .. quote(profile.lang or "C"),
             "./luajit", quote(this), ">", quote(log), "2>&1",
         }, " "))
         local file = io.open(log, "r")
@@ -95,6 +99,8 @@ package.path = root .. "/?.lua;" .. package.path
 _G.G_defaults = require("luadefaults"):open()
 _G.G_reader_settings = require("luasettings"):open(home .. "/settings.reader.lua")
 G_reader_settings:saveSetting("flash_ui", false)
+local lang = os.getenv("JUSTDRAW_LIBRARY_LANG") or "C"
+if lang ~= "C" then require("gettext").changeLang(lang) end
 
 local Device = require("device")
 require("document/canvascontext"):init(Device)
@@ -274,6 +280,26 @@ tapAt(library, library.cards[1].dimen.x + 5, library.cards[1].dimen.y + 5)
 drain()
 check(library.folder == nil, "Back returns")
 paint(library)
+
+if lang == "es" then
+    -- The plugin's own catalogue answers, not the source text.
+    check(library.header_buttons[1].text == "Nuevo cuaderno",
+        "the header is in Spanish: " .. tostring(library.header_buttons[1].text))
+    library:setSelecting(true)
+    paint(library)
+    local labels = {}
+    for _, b in ipairs(library.header_buttons) do
+        labels[#labels + 1] = b.text
+        check(b.dimen.x + b.dimen.w <= W, "selection action " .. b.text .. " on screen")
+        check(b.dimen.w >= Layout.physicalPixels(20) - 2, b.text .. " keeps its target width")
+    end
+    print("BENCH selection header: " .. table.concat(labels, " | ")
+        .. "  (More: " .. table.concat(library.header_more, ", ") .. ")")
+    check(labels[#labels] == "Hecho", "Done stays on the row")
+    bb:writePNG(home .. "/library-select.png")
+    library:setSelecting(false)
+    paint(library)
+end
 
 -- ------------------------------------------------------------ thumbnails
 

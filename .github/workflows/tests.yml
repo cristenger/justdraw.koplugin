@@ -30,6 +30,32 @@ jobs:
           luajit test.lua | tee result.txt
           grep -q '0 failed' result.txt
 
+  # The translation catalogues (Task 12.2): the template must be what GNU
+  # xgettext makes of today's sources, and every catalogue must pass msgfmt's
+  # own checks. The suite's i18n_catalog_spec covers placeholders, plurals and
+  # completeness on bare LuaJIT; this adds the GNU tools' verdict. Pinned to
+  # ubuntu-24.04 for gettext 0.21, the version the template is generated with.
+  catalogue:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install gettext
+        run: sudo apt-get update && sudo apt-get install -y gettext
+
+      - name: Template is current
+        run: |
+          xgettext --version | head -1
+          tools/extract_strings --check
+
+      - name: Catalogues pass msgfmt
+        run: |
+          set -e
+          for po in justdraw.koplugin/l10n/*.po; do
+            msgfmt --check --statistics -o /dev/null "$po"
+            msgcmp "$po" justdraw.koplugin/l10n/justdraw.pot
+          done
+
   # Its own job so the suite above stays fast and does not wait on an apt-get
   # of poppler. These two checks were deferred precisely because they need
   # tools the plugin's runtime does not have (ADR-31); here they get them.
