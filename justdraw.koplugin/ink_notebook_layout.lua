@@ -18,6 +18,9 @@ local Size = require("ui/size")
 
 local Layout = {}
 
+--- Controls in the notebook rail (U-3): the width floor is this many
+--- 10 mm targets. The height is one target and does not depend on it.
+Layout.RAIL_SLOTS = 9
 Layout.LOGICAL_UNITS_PER_MM = 8
 
 local function finite(value)
@@ -124,8 +127,10 @@ local function chrome(opts, screen)
 
     local paper_w = screen_w
     local paper_h = screen_h - info_h - target - gap
-    -- Eight controls retain the existing physical hit-target floor.
-    if screen_w < target * 8 or paper_h < target * 3 then
+    -- Nine controls keep the physical hit-target floor (ADR-54): a screen
+    -- too narrow for nine is refused here, before any editor opens, rather
+    -- than squeezing a control below 10 mm or losing Exit off the edge.
+    if screen_w < target * Layout.RAIL_SLOTS or paper_h < target * 3 then
         return nil, "no_viewport"
     end
     return {

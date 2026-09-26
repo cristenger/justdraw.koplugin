@@ -286,4 +286,34 @@ return function(ctx)
         t:eq(reason, "no_viewport", "for the same reason compute refuses")
     end)
 
+
+    t:case("a screen too narrow for nine controls refuses to open, with the reason", function()
+        ctx.reset()
+        local NotebookLayout = require("ink_notebook_layout")
+        local real = NotebookLayout.screenPage
+        NotebookLayout.screenPage = function() return nil, "no_viewport" end
+        local configured, opened = 0, 0
+        local controller = {
+            openNotebook = function() opened = opened + 1; return {} end,
+            shutdown = function() return true end,
+        }
+        local built = 0
+        local editor_factory = {}
+        function editor_factory:new(opts) built = built + 1; return opts end
+        local plugin = {
+            configureNotebookInteraction = function() configured = configured + 1; return true end,
+        }
+        local ui = NotebookUI.new{ plugin = plugin, controller = controller,
+            editor_factory = editor_factory }
+        local shown = #ctx.env.UIManager._window_stack
+        local editor, err = ui:openNotebook{ id = 1 }
+        NotebookLayout.screenPage = real
+        t:eq(editor, nil, "no editor")
+        t:eq(err, "no_viewport", "the reason")
+        t:eq(built, 0, "no editor was even built")
+        t:eq(configured, 0, "capture never changed hands")
+        t:eq(opened, 0, "the notebook was not opened")
+        t:eq(#ctx.env.UIManager._window_stack, shown + 1, "the reader is told why")
+        ui:shutdown()
+    end)
 end

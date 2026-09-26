@@ -7,6 +7,7 @@ local logger = require("logger")
 local _ = require("gettext")
 
 local Errors = require("ink_notebook_errors")
+local NotebookLayout = require("ink_notebook_layout")
 local Editor = require("ink_notebook_editor")
 local Library = require("ink_notebook_library")
 
@@ -32,6 +33,8 @@ function NotebookUI:_showLibraryError(reason)
     logger.warn("JustDraw notebooks: operation failed:", reason)
     local code = Errors.normalize(reason, "library")
     local text = code == "contact_active" and _("Lift the pen and try again.")
+        or code == "no_viewport"
+            and _("This screen is too small for the notebook controls. Rotate the device or lower the screen DPI and try again.")
         or _("Couldn’t open the notebook library.")
     if self.library and not self.library.closed then
         self.library:_showInfo(text)
@@ -161,6 +164,14 @@ function NotebookUI:openNotebook(item)
     if self.closed then return nil, "closed" end
     if self.editor then return nil, "notebook_open" end
     if type(item) ~= "table" or item.id == nil then return nil, "bad_id" end
+    -- Nine 10 mm controls must fit across (ADR-54). Refuse here, while the
+    -- library is still up to say why, instead of opening an editor with a
+    -- partial header -- or none, and no way back to Exit.
+    local fits, fit_err = NotebookLayout.screenPage()
+    if not fits then
+        self:_showLibraryError(fit_err or "no_viewport")
+        return nil, fit_err or "no_viewport"
+    end
     self.editor_generation = self.editor_generation + 1
     local generation = self.editor_generation
     -- Declare before constructing: Lua does not put a local in scope inside

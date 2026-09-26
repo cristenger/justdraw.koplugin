@@ -34,6 +34,17 @@ local PROFILES = {
         page_w = 1260, page_h = 1432 },
     { name = "scribe-landscape", w = 2480, h = 1860, dpi = 300, paper_h = 1502,
         page_w = 1680, page_h = 1012 },
+    -- The nine-control floor (ADR-54) at the densities the plan names, both
+    -- orientations. Not pinned: their shapes are measured, not promised.
+    { name = "kpw-portrait", w = 1072, h = 1448, dpi = 300 },
+    { name = "kpw-landscape", w = 1448, h = 1072, dpi = 300 },
+    { name = "voyage-portrait", w = 758, h = 1024, dpi = 212 },
+    { name = "voyage-landscape", w = 1024, h = 758, dpi = 212 },
+    { name = "basic-portrait", w = 600, h = 800, dpi = 167 },
+    { name = "basic-landscape", w = 800, h = 600, dpi = 167 },
+    -- A reader who raised KOReader's DPI setting: nine 10 mm targets no
+    -- longer fit 600 px, and the notebook must refuse to open, not squeeze.
+    { name = "user-dpi-narrow", w = 600, h = 800, dpi = 160, user_dpi = 220, refuses = true },
 }
 
 local function quote(value)
@@ -61,6 +72,7 @@ if not os.getenv("JUSTDRAW_TOOLBAR_PROFILE") then
             "EMULATE_READER_W=" .. profile.w,
             "EMULATE_READER_H=" .. profile.h,
             "EMULATE_READER_DPI=" .. profile.dpi,
+            "JUSTDRAW_TOOLBAR_USER_DPI=" .. tostring(profile.user_dpi or ""),
             "JUSTDRAW_TOOLBAR_PROFILE=" .. quote(profile.name),
             "./luajit", quote(this), ">", quote(log), "2>&1",
         }, " "))
@@ -100,6 +112,8 @@ _G.G_reader_settings = require("luasettings"):open(home .. "/settings.reader.lua
 -- No highlight dance: the dummy screen has nothing to flash, and the callback
 -- is what is under test.
 G_reader_settings:saveSetting("flash_ui", false)
+local user_dpi = tonumber(os.getenv("JUSTDRAW_TOOLBAR_USER_DPI"))
+if user_dpi then G_reader_settings:saveSetting("screen_dpi", user_dpi) end
 
 local Device = require("device")
 require("document/canvascontext"):init(Device)
@@ -169,10 +183,48 @@ local pinned_page
 for _, entry in ipairs(PROFILES) do
     if entry.name == profile then pinned_page = entry end
 end
+
+-- The nine-control floor, measured with the real Layout at this density:
+-- one pixel under nine targets refuses, exactly nine fits (ADR-54).
+local Size_item = Size.item and Size.item.height_large or 0
+local target = math.max(Layout.physicalPixels(10), Size_item)
+check(Layout.RAIL_SLOTS == 9, "the rail has nine slots")
+local below = Layout.compute{ screen_w = target * 9 - 1, screen_h = H,
+    logical_w = 800, logical_h = 1000 }
+check(below == nil, ("%d px (one under nine %d px targets) is refused"):format(target * 9 - 1, target))
+if H - target * 4 > 0 then
+    local at = Layout.compute{ screen_w = target * 9, screen_h = H,
+        logical_w = 800, logical_h = 1000 }
+    check(at ~= nil, ("%d px (exactly nine targets) fits"):format(target * 9))
+    check(at == nil or at.target_size == target, "and keeps the 10 mm target")
+end
+
+if pinned_page.refuses then
+    check(W < target * 9, "this profile really is too narrow for nine targets")
+    local born, born_err = Layout.screenPage()
+    check(born == nil and born_err == "no_viewport", "no page shape on a screen that cannot hold the rail")
+    local NotebookUI = require("ink_notebook_ui")
+    local built = 0
+    local ui = NotebookUI.new{
+        plugin = { configureNotebookInteraction = function() return true end },
+        controller = { openNotebook = function() return {} end, shutdown = function() return true end },
+        editor_factory = { new = function() built = built + 1; return {} end },
+    }
+    local editor, err = ui:openNotebook{ id = 1 }
+    check(editor == nil and err == "no_viewport", "the library refuses to open the notebook")
+    check(built == 0, "no partial editor was built")
+    ui:shutdown()
+    print("TOP_TOOLBAR_NATIVE_OK " .. profile .. " " .. W .. "x" .. H .. " checks=" .. checks)
+    os.exit(0)
+end
+
 local born = assert(Layout.screenPage())
-check(born.logical_w == pinned_page.page_w and born.logical_h == pinned_page.page_h,
-    ("a new notebook page is stored %dx%d, got %dx%d")
-        :format(pinned_page.page_w, pinned_page.page_h, born.logical_w, born.logical_h))
+if pinned_page.page_w then
+    check(born.logical_w == pinned_page.page_w and born.logical_h == pinned_page.page_h,
+        ("a new notebook page is stored %dx%d, got %dx%d")
+            :format(pinned_page.page_w, pinned_page.page_h, born.logical_w, born.logical_h))
+end
+print(("MEASURED %s page %dx%d target %d"):format(profile, born.logical_w, born.logical_h, target))
 local page = { id = 1, logical_w = born.logical_w, logical_h = born.logical_h }
 local snapshot = {
     state = "ready", writable = true, can_ink = true, can_undo = true, can_close = true,
@@ -199,7 +251,17 @@ bb:fill(BB.COLOR_WHITE)
 editor:paintTo(bb, 0, 0)
 
 local geometry = editor.layout_geometry
-check(#editor.layout == 1 and #editor.layout[1] == 8, "notebook focus is one row of eight")
+check(#editor.layout == 1 and #editor.layout[1] == 9, "notebook focus is one row of nine")
+local seen_icons = {}
+for i, button in ipairs(editor.layout[1]) do seen_icons[i] = button.icon end
+check(table.concat(seen_icons, ",") == "exit,pen,eraser,edit,undo,redo,previous,next,more",
+    "the rail's order (U-3): " .. table.concat(seen_icons, ","))
+for i = 2, #editor.layout[1] do
+    local a, b = editor.layout[1][i - 1].dimen, editor.layout[1][i].dimen
+    check(a.x + a.w <= b.x, "control " .. i .. " does not overlap its neighbour")
+end
+check(editor.layout[1][9].dimen.x + editor.layout[1][9].dimen.w <= W, "More is on screen")
+check(editor.layout[1][6].enabled == false, "Redo is disabled with nothing to redo")
 for _, entry in ipairs(editor.control_entries) do
     local size = entry.widget:getSize()
     check(size.w <= entry.rect.w and size.h <= entry.rect.h, "notebook button fits its slot")
@@ -227,6 +289,22 @@ check(W - transform.draw_w > -0.001 and W - transform.draw_w < 1,
     ("the page has no right strip, got %.3f px"):format(W - transform.draw_w))
 check(transform.offset_y == paper.y and fit.h - transform.draw_h > -0.001,
     "the page starts at the paper and does not overrun it")
+
+-- Next on the last page of a writable notebook shows that it adds a page.
+snapshot.has_next = false
+editor:_refreshSnapshot()
+editor:_rebuildControls()
+check(editor.layout[1][8].icon == "next-add", "Next shows next-add on the last page")
+checkIcon(editor.layout[1][8], "notebook")
+for _, name in ipairs({ "lasso", "shape", "paste" }) do
+    local file = require("ink_tool_button").iconPath(name)
+    check(lfs.attributes(file, "mode") == "file", name .. " icon ships")
+end
+snapshot.has_next = true
+editor:_refreshSnapshot()
+editor:_rebuildControls()
+bb:fill(BB.COLOR_WHITE)
+editor:paintTo(bb, 0, 0)
 
 local pen, eraser = editor.layout[1][2], editor.layout[1][3]
 local px, py = markPoint(pen)
@@ -295,8 +373,8 @@ local pinned
 for _, entry in ipairs(PROFILES) do
     if entry.name == profile then pinned = entry.paper_h end
 end
-check(paper_w == W and paper_h == pinned, ("a new sheet is stored %dx%s, got %dx%d")
-    :format(W, tostring(pinned), paper_w, paper_h))
+check(paper_w == W and (pinned == nil or paper_h == pinned),
+    ("a new sheet is stored %dx%s, got %dx%d"):format(W, tostring(pinned), paper_w, paper_h))
 check(overlay.height_pct == 100
     and paper_h == H - overlay:handleRect().h - overlay.bar.dimen.h,
     "the stored height is what the painted header leaves")

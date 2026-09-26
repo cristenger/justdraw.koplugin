@@ -82,6 +82,12 @@ function Transform.new(opts)
     local scale_w, scale_h = fit.w / lw, fit.h / lh
     local scale = scale_w < scale_h and scale_w or scale_h
     local draw_w, draw_h = lw * scale, lh * scale
+    -- `lw * (fit.w / lw)` can land a rounding error above fit.w, and centring
+    -- then floors -epsilon/2 to a whole pixel: a page shaped like its paper
+    -- was drawn one pixel left of the screen at 212 dpi. A draw size within
+    -- a millionth of a pixel of the fit is the fit.
+    if draw_w > fit.w and draw_w - fit.w < 1e-6 then draw_w = fit.w end
+    if draw_h > fit.h and draw_h - fit.h < 1e-6 then draw_h = fit.h end
 
     local align_x = opts.align_x or "center"
     local align_y = opts.align_y or "top"

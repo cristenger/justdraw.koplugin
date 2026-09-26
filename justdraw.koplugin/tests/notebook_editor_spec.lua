@@ -31,6 +31,7 @@ return function(ctx)
             return self.close_ok and true or nil, self.close_ok and nil or "commit_failed"
         end
         function controller:undo() self.calls[#self.calls + 1] = "undo"; return {} end
+        function controller:redo() self.calls[#self.calls + 1] = "redo"; return {} end
         function controller:goPrevious() self.calls[#self.calls + 1] = "previous"; return true end
         function controller:goNext() self.calls[#self.calls + 1] = "next"; return true end
         function controller:goToPagePosition(position)
@@ -1969,6 +1970,7 @@ return function(ctx)
     t:case("top tools keep actions, selection and error recovery out of the lower edge", function()
         ctx.reset()
         local editor, controller, snapshot = newEditor()
+        snapshot.has_next = false
         editor:_refreshSnapshot()
         editor:_rebuildControls()
         local paper = editor.layout_geometry.paper_rect
@@ -1979,8 +1981,14 @@ return function(ctx)
         t:eq(editor.layout[1][2].icon, "pen", "pen has a dedicated icon")
         t:eq(editor.layout[1][3].icon, "eraser", "eraser is not a delete symbol")
         t:eq(editor.layout[1][2].tool_selected, true, "pen selection is persistent")
-        editor.layout[1][7].callback()
-        t:eq(controller.calls[1], "add", "add retains append-at-end controller semantics")
+        t:eq(#editor.layout[1], 9, "nine controls (ADR-54)")
+        local icons = {}
+        for i, b in ipairs(editor.layout[1]) do icons[i] = b.icon end
+        t:eq(table.concat(icons, ","),
+            "exit,pen,eraser,edit,undo,redo,previous,next-add,more",
+            "in the rail's order, Next showing that it adds on the last page")
+        editor.layout[1][8].callback()
+        t:eq(controller.calls[1], "add", "Next on the last page keeps append-at-end semantics")
         snapshot.error_code = "page_save_failed"
         snapshot.state = "save_failed"
         editor:_refreshSnapshot()
@@ -1991,4 +1999,92 @@ return function(ctx)
             "error region is excluded from ink")
     end)
 
+
+    t:describe("standalone notebooks / nine-control rail")
+
+    t:case("Redo follows the snapshot and runs the controller's redo", function()
+        ctx.reset()
+        local editor, controller, snapshot = newEditor()
+        snapshot.can_redo = false
+        editor:_refreshSnapshot()
+        editor:_rebuildControls()
+        local redo = editor.layout[1][6]
+        t:eq(redo.icon, "redo", "the sixth control is Redo")
+        t:eq(redo.enabled, false, "disabled with nothing to redo")
+        snapshot.can_redo = true
+        editor:_refreshSnapshot()
+        editor:_rebuildControls()
+        editor.layout[1][6].callback()
+        t:eq(controller.calls[#controller.calls], "redo", "redo ran")
+    end)
+
+    t:case("Next turns the page when there is one and adds one only on the last", function()
+        ctx.reset()
+        local editor, controller, snapshot = newEditor()
+        editor:_refreshSnapshot()
+        editor:_rebuildControls()
+        t:eq(editor.layout[1][8].icon, "next", "a next page exists")
+        editor.layout[1][8].callback()
+        t:eq(controller.calls[#controller.calls], "next", "turned")
+        snapshot.has_next = false
+        snapshot.writable = false
+        editor:_refreshSnapshot()
+        editor:_rebuildControls()
+        t:eq(editor.layout[1][8].icon, "next", "a read-only notebook never offers to add")
+        t:eq(editor.layout[1][8].enabled, false, "and Next is a boundary there")
+        snapshot.writable = true
+        snapshot.can_navigate = false
+        snapshot.navigation_block_reason = "transition_pending"
+        editor:_refreshSnapshot()
+        local before = #controller.calls
+        editor:_runDomain("next")
+        t:eq(#controller.calls, before, "no second page while the first is still settling")
+    end)
+
+    t:case("the Edit menu offers only the tools that are wired", function()
+        ctx.reset()
+        local editor = newEditor()
+        editor:_refreshSnapshot()
+        editor:_rebuildControls()
+        t:eq(editor.layout[1][4].icon, "edit", "Edit shows its own glyph with no editing tool")
+        local shown
+        editor.showModalSafely = function(_, dialog) shown = dialog; return true end
+        editor:showEditMenu()
+        t:check(shown ~= nil, "a menu")
+        local rows = shown.buttons
+        t:eq(#rows, 4, "Lasso, Shapes, Paste and Close")
+        t:eq(rows[4][1].text, "Close", "Close last")
+        for i = 1, 3 do
+            t:eq(rows[i][1].enabled, false, "row " .. i .. " disabled until its tool is wired")
+            t:eq(rows[i][1].no_refresh_checkmark, true, "row " .. i .. " closes without repainting")
+        end
+        local tool = "pen"
+        editor.get_tool = function() return tool end
+        editor.set_tool = function(v) tool = v end
+        editor.edit_tools_ready = function() return true end
+        editor.showModalSafely = function(_, dialog) shown = dialog; return true end
+        editor:showEditMenu()
+        t:eq(shown.buttons[3][1].enabled, false, "Paste stays disabled with an empty clipboard")
+        shown.buttons[1][1].callback()
+        t:eq(tool, "select", "Lasso selects the lasso tool")
+        t:eq(editor.layout[1][4].icon, "lasso", "Edit shows the active tool")
+        t:eq(editor.layout[1][4].tool_selected, true, "with the selection mark")
+        t:eq(editor.layout[1][2].tool_selected, false, "the pen is no longer marked")
+    end)
+
+    t:case("Add page at end moved to More", function()
+        ctx.reset()
+        local editor, controller = newEditor()
+        editor:_refreshSnapshot()
+        local shown
+        editor.showModalSafely = function(_, dialog) shown = dialog; return true end
+        editor:showMore()
+        local found
+        for _, row in ipairs(shown.buttons) do
+            if row[1].text == "Add page at end" then found = row[1] end
+        end
+        t:check(found ~= nil, "More has Add page at end")
+        found.callback()
+        t:eq(controller.calls[#controller.calls], "add", "and it appends")
+    end)
 end

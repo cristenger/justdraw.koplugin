@@ -63,6 +63,18 @@ function Editor:init()
     self.notebook = assert(self.notebook)
     self.get_eraser = self.get_eraser or function() return false end
     self.set_eraser = self.set_eraser or function() end
+    -- The tool is one name (ADR-54). A host that only knows the eraser
+    -- boolean still works: every editing tool reads as the pen there.
+    self.get_tool = self.get_tool or function()
+        return self.get_eraser() and "eraser" or "pen"
+    end
+    self.set_tool = self.set_tool or function(name)
+        self.set_eraser(name == "eraser")
+    end
+    --- Which editing tools are wired on this build: an Edit row for a tool
+    --- whose controller is absent is shown disabled, never half-working.
+    self.edit_tools_ready = self.edit_tools_ready or function() return false end
+    self.clipboard_has_content = self.clipboard_has_content or function() return false end
     self.get_input_mode = self.get_input_mode or function() return "auto" end
     self.set_input_mode = self.set_input_mode or function() return true end
     self.get_pen_width = self.get_pen_width or function() return 4 end
@@ -919,9 +931,16 @@ function Editor:_button(text, enabled, callback, rect, help_text, checked_func)
     return button
 end
 
+--- The rail's controls, left to right (U-3, ADR-54). Adding a page moved
+--- to Next on the last page and to More; the height did not change.
+Editor.RAIL = { "exit", "pen", "eraser", "edit", "undo", "redo", "previous", "next", "more" }
+
+--- The Edit control's glyph for the tool that is active.
+local EDIT_ICON = { select = "lasso", shape = "shape", paste = "paste" }
+
 function Editor:_railRects()
     local rail = self.layout_geometry.rail_rect
-    local names = { "exit", "pen", "eraser", "undo", "previous", "next", "add", "more" }
+    local names = Editor.RAIL
     local rects = {}
     for i, name in ipairs(names) do
         local left = math.floor((i - 1) * rail.w / #names)
@@ -941,41 +960,49 @@ function Editor:_rebuildControls()
     local rects = self:_railRects()
     local exit = self:_button(_("Exit notebook"), snapshot.can_close,
         function() self:requestClose() end, rects.exit)
+    local tool = self.get_tool()
     local pen_label = PenDialog.label(Style.resolve(self.get_raw_pen_style(), nil, true),
         self.get_pen_width())
-    local pen = self:_button(pen_label .. (self.get_eraser() and "" or Button.checkmark),
+    local pen = self:_button(pen_label .. (tool == "pen" and Button.checkmark or ""),
         snapshot.can_ink, function()
-            if not self.get_eraser() then self:showPenSettings()
-            else self.set_eraser(false); self:onPenSettingsChanged() end
+            if self.get_tool() == "pen" then self:showPenSettings()
+            else self:setTool("pen"); self:onPenSettingsChanged() end
         end, rects.pen, pen_label .. "\n"
             .. _("Tap the selected pen to change its style and width."))
-    ToolButton.decorate(pen, "pen", not self.get_eraser(), pen_label)
+    ToolButton.decorate(pen, "pen", tool == "pen", pen_label)
     local eraser = self:_button(_("Eraser"), snapshot.can_ink,
-        function() self.set_eraser(true); self:_rebuildControls(); self:_dirtyRail() end,
-        rects.eraser)
-    ToolButton.decorate(eraser, "eraser", self.get_eraser(), _("Eraser"))
+        function() self:setTool("eraser") end, rects.eraser)
+    ToolButton.decorate(eraser, "eraser", tool == "eraser", _("Eraser"))
+    local edit_label = self:_editLabel(tool)
+    local edit = self:_button(edit_label, snapshot.can_ink,
+        function() self:showEditMenu() end, rects.edit)
+    ToolButton.decorate(edit, EDIT_ICON[tool] or "edit", EDIT_ICON[tool] ~= nil, edit_label)
     -- Enabled state and the domain gate come from one function, so a control
     -- can look wrong only for as long as the snapshot behind it is stale --
     -- and never disagree about what would happen if it were pressed.
     local undo = self:_button(_("Undo"), self:_actionAvailability("undo", snapshot),
         function() self:_runDomain("undo") end, rects.undo)
+    local redo = self:_button(_("Redo"), self:_actionAvailability("redo", snapshot),
+        function() self:_runDomain("redo") end, rects.redo)
     local previous = self:_button(_("Previous page"),
         self:_actionAvailability("previous", snapshot),
         function() self:_runDomain("previous") end, rects.previous)
-    local next_button = self:_button(_("Next page"),
+    -- On the last page of a writable notebook, Next adds a page and goes to
+    -- it; its glyph says so before it is pressed.
+    local adds = self:_nextAdds(snapshot)
+    local next_label = adds and _("Add page at end") or _("Next page")
+    local next_button = self:_button(next_label,
         self:_actionAvailability("next", snapshot),
         function() self:_runDomain("next") end, rects.next)
-    local add = self:_button(_("Add page at end"), self:_actionAvailability("add", snapshot),
-        function() self:_runDomain("add") end, rects.add)
     local more = self:_button(_("More"), snapshot.state ~= "loading",
         function() self:showMore() end, rects.more)
     ToolButton.decorate(exit, "exit", false, _("Exit notebook"))
     ToolButton.decorate(more, "more", false, _("More"))
     ToolButton.decorate(undo, "undo", false, _("Undo"))
+    ToolButton.decorate(redo, "redo", false, _("Redo"))
     ToolButton.decorate(previous, "previous", false, _("Previous page"))
-    ToolButton.decorate(next_button, "next", false, _("Next page"))
-    ToolButton.decorate(add, "add", false, _("Add page at end"))
-    self.layout = {{ exit, pen, eraser, undo, previous, next_button, add, more }}
+    ToolButton.decorate(next_button, adds and "next-add" or "next", false, next_label)
+    self.layout = {{ exit, pen, eraser, edit, undo, redo, previous, next_button, more }}
 
     local error = self.interactive_regions.error_band
     if error then
@@ -1007,6 +1034,71 @@ function Editor:_rebuildControls()
     if self.shown and self.refocusWidget then self:refocusWidget() end
 end
 
+--- Whether Next would add a page rather than turn one.
+function Editor:_nextAdds(snapshot)
+    snapshot = snapshot or self.snapshot
+    return snapshot ~= nil and not snapshot.has_next and snapshot.writable == true
+        and snapshot.can_navigate == true
+end
+
+function Editor:_editLabel(tool)
+    if tool == "select" then return _("Lasso") end
+    if tool == "shape" then return _("Shapes") end
+    if tool == "paste" then return _("Paste") end
+    return _("Edit")
+end
+
+--[[--
+Change the tool from this window. Anything the old tool left pending -- a
+selection, a placement -- ends first (§D.6.6); the host's observer does the
+rest. Then the rail is rebuilt, since three of its glyphs follow the tool.
+]]
+function Editor:setTool(name)
+    self.set_tool(name)
+    if self.closed then return end
+    self:_rebuildControls()
+    self:_dirtyRail()
+end
+
+--[[--
+Edit: Lasso, Shapes and Paste (U-3). Each row closes the menu; a row whose tool
+is not wired yet, or Paste with nothing copied, is shown disabled rather than
+offered and then refused.
+]]
+function Editor:showEditMenu()
+    local dialog
+    local ready = self.edit_tools_ready
+    local tool = self.get_tool()
+    local function row(text, name, enabled, action)
+        return {{
+            text = text .. (tool == name and (" " .. Button.checkmark) or ""),
+            enabled = enabled and true or false,
+            no_refresh_checkmark = true,
+            callback = function()
+                self:_closeModal(dialog)
+                action()
+            end,
+        }}
+    end
+    dialog = ButtonDialog:new{
+        title = _("Edit"),
+        buttons = {
+            row(_("Lasso"), "select", ready("select"), function() self:setTool("select") end),
+            row(_("Shapes…"), "shape", ready("shape"), function() self:showShapeMenu() end),
+            row(_("Paste"), "paste", ready("paste") and self.clipboard_has_content(),
+                function() self:setTool("paste") end),
+            -- Like More: a way out a finger can find, besides tapping outside.
+            {{ text = _("Close"), callback = function() self:_closeModal(dialog) end }},
+        },
+    }
+    return self:showModalSafely(dialog)
+end
+
+--- Overridden in Phase 6 by the shape picker; until then Shapes is disabled.
+function Editor:showShapeMenu()
+    return nil, "unavailable"
+end
+
 function Editor:_dirtyRail()
     UIManager:setDirty(self, "ui",
         self.layout_geometry.rail_rect:combine(self.layout_geometry.info_rect))
@@ -1032,8 +1124,8 @@ The reason is a closed token: `contact_active`, `transition_pending`,
 function Editor:_actionAvailability(action, snapshot)
     snapshot = snapshot or self.snapshot
     if not snapshot then return false, "loading" end
-    if action == "undo" then
-        if snapshot.can_undo then return true end
+    if action == "undo" or action == "redo" then
+        if snapshot["can_" .. action] then return true end
         -- Undo is not gated on contact: it is unavailable when there is simply
         -- nothing to undo, and telling somebody to lift their hand would not
         -- help with that. Only a session that is not ready borrows the
@@ -1051,6 +1143,8 @@ function Editor:_actionAvailability(action, snapshot)
         return false, "boundary"
     elseif action == "next" then
         if snapshot.has_next then return true end
+        -- The last page: Next appends when the notebook can take a page.
+        if snapshot.writable then return true end
         return false, "boundary"
     elseif action == "add" then
         if snapshot.writable then return true end
@@ -1092,10 +1186,19 @@ function Editor:_runDomain(action, argument)
     local ok, err
     if action == "undo" then
         ok, err = self.controller:undo()
+    elseif action == "redo" then
+        ok, err = self.controller:redo()
     elseif action == "previous" then
         ok, err = self.controller:goPrevious()
     elseif action == "next" then
-        ok, err = self.controller:goNext()
+        if snapshot.has_next then
+            ok, err = self.controller:goNext()
+        else
+            -- One append per press: the snapshot is refreshed above, and an
+            -- append that is still settling reports transition_pending, so
+            -- a double tap cannot add two pages.
+            ok, err = self.controller:appendPage()
+        end
     elseif action == "add" then
         ok, err = self.controller:appendPage()
     elseif action == "goto" then
@@ -1654,6 +1757,9 @@ function Editor:showMore()
         buttons = {
             {{ text = _("Go to page…"), enabled = self.snapshot.can_navigate,
                 callback = function() self:_closeModal(dialog); self:showGoToPage() end }},
+            {{ text = _("Add page at end"),
+                enabled = self:_actionAvailability("add", self.snapshot),
+                callback = function() self:_closeModal(dialog); self:_runDomain("add") end }},
             {{ text = _("Pen settings"), callback = function()
                 self:_closeModal(dialog); self:showPenSettings()
             end }},

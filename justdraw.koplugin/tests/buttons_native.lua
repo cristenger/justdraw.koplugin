@@ -1779,7 +1779,10 @@ else
 
             if editor() then
                 local function rail(i) return editor().layout[1][i] end
-                local EXIT, PEN, ERASER, UNDO, PREV, NEXT, ADD, MORE = 1, 2, 3, 4, 5, 6, 7, 8
+                -- The nine-control rail (U-3, ADR-54). Adding a page is Next on
+                -- the last page, or More > Add page at end.
+                local EXIT, PEN, ERASER, EDIT, UNDO, REDO, PREV, NEXT, MORE =
+                    1, 2, 3, 4, 5, 6, 7, 8, 9
 
                 case("Notebook editor: Eraser selects the eraser, Pen gives it back", function()
                     tap(rail(ERASER))
@@ -1791,8 +1794,8 @@ else
                 end)
 
                 case("Notebook editor: a hold on every icon names it", function()
-                    expect(iconsNameThemselves(editor(), "the notebook rail") == 8,
-                        "the rail is not eight icons")
+                    expect(iconsNameThemselves(editor(), "the notebook rail") == 9,
+                        "the rail is not nine icons")
                     settled("holds")
                 end)
 
@@ -1808,18 +1811,32 @@ else
                     tick(4)
                     expect(editor().snapshot.can_undo, "the stroke gave nothing to undo")
                     expect(rail(UNDO).enabled, "Undo is still disabled after a stroke")
+                    expect(rail(REDO).enabled == false, "Redo is enabled before any undo")
                     tap(rail(UNDO))
                     tick(4)
                     expect(not editor().snapshot.can_undo, "Undo left something to undo")
-                    settled("notebook Undo")
+                    expect(editor().snapshot.can_redo, "Undo gave nothing to redo")
+                    expect(rail(REDO).enabled, "Redo is still disabled after Undo")
+                    tap(rail(REDO))
+                    tick(4)
+                    expect(editor().snapshot.can_undo, "Redo did not bring the stroke back")
+                    expect(not editor().snapshot.can_redo, "Redo left something to redo")
+                    tap(rail(UNDO))
+                    tick(4)
+                    settled("notebook Undo/Redo")
+                end)
+
+                case("Notebook editor: Edit opens its menu, and Close leaves it", function()
+                    roundTrip("Edit", function() tap(rail(EDIT)) end)
                 end)
 
                 case("Notebook editor: page buttons -- Add, Previous, Next, and the edges", function()
                     local s = editor().snapshot
                     expect(s.page_count == 1, "a new notebook has %d pages", s.page_count)
-                    expect(rail(PREV).enabled == false and rail(NEXT).enabled == false,
-                        "Previous/Next are enabled on a one-page notebook")
-                    tap(rail(ADD))
+                    expect(rail(PREV).enabled == false, "Previous is enabled on a one-page notebook")
+                    expect(rail(NEXT).enabled and rail(NEXT).icon == "next-add",
+                        "Next does not offer to add on the last page")
+                    tap(rail(NEXT))
                     wait(3, function() return editor().snapshot.page_count == 2
                         and editor().snapshot.state == "ready" end)
                     s = editor().snapshot
@@ -1854,6 +1871,19 @@ else
                     end)
                 end
 
+                case("Notebook editor: More > Add page at end adds a page", function()
+                    local count = editor().snapshot.page_count
+                    local before = stack()[1]
+                    tap(rail(MORE))
+                    press("Add page at end", opened(before, "More"))
+                    wait(3, function() return editor().snapshot.page_count == count + 1
+                        and editor().snapshot.state == "ready" end)
+                    expect(editor().snapshot.page_count == count + 1,
+                        "More > Add page at end left %d pages", editor().snapshot.page_count)
+                    expect(editor().snapshot.page_position == count + 1, "and did not go to it")
+                    settled("More > Add page at end")
+                end)
+
                 case("Notebook editor: More > Go to page… 1, Go", function()
                     local before = stack()[1]
                     tap(rail(MORE))
@@ -1877,13 +1907,14 @@ else
                     settled("Paper > Squared")
                 end)
 
-                case("Notebook editor: More > Delete page, confirmed, leaves one page", function()
+                case("Notebook editor: More > Delete page, confirmed, removes one page", function()
                     local before = stack()[1]
                     tap(rail(MORE))
                     press("Delete page", opened(before, "More"))
+                    local count = editor().snapshot.page_count
                     press("Delete", opened(before, "Delete page"))
-                    wait(3, function() return editor().snapshot.page_count == 1 end)
-                    expect(editor().snapshot.page_count == 1, "the notebook has %d pages",
+                    wait(3, function() return editor().snapshot.page_count == count - 1 end)
+                    expect(editor().snapshot.page_count == count - 1, "the notebook has %d pages",
                         editor().snapshot.page_count)
                     settled("Delete page")
                 end)
