@@ -33,6 +33,14 @@ throwing away work the reader can see is done.
 The temporaries carry a private prefix so a power cut leaves something
 identifiable rather than a plausible-looking export. Nothing here deletes a
 file it did not create.
+
+A format that is not a picture of the page -- Xournal++, whose strokes stay
+strokes -- has nothing to render, so it plugs in a *producer* instead: an
+object that fills the temporary this module names, one bounded `step()` per
+turn (`ink_export_xopp_job`). Everything that decides where bytes may land --
+the name, the collision question, the temporary beside the target, the
+rename, Cancel, one export at a time -- stays here, and is the same policy
+for it as for a PDF.
 ]]
 
 local logger = require("logger")
@@ -52,7 +60,11 @@ both run before either renames.
 ]]
 local running_job = nil
 
-Export.EXTENSIONS = { pdf = ".pdf", png = ".png", jpg = ".jpg" }
+Export.EXTENSIONS = { pdf = ".pdf", png = ".png", jpg = ".jpg", xopp = ".xopp" }
+--- One file whatever the page count; commits once, at the end.
+Export.SINGLE_FILE = { pdf = true, xopp = true }
+--- Formats written by a producer (`opts.produce`) rather than a renderer.
+Export.PRODUCED = { xopp = true }
 Export.DEFAULT_JPEG_QUALITY = 90
 --- Private, and leading-dot so a stray one is out of the reader's way. The
 --- prefix is what makes an interrupted export identifiable afterwards.
@@ -102,11 +114,30 @@ local function defaultFs()
     local lfs = require("libs/libkoreader-lfs")
     return {
         attributes = function(path, what) return lfs.attributes(path, what) end,
+        symlinkattributes = function(path, what)
+            return lfs.symlinkattributes(path, what)
+        end,
         rename = os.rename,
         remove = os.remove,
         open = io.open,
         dir = function(path) return lfs.dir(path) end,
+        -- For a producer's private folder (the Xournal++ spool); nothing in
+        -- this module creates a directory.
+        mkdir = function(path) return lfs.mkdir(path) end,
     }
+end
+
+--[[--
+Whether anything at all is at `path`, a dangling link included.
+
+`attributes` follows links, so a link to nowhere answers nil and looks like a
+free name -- and a rename onto it would then replace somebody's link without
+the question ever being asked. `symlinkattributes` does not follow; a fake
+filesystem without it falls back to the old question.
+]]
+local function occupied(fs, path)
+    local lstat = fs.symlinkattributes or fs.attributes
+    return lstat(path, "mode") ~= nil
 end
 
 local function defaultSanitize(name, dir)
@@ -258,7 +289,7 @@ function Export.plan(opts)
     if stem == "" or not isDirectChild(stem) then return nil, "bad_name" end
     if #stem > Export.MAX_STEM then stem = stem:sub(1, Export.MAX_STEM) end
 
-    local files = (format == "pdf") and 1 or total
+    local files = Export.SINGLE_FILE[format] and 1 or total
     local token = opts.token or tostring(os.time()) .. "-" .. tostring(math.random(100000, 999999))
 
     local targets, temporaries, existing = {}, {}, {}
@@ -269,7 +300,7 @@ function Export.plan(opts)
         if not isDirectChild(temp_name) then return nil, "bad_name" end
         targets[i] = dir .. "/" .. name
         temporaries[i] = dir .. "/" .. temp_name
-        if fs.attributes(targets[i], "mode") ~= nil then
+        if occupied(fs, targets[i]) then
             existing[#existing + 1] = targets[i]
         end
     end
@@ -391,7 +422,11 @@ Job.__index = Job
   opts.items      ordered descriptors, already enumerated
   opts.render     function(item, index, done) ; done(result, err) later.
                   result = { bb, width_pt, height_pt, release }
-  opts.flush      function() -> ok, err   run before the first read
+  opts.produce    for a PRODUCED format, instead of `render`:
+                  function{ output, fs, token, title, items } -> producer,
+                  where producer:step() -> "more" | "done" | nil, err,
+                  producer:progress() -> done, total, producer:close()
+  opts.flush     function() -> ok, err   run before the first read
   opts.overwrite  proceed over existing targets
   opts.quality    JPEG quality, 1..100
   opts.schedule   function(fn) -- must defer
@@ -400,7 +435,11 @@ Job.__index = Job
 ]]
 function Export.start(opts)
     opts = opts or {}
-    if type(opts.render) ~= "function" then return nil, "no_renderer" end
+    if Export.PRODUCED[opts.format] then
+        if type(opts.produce) ~= "function" then return nil, "no_renderer" end
+    elseif type(opts.render) ~= "function" then
+        return nil, "no_renderer"
+    end
     if type(opts.schedule) ~= "function" then return nil, "no_scheduler" end
     if type(opts.items) ~= "table" or #opts.items < 1 then return nil, "no_items" end
 
@@ -427,6 +466,8 @@ function Export.start(opts)
         plan = plan,
         items = opts.items,
         render_fn = opts.render,
+        produce_fn = Export.PRODUCED[plan.format] and opts.produce or nil,
+        overwrite = opts.overwrite and true or false,
         flush_fn = opts.flush,
         schedule = opts.schedule,
         fs = opts.fs or defaultFs(),
@@ -447,6 +488,8 @@ function Export.start(opts)
         active_temp = nil,
         pdf = nil,
         handle = nil,
+        producer = nil,
+        reported = -1,
         cancelled = false,
         finished = false,
         result = nil,
@@ -501,6 +544,26 @@ function Job:_preflight()
         if not flushed then return nil, flush_err or "flush_failed" end
     end
 
+    if self.produce_fn then
+        -- The producer creates the temporary itself (libarchive opens it by
+        -- name), so the name is checked free first: a unique token makes
+        -- anything already there somebody else's, a link above all.
+        local temp = plan.temporaries[1]
+        if occupied(fs, temp) then return nil, "not_writable" end
+        self.active_temp = temp
+        local ran, producer, produce_err = pcall(self.produce_fn, {
+            output = temp, fs = fs, token = plan.token,
+            title = self.title or plan.stem, items = self.items,
+        })
+        if not ran then
+            logger.err("JustDraw export: producer raised:", tostring(producer))
+            return nil, "internal_error"
+        end
+        if not producer then return nil, produce_err or "internal_error" end
+        self.producer = producer
+        return true
+    end
+
     if plan.format == "pdf" then
         local pdf_handle, pdf_err = fs.open(plan.temporaries[1], "wb")
         if not pdf_handle then
@@ -546,6 +609,7 @@ end
 function Job:_step()
     if self.finished then return end
     if self.cancelled then return self:_finish("cancelled") end
+    if self.producer then return self:_produce() end
 
     self.index = self.index + 1
     if self.index > #self.items then return self:_commit() end
@@ -659,6 +723,64 @@ function Job:_encode(result, index)
     return true
 end
 
+--[[--
+One turn of a producer. The producer bounds its own work per call; this only
+decides what the answer means, and the cancellation check in `_step` has
+already run for this turn.
+]]
+function Job:_produce()
+    local status, err = self.producer:step()
+    if self.finished then return end
+    if status == "done" then return self:_commitProduced() end
+    if status ~= "more" then return self:_finish("failed", err or "internal_error") end
+    if self.on_progress and type(self.producer.progress) == "function" then
+        local done, total = self.producer:progress()
+        if done ~= self.reported then
+            self.reported = done
+            pcall(self.on_progress, done, total)
+        end
+    end
+    self.schedule(function() self:_safely("_step") end)
+end
+
+--[[--
+Publish what a producer finished, by the PDF's rule: one rename, same folder.
+
+Two things are asked again that were settled at the start, because a long
+export gives the world time to change. The temporary must still be a regular
+file with bytes in it -- not a link somebody put there. And unless the reader
+agreed to replace it, the target must still be free: `rename` would replace a
+file that appeared since the collision question without asking anyone.
+]]
+function Job:_commitProduced()
+    self.phase = "commit"
+    self:_closeProducer()
+    local fs, temp, target = self.fs, self.active_temp, self.plan.targets[1]
+    local lstat = fs.symlinkattributes or fs.attributes
+    local size = fs.attributes(temp, "size")
+    if lstat(temp, "mode") ~= "file" or type(size) ~= "number" or size < 1 then
+        return self:_finish("failed", "write_failed")
+    end
+    if not self.overwrite and occupied(fs, target) then
+        return self:_finish("failed", "destination_taken")
+    end
+    local renamed = fs.rename(temp, target)
+    if not renamed then
+        return self:_finish("failed", "rename_failed")
+    end
+    self.written[#self.written + 1] = target
+    self.active_temp = nil
+    return self:_finish("done")
+end
+
+--- Let the producer release what it holds -- before the temporary is removed,
+--- since an archive still open on it would otherwise write into a dead file.
+function Job:_closeProducer()
+    local producer = self.producer
+    self.producer = nil
+    if producer then pcall(producer.close, producer) end
+end
+
 --- The single commit of a PDF. An image batch has already committed each page.
 function Job:_commit()
     self.phase = "commit"
@@ -722,6 +844,7 @@ function Job:_finish(status, reason)
     self.finished = true
     if running_job == self then running_job = nil end
     self.phase = status
+    self:_closeProducer()
     self:_closeHandle()
     self:_removeActiveTemp()
     self.result = {
@@ -768,6 +891,7 @@ function Job:_abandon()
     self.finished = true
     if running_job == self then running_job = nil end
     self.phase = "failed"
+    self:_closeProducer()
     self:_closeHandle()
     self:_removeActiveTemp()
 end
@@ -800,6 +924,7 @@ end
 Export.Job = Job
 Export.normalizeDir = normalizeDir
 Export.isDirectChild = isDirectChild
+Export.occupied = occupied
 Export.suffixFor = suffixFor
 
 return Export

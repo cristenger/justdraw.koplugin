@@ -963,6 +963,80 @@ function Repository:listStrokes(page_id)
         end)
 end
 
+--[[--
+One keyset page of a page's stroke metadata, in visual order.
+
+`listStrokes` answers a whole page at once, which suits a renderer that keeps
+every stroke's bounds anyway and does not suit an export that walks a notebook
+one stroke at a time. This answers at most `opts.limit` rows ordered by
+`(COALESCE(paint_seq, seq), seq)` -- later on top -- strictly after the
+`(opts.after_paint_seq, opts.after_seq)` cursor. `seq` is unique per page, so
+the order is total and a walk neither repeats nor skips a stroke.
+]]
+function Repository:listStrokesBatch(page_id, opts)
+    local ready, reason = self:_ready(false)
+    if not ready then return nil, reason end
+    page_id = positiveInteger(page_id)
+    if not page_id then return nil, "bad_id" end
+    opts = opts or {}
+    local limit = boundedLimit(opts.limit)
+    local after_key, after_seq = opts.after_paint_seq, opts.after_seq
+    local cursor = ""
+    local binds = { page_id, limit }
+    if after_key ~= nil or after_seq ~= nil then
+        after_key, after_seq = tonumber(after_key), tonumber(after_seq)
+        if not finite(after_key) or not finite(after_seq) then
+            return nil, "bad_cursor"
+        end
+        cursor = [[
+           AND (COALESCE(paint_seq, seq) > ?3
+                OR (COALESCE(paint_seq, seq) = ?3 AND seq > ?4))]]
+        binds[3], binds[4] = after_key, after_seq
+    end
+    return self:_select([[
+        SELECT id, seq, width, tool, codec, point_count,
+               min_x, min_y, max_x, max_y, COALESCE(paint_seq, seq)
+          FROM notebook_strokes
+         WHERE page_id = ?1 AND deleted_at IS NULL]] .. cursor .. [[
+         ORDER BY COALESCE(paint_seq, seq), seq LIMIT ?2;]],
+        binds, function(row)
+            return {
+                id = num(row[1]), seq = num(row[2]), width = num(row[3]),
+                tool = num(row[4]), codec = num(row[5]), point_count = num(row[6]),
+                min_x = num(row[7]), min_y = num(row[8]),
+                max_x = num(row[9]), max_y = num(row[10]),
+                paint_seq = num(row[11]) or num(row[2]),
+            }
+        end)
+end
+
+--[[--
+A page's ink, reduced to what changes whenever the ink does.
+
+`count` of live strokes, and the largest live `seq` and `id`. A stroke drawn
+raises `max_id` (row ids only grow while rows exist); a stroke erased lowers
+`count`; an erase that splits a stroke does both. Deleted rows are left out on
+purpose, so the maintenance purge, which only removes rows that were already
+deleted, never reads as an edit. An export compares this before and after, and
+refuses to publish if it moved.
+]]
+function Repository:strokeRevision(page_id)
+    local ready, reason = self:_ready(false)
+    if not ready then return nil, reason end
+    page_id = positiveInteger(page_id)
+    if not page_id then return nil, "bad_id" end
+    local rows, err = self:_select([[
+        SELECT COUNT(*), MAX(seq), MAX(id)
+          FROM notebook_strokes
+         WHERE page_id = ?1 AND deleted_at IS NULL;]],
+        { page_id }, function(row)
+            return { count = num(row[1]) or 0, max_seq = num(row[2]) or 0,
+                max_id = num(row[3]) or 0 }
+        end)
+    if not rows then return nil, err end
+    return rows[1] or { count = 0, max_seq = 0, max_id = 0 }
+end
+
 function Repository:openStrokeCursor(stroke_id)
     local ready, reason = self:_ready(false)
     if not ready then return nil, reason end

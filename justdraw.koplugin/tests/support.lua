@@ -1931,6 +1931,12 @@ function support.newExportFs(opts)
                 names[#names + 1] = rest
             end
         end
+        for entry in pairs(fs.links or {}) do
+            local rest = entry:sub(1, #prefix) == prefix and entry:sub(#prefix + 1) or nil
+            if rest and rest ~= "" and not rest:find("/", 1, true) then
+                names[#names + 1] = rest
+            end
+        end
         table.sort(names, function(a, b)
             -- "." and ".." first, as the real one does; the rest in a stable
             -- order so a spec can rely on what the cap truncates.
@@ -1946,9 +1952,70 @@ function support.newExportFs(opts)
         end
     end
 
+    --[[--
+    `lfs.symlinkattributes`: a link answers "link" and is not followed.
+    `links[path] = target` puts one there; `attributes` follows it to the
+    target, which is what the real one does -- and what makes a dangling link
+    look like a free name to anyone who asks the wrong question.
+    ]]
+    fs.links = opts.links or {}
+    local plain_attributes = fs.attributes
+    function fs.attributes(path, what)
+        local target = fs.links[path]
+        if target then return plain_attributes(target, what) end
+        return plain_attributes(path, what)
+    end
+    function fs.symlinkattributes(path, what)
+        if fs.links[path] then
+            if what == "mode" then return "link" end
+            return nil
+        end
+        return plain_attributes(path, what)
+    end
+    function fs.mkdir(path)
+        if fs.fail_mkdir and fs.fail_mkdir[path] then return nil, fs.fail_mkdir[path] end
+        fs.dirs[path] = true
+        return true
+    end
+    fs.fail_mkdir = opts.fail_mkdir or {}
+    fs.fail_read = opts.fail_read or {}
+
+    --- A read handle over the stored bytes: `read(n)` answers nil at the end
+    --- (Lua 5.1's shape), `seek` knows "set", "cur" and "end".
+    local function reader(path)
+        local data = fs.files[path]
+        local pos, closed = 0, false
+        local handle = {}
+        function handle:read(n)
+            if closed then return nil, "closed" end
+            if fs.fail_read[path] then return nil, fs.fail_read[path] end
+            if pos >= #data then return nil end
+            local chunk = data:sub(pos + 1, pos + n)
+            pos = pos + #chunk
+            return chunk
+        end
+        function handle:seek(whence, offset)
+            whence, offset = whence or "cur", offset or 0
+            if whence == "set" then pos = offset
+            elseif whence == "end" then pos = #data + offset
+            else pos = pos + offset end
+            return pos
+        end
+        function handle:close()
+            if closed then return true end
+            closed = true
+            return true
+        end
+        return handle
+    end
+
     function fs.open(path, mode)
         fs.opened[#fs.opened + 1] = { path = path, mode = mode }
         if fs.fail_open[path] then return nil, fs.fail_open[path] end
+        if mode == "rb" or mode == "r" then
+            if fs.files[path] == nil then return nil, path .. ": No such file or directory" end
+            return reader(path)
+        end
         local parts, offset, closed = {}, 0, false
         local handle = {}
         function handle:write(chunk)

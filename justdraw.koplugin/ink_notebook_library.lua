@@ -1480,9 +1480,19 @@ end
 --- The export of one notebook, as the library's Export row runs it.
 function Library:_exportBuild(item, repository, done)
     local title = item.title or "Notebook"
-    return function()
+    return function(_scope, format)
         local pages, list_err = ExportSource.notebookPages(repository, item.id)
         if not pages then return nil, list_err end
+        if format == "xopp" then
+            -- One file written by a producer, not a renderer (ADR-59).
+            local built = require("ink_export_xopp_job").build{
+                repository = repository, items = pages, title = title,
+                notebook_id = item.id,
+                flush = function() return self.controller:onFlushSettings() end,
+            }
+            built.finish = function(result) if done then done(result) end end
+            return built
+        end
         local tracker = {}
         return {
             items = pages,
@@ -1525,11 +1535,12 @@ function Library:showExport(item)
     return ExportDialog.show{
         title = T(_("Export “%1”"), title),
         stem = title .. " " .. os.date("%Y-%m-%d-%H%M%S"),
+        formats = ExportDialog.NOTEBOOK_FORMATS,
         settings = _G.G_reader_settings,
         show_modal = function(widget) return self:_showModal(widget) end,
         close_modal = function(widget) return self:_closeModal(widget) end,
         notify = function(text) self:_showInfo(text) end,
-        build = self:_exportBuild(item, repository),
+        build = Library._exportBuild(self, item, repository),
     }
 end
 
@@ -1548,7 +1559,7 @@ function Library:exportItems(items)
         return nil, repo_err
     end
     local settings = _G.G_reader_settings
-    local format = ExportDialog.rememberedFormat(settings)
+    local format = ExportDialog.rememberedFormat(settings, ExportDialog.NOTEBOOK_FORMATS)
     local dir = ExportDialog.rememberedDirectory(settings)
     local bulk = { results = {}, index = 0, action = "export" }
     local function finish()
@@ -1575,7 +1586,7 @@ function Library:exportItems(items)
             bulk.results[index] = { item = item, status = status }
             self.schedule(step)
         end
-        local build = self:_exportBuild(item, repository, function(result)
+        local build = Library._exportBuild(self, item, repository, function(result)
             local status = "failed"
             if result and result.status == "done" then status = "ok"
             elseif result and result.status == "cancelled" or result == nil then status = "cancelled" end
@@ -1583,8 +1594,8 @@ function Library:exportItems(items)
         end)
         local built_once = false
         ExportDialog.run{
-            build = function(scope)
-                local built, err = build(scope)
+            build = function(scope, fmt)
+                local built, err = build(scope, fmt or format)
                 built_once = built ~= nil
                 return built, err
             end,

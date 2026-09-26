@@ -48,6 +48,46 @@ jobs:
           JUSTDRAW_PDF_EXTERNAL_STRICT: "1"
         run: luajit justdraw.koplugin/tests/pdf_external_check.lua
 
+  # The Xournal++ export, next to the PDF one and for the same reason: its
+  # judges (gzip, xmllint) are tools the plugin's runtime does not have. It
+  # also needs a KOReader tree, because the archive adapter deliberately uses
+  # KOReader's own libarchive and FFI declarations rather than its own.
+  xopp:
+    runs-on: ubuntu-latest
+    env:
+      KOREADER: v2026.07.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install gzip and xmllint
+        run: sudo apt-get update && sudo apt-get install -y gzip libxml2-utils
+
+      - name: Fetch KOReader
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/ko"
+          curl -sSfL "https://github.com/koreader/koreader/releases/download/$KOREADER/koreader-linux-x86_64-$KOREADER.tar.xz" \
+            | tar xJ -C "$RUNNER_TEMP/ko"
+
+      # Symbols, a real stream, /dev/full, the worst block latency, and one
+      # whole export from a real notebook database.
+      - name: Archive adapter on KOReader's libarchive
+        run: |
+          set -o pipefail
+          cd "$RUNNER_TEMP/ko/lib/koreader"
+          TMPDIR="$RUNNER_TEMP" ./luajit "$GITHUB_WORKSPACE/justdraw.koplugin/tests/xopp_archive_native.lua" \
+            | tee "$RUNNER_TEMP/xopp-native.txt" | grep -E '^(OK|FAIL|XOPP_)'
+          grep -q '^XOPP_ARCHIVE_NATIVE_OK' "$RUNNER_TEMP/xopp-native.txt"
+
+      # STRICT: on a runner the tools are installed, so "absent" is a broken
+      # workflow, not an older machine.
+      - name: External Xournal++ conformance
+        env:
+          JUSTDRAW_XOPP_EXTERNAL_STRICT: "1"
+        run: |
+          cd "$RUNNER_TEMP/ko/lib/koreader"
+          TMPDIR="$RUNNER_TEMP" ./luajit "$GITHUB_WORKSPACE/justdraw.koplugin/tests/xopp_external_check.lua"
+
   # Every button and menu entry pressed on a real KOReader, through the real
   # window stack (tests/buttons_native.lua), plus the toolbars' geometry at
   # four screen profiles. Pinned: a KOReader release with the stylus API

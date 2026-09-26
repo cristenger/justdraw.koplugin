@@ -53,6 +53,23 @@ Dialog.FORMATS = {
 }
 
 --[[--
+The pictures, plus Xournal++ -- for notebooks only.
+
+A `.xopp` carries strokes as strokes, and only a notebook has strokes on a
+page of its own: a book's sheets and page notes float over a document the
+file could not carry along. So the reader's dialog never offers it, and a
+remembered "xopp" there falls back to the default like any unknown value.
+]]
+Dialog.NOTEBOOK_FORMATS = {
+    Dialog.FORMATS[1], Dialog.FORMATS[2], Dialog.FORMATS[3],
+    { value = "xopp", label = "Xournal++ (.xopp)" },
+}
+
+--- Buttons per radio row. A fourth label as long as "Xournal++ (.xopp)" does
+--- not fit beside the other three on a phone-width panel.
+local FORMATS_PER_ROW = 3
+
+--[[--
 Why an export could not run or did not finish, in words a reader can act on.
 
 Every code the pipeline can produce is listed. An unknown one still gets a
@@ -104,7 +121,29 @@ function Dialog.messages() return messages() end
 function Dialog.reason(code)
     local known = messages()
     if code and known[code] then return known[code] end
+    -- The Xournal++ producer's own reasons live with it, and are covered by
+    -- its spec (tests/export_xopp_job_spec.lua).
+    local xopp = require("ink_export_xopp_job").messages()
+    if code and xopp[code] then return xopp[code] end
     return _("The export didn’t finish. Nothing was changed.")
+end
+
+--[[--
+What a `.xopp` cannot say, told before anything is read.
+
+The sentences are `Xopp.limitations`, translated, cut to their first sentence
+each so the box stays short enough to read on a small panel; the full text is
+in the module for anyone who needs the reason behind one.
+]]
+function Dialog.xoppNotice()
+    local Xopp = require("ink_export_xopp")
+    local lines = { _("Xournal++ keeps the strokes editable, with these limits:") }
+    for i = 1, #Xopp.limitations do
+        local text = _(Xopp.limitations[i].text)
+        local first = text:match("^(.-[%.!?])%s") or text
+        lines[#lines + 1] = "• " .. first
+    end
+    return table.concat(lines, "\n")
 end
 
 --- The default destination. Kept beside KOReader's own data rather than in the
@@ -127,18 +166,20 @@ local function readSetting(settings, key, fallback)
     return value
 end
 
-local function isKnownFormat(value)
-    for i = 1, #Dialog.FORMATS do
-        if Dialog.FORMATS[i].value == value then return true end
+local function isKnownFormat(value, formats)
+    formats = formats or Dialog.FORMATS
+    for i = 1, #formats do
+        if formats[i].value == value then return true end
     end
     return false
 end
 
 --- The remembered format, or the default when nothing sensible is stored. A
---- settings file edited by hand cannot make the export write an unknown type.
-function Dialog.rememberedFormat(settings)
+--- settings file edited by hand cannot make the export write an unknown type,
+--- and a format one dialog offers is not smuggled into another that does not.
+function Dialog.rememberedFormat(settings, formats)
     local stored = readSetting(settings, Dialog.SETTING_FORMAT, nil)
-    if type(stored) == "string" and isKnownFormat(stored) then return stored end
+    if type(stored) == "string" and isKnownFormat(stored, formats) then return stored end
     return Dialog.DEFAULT_FORMAT
 end
 
@@ -243,7 +284,9 @@ function Dialog.run(opts)
         end)
         return
     end
-    local built, build_err = opts.build(opts.scope)
+    -- The format goes along because a notebook builds a producer for
+    -- Xournal++ and a renderer for everything else.
+    local built, build_err = opts.build(opts.scope, opts.format)
     if not built then
         opts.notify(Dialog.reason(build_err))
         return nil, build_err
@@ -275,6 +318,7 @@ function Dialog.run(opts)
             title = built.title or opts.stem,
             items = built.items,
             render = built.render,
+            produce = built.produce,
             flush = built.flush,
             overwrite = overwrite,
             quality = opts.quality,
@@ -334,7 +378,9 @@ function Dialog.run(opts)
 
     local function proceed()
         local total = #built.items
-        if total > 1 then
+        -- `show_progress`: a source whose single page can still take a while
+        -- (Xournal++ compresses after the last page) needs Cancel too.
+        if total > 1 or built.show_progress then
             progress = ButtonDialog:new{
                 title = T(N_("Exporting %1 page…", "Exporting %1 pages…", total), total),
                 title_align = "center",
@@ -415,6 +461,16 @@ function Dialog.run(opts)
     nothing either, beyond releasing what the source opened.
     ]]
     local warning = built.confirm_warning
+    -- Xournal++ approximates some ink (Xopp.limitations); the reader hears
+    -- which before choosing it over the faithful picture, in the same box.
+    if opts.format == "xopp" then
+        local notice = Dialog.xoppNotice()
+        if type(warning) == "string" and warning ~= "" then
+            warning = notice .. "\n\n" .. warning
+        else
+            warning = notice
+        end
+    end
     if type(warning) ~= "string" or warning == "" then return askSpace() end
     local box = ConfirmBox:new{
         text = warning,
@@ -439,12 +495,15 @@ end
   opts.build        function(scope) -> { items, render, flush, title, finish,
                                         confirm_warning }
   opts.settings     where the format and folder are remembered
+  opts.formats      the file types offered; default `Dialog.FORMATS`, and
+                    `Dialog.NOTEBOOK_FORMATS` for a notebook
   opts.show_modal / opts.close_modal / opts.notify   host seams
 ]]
 function Dialog.show(opts)
     local settings = opts.settings or _G.G_reader_settings
+    local formats = opts.formats or Dialog.FORMATS
     local state = {
-        format = Dialog.rememberedFormat(settings),
+        format = Dialog.rememberedFormat(settings, formats),
         -- The injected filesystem, when there is one: the folder this resolves
         -- to is the folder the sweep below reads and the job writes into, and
         -- three different answers to "where" would be three different bugs.
@@ -573,18 +632,21 @@ function Dialog.show(opts)
     local width = dialog.getAddedWidgetAvailableWidth
         and dialog:getAddedWidgetAvailableWidth()
         or math.floor(math.min(Screen:getWidth(), Screen:getHeight()) * 0.72)
-    local format_buttons = {}
-    for i = 1, #Dialog.FORMATS do
-        local entry = Dialog.FORMATS[i]
-        format_buttons[i] = { text = entry.label, value = entry.value,
+    -- One widget, however many rows: RadioButtonTable keeps a single checked
+    -- button across all of its rows, which is what a choice of one format is.
+    local format_rows = {
+        {{ text = _("File type"), enabled = false, checkable = false }},
+    }
+    for i = 1, #formats do
+        local entry = formats[i]
+        if (i - 1) % FORMATS_PER_ROW == 0 then format_rows[#format_rows + 1] = {} end
+        local row = format_rows[#format_rows]
+        row[#row + 1] = { text = entry.label, value = entry.value,
             checked = entry.value == state.format or nil }
     end
     dialog:addWidget(RadioButtonTable:new{
         width = width, parent = dialog, show_parent = dialog,
-        radio_buttons = {
-            {{ text = _("File type"), enabled = false, checkable = false }},
-            format_buttons,
-        },
+        radio_buttons = format_rows,
         button_select_callback = function(entry) state.format = entry.value end,
     })
 

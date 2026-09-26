@@ -2220,11 +2220,12 @@ function Editor:showExport()
         title = T(_("Export “%1”"), title),
         stem = title .. " " .. os.date("%Y-%m-%d-%H%M%S"),
         scopes = scopes,
+        formats = ExportDialog.NOTEBOOK_FORMATS,
         settings = _G.G_reader_settings,
         show_modal = function(widget) return self:showModalSafely(widget) end,
         close_modal = function(widget) return self:_closeModal(widget) end,
         notify = function(text) self:_showInfo(text) end,
-        build = function(scope)
+        build = function(scope, format)
             local items
             if scope == "page" then
                 if not current then return nil, "no_items" end
@@ -2234,6 +2235,16 @@ function Editor:showExport()
                     ExportSource.notebookPages(repository, notebook_id)
                 if not pages then return nil, list_err end
                 items = pages
+            end
+            if format == "xopp" then
+                -- Strokes, read straight from the store: nothing to render.
+                -- The whole notebook is re-listed before publishing; a single
+                -- page is only compared with itself.
+                return require("ink_export_xopp_job").build{
+                    repository = repository, items = items, title = title,
+                    notebook_id = scope ~= "page" and notebook_id or nil,
+                    flush = function() return self.controller:onFlushSettings() end,
+                }
             end
             local tracker = {}
             return {
