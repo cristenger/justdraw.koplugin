@@ -380,21 +380,30 @@ function Query:next(limit, out)
         self.done = true
         return nil, "stale"
     end
-    local grid, added = self.grid, 0
-    -- Buckets may have changed since the last call (an erase, a COMMIT's
-    -- re-key); restarting the current one is safe because `seen` dedupes.
-    self.i = 1
+    local grid, added, scanned = self.grid, 0, 0
+    -- Entries looked at, not only entries returned, bound one call: a dense
+    -- cell of strokes already seen must still yield within the turn.
+    local scan_limit = limit * 8
+    -- The current bucket resumes where it stopped when it is the same table
+    -- with the same length; if it changed (an erase, a COMMIT's re-key) it
+    -- restarts, which is safe because `seen` dedupes.
+    local first = grid.cells[self.r * grid.cols + self.c]
+    if first ~= self.bucket or (first and #first ~= self.bucket_len) then self.i = 1 end
     while self.r <= self.r1 do
         local bucket = grid.cells[self.r * grid.cols + self.c]
         if bucket then
             while self.i <= #bucket do
                 local m = cache.by_id[bucket[self.i]]
                 self.i = self.i + 1
+                scanned = scanned + 1
                 if m and not self.seen[m.token] then
                     self.seen[m.token] = true
                     out[#out + 1] = m
                     added = added + 1
-                    if added >= limit then return added, false end
+                end
+                if added >= limit or scanned >= scan_limit then
+                    self.bucket, self.bucket_len = bucket, #bucket
+                    return added, false
                 end
             end
         end

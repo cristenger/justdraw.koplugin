@@ -1017,4 +1017,24 @@ return function(ctx)
         t:eq(r, nil, "a rebuild makes the cursor stale")
         t:eq(err, "stale", "named")
     end)
+
+    t:case("a dense cell is walked once, resuming where it stopped", function()
+        -- Hundreds of strokes in one grid cell: each call must pick up where
+        -- the last stopped, not rescan the cell from its start.
+        local strokes = {}
+        for i = 1, 400 do strokes[i] = bar(20 + (i % 10), 20 + (i % 7), 4, 4) end
+        local cache = readyCache{ strokes = strokes }
+        local cursor = assert(cache:openQuery(0, 0, 60, 60))
+        local by_id = cache.by_id
+        local reads = 0
+        cache.by_id = setmetatable({}, { __index = function(_, k) reads = reads + 1; return by_id[k] end })
+        local out, steps = {}, 0
+        repeat
+            local _, done = cursor:next(10, out)
+            steps = steps + 1
+        until done or steps > 1000
+        cache.by_id = by_id
+        t:eq(#out, 400, "every stroke once")
+        t:check(reads <= 400 + steps, "each entry read about once, not once per call (" .. reads .. " reads)")
+    end)
 end
