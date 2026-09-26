@@ -2403,6 +2403,7 @@ for _, spec in ipairs({
     "wacom_palm_spec",
     "render_spec",
     "stroke_split_spec",
+    "lasso_spec",
     "paper_spec",
     "canvas_codec_spec",
     "canvas_repository_spec",
