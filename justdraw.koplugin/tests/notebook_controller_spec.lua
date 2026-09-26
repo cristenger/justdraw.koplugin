@@ -95,6 +95,22 @@ return function(ctx)
         t:eq(heard[1], session, "for the session that is open")
     end)
 
+    t:case("undo and redo go through the controller to the open page's history", function()
+        local store = support.newNotebookStore()
+        local controller = Controller.new{ repository = store }
+        local session = controller:openNotebook(1)
+        session:surface():addStroke({ 1, 1, 20, 20 }, 2, 4, 1)
+        t:eq(controller:uiSnapshot().can_undo, true, "undo offered")
+        t:check(controller:undo(), "undo")
+        t:eq(#session:surface():cache():strokes(), 0, "taken back")
+        t:eq(controller:uiSnapshot().can_redo, true, "redo offered")
+        t:check(controller:redo(), "redo")
+        t:eq(#session:surface():cache():strokes(), 1, "and back again")
+        t:eq(controller:uiSnapshot().can_redo, false, "nothing more to redo")
+        controller:closeNotebook()
+        t:eq(controller:redo(), nil, "no notebook open, nothing to redo")
+    end)
+
     t:case("a failed active flush does not close or replace the session", function()
         local store = support.newNotebookStore()
         local second = store:createNotebook{

@@ -361,4 +361,80 @@ return function(ctx)
         t:eq(Clipboard.payload(1).strokes[1].width, 4, "an accepted cut published")
         Clipboard.clear()
     end)
+
+    t:describe("ink_selection / copy here, paste there")
+
+    --- A second surface to paste into, at another scale: a page of B.
+    local function destination(scale)
+        local Placement = require("ink_placement")
+        local SURF_B = { id = 2, logical_w = 800, logical_h = 1000 }
+        local store = support.newCanvasStore({ SURF_B })
+        local sched = support.newScheduler()
+        local tr = Transform.new{ logical_w = 800, logical_h = 1000,
+            fit_rect = { x = 0, y = 0, w = 800 * scale, h = 1000 * scale },
+            clip_rect = { x = 0, y = 0, w = 800 * scale, h = 1000 * scale } }
+        local contact = { down = false }
+        local session = SurfaceSession.new{ repository = store, surface = SURF_B, transform = tr,
+            history = History.new(),
+            schedule = function(fn) sched:schedule(fn) end,
+            scheduleIn = function(d, fn) sched:scheduleIn(d, fn) end,
+            unschedule = function(fn) sched:unschedule(fn) end,
+            can_work = function() return not contact.down end }
+        session:open()
+        sched:drain()
+        local p = { notices = {} }
+        function p:session() return session end
+        function p:transform() return tr end
+        function p:identity() return 7 end
+        function p:repaint() end
+        function p:presentCacheBox() end
+        function p:setPainter() end
+        function p:notify(text) self.notices[#self.notices + 1] = text end
+        function p:budget() return true end
+        local pl = Placement.new{ presenter = p,
+            source = function(transform) return Clipboard.payload(transform.scale) end,
+            schedule = function(d, fn) sched:scheduleIn(d, fn) end,
+            can_work = function() return not contact.down end,
+            layer_clear = support.recordingClear() }
+        local function paste(x, y)
+            assert(pl:prepare())
+            contact.down = true
+            pl:contactBegin(x, y)
+            pl:contactEnd()
+            contact.down = false
+            sched:advance(0.2)
+        end
+        return session, paste
+    end
+
+    t:case("cut on A, undo there, paste on B at another scale, A closed first", function()
+        Clipboard.clear()
+        local sel, session, _, sched, contact = fixture{ clipboard = Clipboard }
+        draw(session, { 200, 200, 300, 200 })
+        lasso(sel, contact, 150, 150, 350, 260)
+        sched:advance(0.2)
+        sel:cut()
+        sched:advance(0.2)
+        t:eq(#session:cache():strokes(), 0, "cut from A")
+        t:check(session:undo(), "undo on A")
+        t:eq(#session:cache():strokes(), 1, "A has it back")
+        t:eq(Clipboard.hasContent(), true, "and the clipboard still holds the cut")
+        sel:clear("close")
+        session:close()   -- A is gone before anything is pasted
+        local b, paste = destination(0.5)
+        paste(200, 200)
+        local strokes = b:cache():strokes()
+        t:eq(#strokes, 1, "one stroke on B")
+        local m = strokes[1]
+        -- 100 units wide on A's screen at scale 1 is 100 px; on B at scale
+        -- 0.5 the same on-screen size is 200 units.
+        t:check(math.abs((m.max_x - m.min_x) - 200) < 0.1, "the copied on-screen size: "
+            .. (m.max_x - m.min_x))
+        t:eq(m.width, 8, "and the nib, in B's units")
+        t:check(b:undo(), "paste undoes on B")
+        t:eq(#b:cache():strokes(), 0, "gone")
+        t:check(b:redo(), "and redoes")
+        t:eq(#b:cache():strokes(), 1, "back")
+        Clipboard.clear()
+    end)
 end
