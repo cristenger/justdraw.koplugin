@@ -1073,6 +1073,13 @@ function JustDraw:onCloseDocument()
     self:teardown()
 end
 
+--- KOReader is quitting (Exit is broadcast before the process ends). The
+--- clipboard is process-scoped and outlives a closed book on purpose, so it
+--- is cleared here and not in `teardown` (§D.7, Task 5.3).
+function JustDraw:onExit()
+    Clipboard.clear()
+end
+
 function JustDraw:onCloseWidget()
     self:teardown()
 end
@@ -1107,6 +1114,8 @@ leaving it dangling loses it silently and leaks contact state into whatever
 document is opened next in the same session.
 ]]
 function JustDraw:teardown()
+    -- A selection or placement holds keys of the sheet about to go (7.2).
+    self:clearSheetEditing("close")
     self.reader_closed = true
     self.note_context = nil
     self.canvas_intent, self.canvas_intent_id = nil, nil
@@ -2151,6 +2160,12 @@ function JustDraw:clearSheetEditing(reason)
             local ok, err = pcall(controller.clear, controller, reason)
             if not ok then logger.err("JustDraw: clearing sheet editing failed:", err) end
         end
+    end
+    -- Still holding Paste or a shape after an undo or a new sheet height:
+    -- prepare again off-contact, so the next touch places (§D.8).
+    if (reason == "undo" or reason == "height" or reason == "pen") and self.canvas_open
+        and (self.tool == "paste" or self.tool == "shape") then
+        self:_prepareSheetPlacementSoon(self.tool)
     end
 end
 
@@ -3916,7 +3931,9 @@ function JustDraw:_sheetPresenter()
     function presenter:mmToPixels(mm) return Layout.physicalPixels(mm) or mm * 8 end
     function presenter:budget(bytes)
         if bytes > 16 * 1024 * 1024 then return nil, "preview_too_large" end
-        return true
+        -- And within what the page, the histories and the clipboard leave.
+        local session = plugin.session
+        return require("ink_float_layer").editingBudget(bytes, session and session:cache())
     end
     self.sheet_presenter = presenter
     return presenter
@@ -4460,6 +4477,9 @@ function JustDraw:refreshPenControls()
     if self.bar then self.bar:update(true) end
     local editor = self.notebook_ui and self.notebook_ui.editor
     if editor and not editor.closed then editor:onPenSettingsChanged() end
+    -- A shape prepared on the sheet carries the nib it was made with: make it
+    -- again with the new one (§6.2), as the notebook editor does.
+    if self.canvas_open and self.tool == "shape" then self:clearSheetEditing("pen") end
 end
 
 function JustDraw:getDrawingRefreshInterval()

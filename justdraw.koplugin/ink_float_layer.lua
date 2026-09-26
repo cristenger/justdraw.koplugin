@@ -253,4 +253,28 @@ function FloatLayer:free()
     self.cache = nil
 end
 
+--[[--
+The editing budget shared by every preview (§D.3): what a new preview may
+cost on top of what is already resident -- the page's raster and its
+coverage mask, the process's edit histories and the clipboard. One number
+for all of them, so a large history leaves less room for a large preview
+rather than both being allowed their own ceiling.
+]]
+FloatLayer.EDIT_BUDGET = 48 * 1024 * 1024
+FloatLayer.MAX_PREVIEW_PIXELS = 8 * 1024 * 1024
+
+function FloatLayer.editingBudget(bytes, cache)
+    local resident = 0
+    local buffer = cache and cache.buffer and cache:buffer()
+    if buffer and buffer.getWidth then
+        -- The page raster and its reusable coverage mask: two bytes a pixel.
+        resident = resident + buffer:getWidth() * buffer:getHeight() * 2
+    end
+    local History = require("ink_edit_history")
+    resident = resident + (History.sharedPool().bytes or 0)
+    resident = resident + require("ink_clipboard").retainedBytes()
+    if bytes + resident > FloatLayer.EDIT_BUDGET then return nil, "preview_too_large" end
+    return true
+end
+
 return FloatLayer

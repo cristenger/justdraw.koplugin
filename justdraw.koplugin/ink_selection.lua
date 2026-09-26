@@ -436,6 +436,7 @@ function Selection:_resolveFinish(found)
     local layer, err = FloatLayer.new{
         transform = transform, strokes = strokes, clear = self.layer_clear,
         budget = function(bytes) return self.presenter:budget(bytes) end,
+        max_pixels = FloatLayer.MAX_PREVIEW_PIXELS,
     }
     if not layer then
         self:_erasePath()

@@ -167,6 +167,18 @@ return function(ctx)
         t:eq(#session:cache():strokes(), 1, "and lands")
     end)
 
+    t:case("a page that changed between lift and commit drops the placement and says so", function()
+        local pl, session, p, sched, contact, committed = fixture()
+        pl:prepare()
+        place(pl, contact, 300, 300)
+        p.id = 2   -- another page, or the same page in another layout
+        sched:advance(0.2)
+        t:eq(#committed, 0, "nothing committed")
+        t:eq(#session:cache():strokes(), 0, "nothing written")
+        t:eq(#p.notices, 1, "the reader is told")
+        t:eq(pl.state, "idle", "and the tool is free to prepare again")
+    end)
+
     t:case("following the pen allocates nothing per sample", function()
         local pl, _, _, _, contact = fixture()
         pl:prepare()

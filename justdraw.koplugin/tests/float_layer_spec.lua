@@ -181,4 +181,25 @@ return function(ctx)
         t:eq(calls, 2001, "every move painted")
         layer:free()
     end)
+
+    t:case("one editing budget for preview, page raster, histories and clipboard", function()
+        local FloatLayer = require("ink_float_layer")
+        local Clipboard = require("ink_clipboard")
+        local History = require("ink_edit_history")
+        History.resetSharedPool()
+        Clipboard.clear()
+        local cache = { buffer = function() return {
+            getWidth = function() return 2000 end, getHeight = function() return 2000 end } end }
+        t:eq(FloatLayer.editingBudget(1024 * 1024, cache), true, "a small preview fits")
+        local room = FloatLayer.EDIT_BUDGET - 2000 * 2000 * 2
+        t:eq(FloatLayer.editingBudget(room + 1, cache), nil, "the page raster counts")
+        local pts = {}
+        for i = 1, 60000 do pts[#pts + 1] = i % 100; pts[#pts + 1] = i % 90 end
+        t:eq(Clipboard.set({ { points = pts, n = 60000, width = 4, tool = 1 } }, { scale = 1 }), true,
+            "a large copy")
+        t:check(Clipboard.retainedBytes() > 1024, "is counted")
+        t:eq(FloatLayer.editingBudget(room - 1024, cache), nil, "and so does the clipboard")
+        Clipboard.clear()
+        t:eq(FloatLayer.editingBudget(room - 1024, cache), true, "which gives it back when cleared")
+    end)
 end

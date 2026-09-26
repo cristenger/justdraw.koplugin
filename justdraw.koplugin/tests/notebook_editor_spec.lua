@@ -255,6 +255,25 @@ return function(ctx)
         t:eq(uncovered, true, "More closed before the privacy flow begins")
     end)
 
+    t:case("after an undo or a page change a held shape or paste is prepared again", function()
+        ctx.reset()
+        local tool = "shape"
+        local editor = newEditor{}
+        editor.get_tool = function() return tool end
+        local prepared = {}
+        editor._preparePlacementSoon = function(_, name) prepared[#prepared + 1] = name end
+        for _, reason in ipairs({ "undo", "page", "rebuild" }) do
+            editor:clearEditing(reason)
+        end
+        t:eq(table.concat(prepared, ","), "shape,shape,shape", "each time, for the next touch")
+        prepared = {}
+        for _, reason in ipairs({ "suspend", "close", "tool", "state" }) do editor:clearEditing(reason) end
+        t:eq(#prepared, 0, "not on suspend, close, a tool change or a failed state")
+        tool = "pen"
+        editor:clearEditing("undo")
+        t:eq(#prepared, 0, "and not for the pen")
+    end)
+
     t:case("Send… is in More only while LocalSend is there, and sends this notebook", function()
         ctx.reset()
         local present, sent = false, nil

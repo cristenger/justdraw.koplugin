@@ -2131,4 +2131,35 @@ return function(ctx)
         end
         t:check(said or #env.notifications > 0, "nothing left: the reader is told")
     end)
+
+    t:case("a held sheet shape or paste is prepared again after undo, height and pen changes", function()
+        ctx.reset()
+        local p = ctx.newPlugin()
+        local prepared = {}
+        p._prepareSheetPlacementSoon = function(_, name) prepared[#prepared + 1] = name end
+        p.canvas_open = true
+        p.tool = "shape"
+        p:clearSheetEditing("undo")
+        p:clearSheetEditing("height")
+        p:refreshPenControls()
+        t:eq(table.concat(prepared, ","), "shape,shape,shape", "undo, height and a new pen")
+        prepared = {}
+        p:clearSheetEditing("suspend"); p:clearSheetEditing("close")
+        t:eq(#prepared, 0, "not on suspend or close")
+        p.tool = "paste"
+        p:clearSheetEditing("undo")
+        t:eq(prepared[1], "paste", "paste too")
+        p.canvas_open = false
+    end)
+
+    t:case("the clipboard outlives a closed book and is cleared when KOReader exits", function()
+        ctx.reset()
+        local Clipboard = require("ink_clipboard")
+        Clipboard.set({ { points = { 0, 0, 5, 5 }, n = 2, width = 4, tool = 1 } }, { scale = 1 })
+        local p = ctx.newPlugin()
+        p:teardown()
+        t:eq(Clipboard.hasContent(), true, "closing a book keeps what was copied")
+        p:onExit()
+        t:eq(Clipboard.hasContent(), false, "exiting clears it")
+    end)
 end

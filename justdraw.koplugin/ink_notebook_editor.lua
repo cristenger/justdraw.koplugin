@@ -32,6 +32,7 @@ local ToolButton = require("ink_tool_button")
 local RefreshDialog = require("ink_refresh_dialog")
 local PenDialog = require("ink_pen_dialog")
 local Placement = require("ink_placement")
+local FloatLayer = require("ink_float_layer")
 local Render = require("ink_render")
 local Selection = require("ink_selection")
 local ShapeDialog = require("ink_shape_dialog")
@@ -1510,6 +1511,9 @@ end
 
 --- End every editing interaction in progress. Safe from anywhere, any number
 --- of times.
+--- Reasons after which a held placement tool is prepared again.
+local REPREPARE = { undo = true, page = true, rebuild = true }
+
 function Editor:clearEditing(reason)
     if self.selection and self.selection:isActive() then
         local ok, err = pcall(self.selection.clear, self.selection, reason)
@@ -1520,6 +1524,13 @@ function Editor:clearEditing(reason)
             local ok, err = pcall(placement.cancel, placement, reason)
             if not ok then logger.err("JustDraw notebooks: cancelling a placement failed:", err) end
         end
+    end
+    -- Still holding Paste or a shape after an undo, a page change or a new
+    -- layout: prepare the preview again now, off-contact, or the next touch
+    -- would only arm it and place nothing (§D.8).
+    if REPREPARE[reason] and not self.closed then
+        local tool = self.get_tool and self.get_tool()
+        if tool == "paste" or tool == "shape" then self:_preparePlacementSoon(tool) end
     end
 end
 
@@ -1616,7 +1627,10 @@ function Editor:selectionPresenter()
     end
     function presenter:budget(bytes)
         if bytes > Editor.MAX_PREVIEW_BYTES then return nil, "preview_too_large" end
-        return true
+        -- And within what the page, the histories and the clipboard leave.
+        local session = editor:_currentSession()
+        local surface = session and session:surface()
+        return FloatLayer.editingBudget(bytes, surface and surface:cache())
     end
     return presenter
 end

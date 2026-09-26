@@ -120,6 +120,7 @@ function Placement:prepare()
     local layer, layer_err = FloatLayer.new{
         transform = transform, strokes = payload.strokes, clear = self.layer_clear,
         budget = function(bytes) return self.presenter:budget(bytes) end,
+        max_pixels = FloatLayer.MAX_PREVIEW_PIXELS,
     }
     if not layer then
         self.presenter:notify(_("That could not be prepared for placing."))
@@ -238,6 +239,14 @@ end
 
 function Placement:_commit()
     local session = self.presenter:session()
+    -- The lift left an intention for *that* page: if the page, its layout or
+    -- the session changed before the job ran, drop it and say so (§D.8).
+    if not session or self.identity ~= self.presenter:identity() then
+        logger.warn("JustDraw: placement dropped: the page changed before it landed")
+        self:cancel("stale")
+        self.presenter:notify(_("That could not be placed. Try again."))
+        return
+    end
     local specs, err = self:_specs(session)
     local result, replace_err
     if specs then
@@ -279,6 +288,8 @@ function Placement:_arm(fn)
         if not ok then
             logger.err("JustDraw: placement job failed:", err)
             self:cancel("error")
+            -- Never a silent vanishing: the reader placed something.
+            pcall(self.presenter.notify, self.presenter, _("That could not be placed. Try again."))
         end
     end
     self.job_action = action

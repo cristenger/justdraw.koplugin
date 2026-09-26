@@ -157,6 +157,13 @@ function Clipboard.retainedPoints()
     return held and held.points or 0
 end
 
+--- Bytes the content keeps resident: two Lua numbers a point, and a small
+--- table per stroke. An estimate for the shared budget, like the history's.
+function Clipboard.retainedBytes()
+    if not held then return 0 end
+    return held.points * 16 + #held.strokes * 160
+end
+
 function Clipboard.clear()
     held = nil
     return true
