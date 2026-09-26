@@ -98,6 +98,9 @@ jobs:
           grep -q '^NOTEBOOK_REPOSITORY_NATIVE_OK' "$RUNNER_TEMP/repo.txt"
           python3 "$GITHUB_WORKSPACE/justdraw.koplugin/tests/notebook_query_plans.py" \
             "$(sed -n 's/^DB //p' "$RUNNER_TEMP/repo.txt")"
+          SDL_VIDEODRIVER=dummy TMPDIR="$RUNNER_TEMP" ./luajit "$GITHUB_WORKSPACE/justdraw.koplugin/tests/thumbnail_native.lua" \
+            | tee "$RUNNER_TEMP/thumb.txt"
+          grep -q '^THUMBNAIL_NATIVE_OK' "$RUNNER_TEMP/thumb.txt"
 
       - name: Toolbar geometry
         run: |
