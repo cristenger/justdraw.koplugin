@@ -2426,6 +2426,7 @@ for _, spec in ipairs({
     "surface_history_spec",
     "clipboard_spec",
     "selection_spec",
+    "placement_spec",
     "canvas_session_spec",
     "document_ink_session_spec",
     "main_canvas_spec",

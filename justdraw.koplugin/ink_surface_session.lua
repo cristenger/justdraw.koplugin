@@ -596,6 +596,12 @@ function SurfaceSession:metaByKey(key)
     return nil
 end
 
+--- The edit sequence the next stroke will take. Placements put pasted paint
+--- orders at or above it, so pasted ink lands above everything on the page.
+function SurfaceSession:nextSeq()
+    return self.next_seq
+end
+
 function SurfaceSession:hasHistory()
     return self.history ~= nil
 end
