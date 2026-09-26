@@ -84,9 +84,10 @@ under **JustDraw → Page notes**, which offers *Delete this page note* and
 here**. The sheet is anchored to the passage you were reading. Its controls sit
 across its top, above the paper, so neither hand rests on them:
 **Draw** and a ✕ that puts the sheet away, with the current pen between them,
-then icons for **Pen · Eraser · Undo · Document notes · More** and the sheet's
-height (**40 % · 70 % · 100 %**). Tap or drag the strip above them to resize
-it.
+then icons for **Pen · Eraser · Edit · Undo · Redo · More**. **More** starts
+with *Document notes* and *Sheet height* (**40 % · 70 % · 100 %**); tap or drag
+the strip above the icons to resize it directly. **Edit** offers the same
+lasso, shapes and paste as a notebook (see [Editing ink](#editing-ink)).
 
 Because a sheet belongs to a passage and not to a page, you can keep reading
 with one open. When the page behind it changes, the sheet's top edge says which
@@ -102,21 +103,61 @@ reader's toolbar; a sheet keeps its controls on top), **Input mode**
 
 1. **Tools → Notebooks** from the file browser, or **JustDraw → Notebooks**
    while reading.
-2. **New notebook** asks for a name and a paper style (*Blank*, *Ruled*,
-   *Squared*, *Dotted*). The page takes the shape of the paper under the
-   editor's controls on the screen it is created on, so it reaches both
-   edges; on a Kindle Scribe in portrait that is 158 × 179 mm, and an export
-   keeps that size. Every page added later has the same shape.
+2. The library is a grid of cards: folders first, then notebooks, each with a
+   picture of its current page, its title and its number of pages. **New
+   notebook** asks for a name and a paper style (*Blank*, *Ruled*, *Narrow
+   ruled*, *Squared*, *Dotted*, *Checklist*). The page takes the shape of the
+   paper under the editor's controls on the screen it is created on, so it
+   reaches both edges; on a Kindle Scribe in portrait that is 158 × 179 mm, and
+   an export keeps that size. Every page added later has the same shape.
 3. The editor fills the screen. A line across the top shows the notebook's
-   title, **Page N of M** and the current pen; under it one row of icons holds
-   **Exit notebook · Pen · Eraser · Undo · Previous page · Next page ·
-   Add page at end · More**. Hold an icon to see its name. The page takes the
-   rest of the screen, so no control sits under a resting hand.
-4. **More** offers *Go to page…*, *Paper style* (for this page), *Rename*,
-   *Delete page*, *Delete notebook*, *Export…* and the shared pen and refresh
-   settings.
-5. Back in the library, each notebook's **Actions** button offers *Rename*,
-   *Delete* and *Export…*.
+   title, **Page N of M** and the current pen; under it one row of nine icons
+   holds **Exit notebook · Pen · Eraser · Edit · Undo · Redo · Previous page ·
+   Next page · More**. On the last page, **Next page** adds a new one. Hold an
+   icon to see its name. The page takes the rest of the screen, so no control
+   sits under a resting hand.
+4. **More** offers *Go to page…*, *Add page at end*, *Paper style* (for this
+   page), *Export…*, *Send…* (with LocalSend, see below), *Rename*, *Delete
+   page*, *Delete notebook* and the shared pen and refresh settings.
+
+### The library
+
+- **Folders** are one level deep. **New folder** makes one; tap a folder to open
+  it, and the first card inside is **Back**. Deleting a folder puts its
+  notebooks back in the library — it never deletes them.
+- **Sort** orders notebooks by *Recently changed*, *Oldest first*, *Title A–Z*
+  or *Title Z–A*, and remembers your choice.
+- **Hold a card** for its actions: *Rename*, *Move…*, *Duplicate*, *Export…*,
+  *Delete* (and *Retry preview* if its picture could not be made).
+- **Select** turns taps into choices. Then **Move**, **Duplicate**, **Export**,
+  **Delete** (and **Send**) act on everything chosen; actions that do not fit
+  the screen are under **More**. A confirmation lists exactly what will be
+  deleted, and the result says what worked and what did not, by name.
+- A **duplicate** is copied in the background, in small steps, and appears when
+  it is complete. Closing its progress box cancels it.
+- Pictures are made one at a time, only for the cards on screen, and kept as
+  files under KOReader's cache; a changed page gets a new picture.
+
+## Editing ink
+
+In a notebook or on a drawing sheet, **Edit** offers three tools. The lasso
+and a shape stay selected until you pick another tool; paste places once and
+goes back to the tool it interrupted. Undo and redo cover every edit, one step
+each.
+
+- **Lasso.** Draw a loop around ink. A stroke with at least half its length
+  inside is selected, and a dashed frame shows the selection. Drag the selection with the pen to move it; the
+  small menu beside it offers **Copy**, **Cut** and **Delete**, and ✕ lets go.
+- **Shapes…** Pick a *Line*, *Arrow*, *Square*, *Rectangle*, *Circle*,
+  *Ellipse* or *Triangle*, a size (*Small*, *Medium*, *Large*) and, for
+  shapes that have one, an angle. Then touch the page: the shape follows the
+  pen and is drawn, in the current pen, where you lift it. Shapes are placed,
+  never recognised from a scribble.
+- **Paste.** After *Copy* or *Cut*, touch the page to place a copy; it follows
+  the pen and is written where you lift it. Paste works across notebooks and
+  sheets.
+
+The stylus's eraser end always erases, and ends any selection first.
 
 ## Document notes
 
@@ -153,15 +194,23 @@ Open **More → Pen settings** to change style and width together, or tap the
 active switches back to the pen.
 
 The eraser removes ink where you drag it. Crossing the middle of a stroke cuts
-it in two, and the surviving pieces stay exactly where they were. **Undo**
-removes your last stroke.
+it in two, and the surviving pieces stay exactly where they were. In notebooks
+and on drawing sheets **Undo** and **Redo** step back and forth through strokes,
+erasing and edits; on page notes over a PDF, **Undo** removes your last stroke.
 
 ## Export
 
 Anything you draw can be written out as PDF, PNG or JPEG, into a folder you
 choose. The entry is always **Export…** — in the JustDraw menu while reading, in
-a notebook's **More** menu, in the library's per-notebook **Actions**, and in
-the document notes list.
+a notebook's **More** menu, in the library (hold a card, or select several),
+and in the document notes list.
+
+**Notebooks can also be exported as Xournal++ (`.xopp`)**, which keeps every
+stroke as an editable vector. Before exporting you are told what Xournal++
+approximates: the highlighter is darker there (50 % instead of 20 %), textured
+strokes lose their grain, the legacy marker becomes a light-gray pen, strokes
+get round ends, narrow ruled and checklist paper become ruled, and paper
+spacing is Xournal++'s own. For a faithful picture, use PDF.
 
 Depending on where you start it, you can export the page you are on, one sheet,
 one notebook or one page of it, or every note in the book. For PDFs the notes
@@ -171,6 +220,26 @@ images…**; for EPUB, **Complete EPUB with notes appendix…**.
 Output is a picture of your ink, not editable vectors. If the folder looks too
 full you are asked before anything is written, and leftovers from an interrupted
 export are offered for deletion.
+
+## Sending with LocalSend
+
+If the [LocalSend plugin](https://github.com/kaikozlov/localsend.koplugin) is
+installed and working, **Send…** appears in a notebook's **More** menu and as
+**Send** in the library's selection mode. Choose *PDF* or *Xournal++*; JustDraw
+exports first, then opens LocalSend's own device picker with the file (or,
+for several notebooks, a folder holding them). From there LocalSend shows the
+transfer and its result — JustDraw only says that LocalSend is open. If one
+export fails, nothing is sent until you retry or cancel. Without LocalSend,
+there is no Send button.
+
+Files prepared for sending are kept under KOReader's cache in
+`justdraw-send`, and removed only after a day, by a later session, and only the
+ones JustDraw itself wrote.
+
+## Language
+
+JustDraw's own texts follow KOReader's language. Spanish is included; any other
+language shows KOReader's translation where it has one, and English otherwise.
 
 ## Troubleshooting
 
