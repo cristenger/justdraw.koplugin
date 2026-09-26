@@ -2397,6 +2397,7 @@ for _, spec in ipairs({
     "erase_repro_spec",
     "style_spec",
     "tool_state_spec",
+    "i18n_spec",
     "compat_spec",
     "conformance_policy_spec",
     "stylus_sequence_spec",

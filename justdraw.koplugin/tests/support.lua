@@ -2061,6 +2061,9 @@ function support.install()
     package.preload["ui/uimanager"] = function() return UIManager end
     package.preload["logger"] = function() return logger end
     local gettext = setmetatable({
+        -- GetText's effective language; "C" is its untranslated default.
+        -- ink_i18n reads it to pick the plugin catalogue.
+        current_lang = "C",
         ngettext = function(single, plural, count)
             return count == 1 and single or plural
         end,
