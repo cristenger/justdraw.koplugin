@@ -1084,6 +1084,7 @@ function JustDraw:onSuspend()
     -- progress modal that is no longer on screen.
     Export.cancelRunning()
     if self.notes_controller then self.notes_controller:close() end
+    if self.notebook_ui and self.notebook_ui.onSuspend then self.notebook_ui:onSuspend() end
     if self.notebooks then self.notebooks:onSuspend() end
     self:clearSheetEditing("suspend")
     if not self.is_docless then self:setDrawing(false) end

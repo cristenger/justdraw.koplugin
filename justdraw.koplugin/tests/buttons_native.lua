@@ -2214,32 +2214,68 @@ else
                 end)
             end
 
-            case("Notebooks library: Actions > Rename, Delete, Export… each open and close", function()
-                for _, entry in ipairs({ "Rename", "Delete", "Export…" }) do
+            --- The card showing a notebook, by title. A card is not a Button:
+            --- it is painted by the gallery's grid, and taps on it are the
+            --- gallery's own hit test (ink_library_card).
+            local function cardFor(title)
+                paint()
+                for _, card in ipairs(library().cards or {}) do
+                    if card.item and card.item.title == title then return card end
+                end
+            end
+
+            -- Holding a card is how its actions open. The gesture's timing is
+            -- KOReader's; what is under test here is the dialog, so the hold
+            -- is delivered as the gallery receives it.
+            local function holdCard(title)
+                local card = expect(cardFor(title), "no card for %q", title)
+                library():holdCard(card)
+                tick(2)
+            end
+
+            case("Notebooks library: holding a card > Rename, Move, Delete, Export… each open and close", function()
+                for _, entry in ipairs({ "Rename", "Move…", "Delete", "Export…" }) do
                     roundTrip("Actions > " .. entry, function()
                         local before = stack()[1]
-                        press("Actions", library())
+                        holdCard("Buttons")
                         press(entry, opened(before, "Actions"))
                     end)
                 end
             end)
 
-            case("Notebooks library: Actions > Close", function()
+            case("Notebooks library: holding a card > Close", function()
                 local before = stack()[1]
-                press("Actions", library())
+                holdCard("Buttons")
                 press("Close", opened(before, "Actions"))
                 settled("Actions > Close")
             end)
 
-            case("Notebooks library: a row opens its notebook, and Exit comes back", function()
-                local row = expect(findButton(library(), "Buttons"), "no row for the notebook")
-                tap(row)
+            case("Notebooks library: Sort and New folder open and close", function()
+                roundTrip("Sort", function() press("Sort", library()) end)
+                roundTrip("New folder", function() press("New folder", library()) end)
+            end)
+
+            case("Notebooks library: Select, then Done", function()
+                press("Select", library())
+                tick(2)
+                expect(library().selecting, "Select did not start selection")
+                tap(expect(cardFor("Buttons"), "no card"))
+                expect(library().selection_count == 1, "a tap did not select the card")
+                press("Done", library())
+                tick(2)
+                expect(not library().selecting, "Done did not end selection")
+                settled("selection")
+            end)
+
+            case("Notebooks library: a card opens its notebook, and Exit comes back", function()
+                local card = expect(cardFor("Buttons"), "no card for the notebook")
+                tap(card)
                 wait(3, function() return editor() ~= nil end)
-                expect(editor(), "the row did not open the notebook")
+                expect(editor(), "the card did not open the notebook")
                 tap(editor().layout[1][1])
                 wait(3, function() return editor() == nil end)
                 expect(stack()[1] == library(), "not back in the library (stack: %s)", describeStack())
-                settled("row")
+                settled("card")
             end)
 
             case("Notebooks library: its close icon closes the library", function()

@@ -101,6 +101,11 @@ jobs:
           SDL_VIDEODRIVER=dummy TMPDIR="$RUNNER_TEMP" ./luajit "$GITHUB_WORKSPACE/justdraw.koplugin/tests/thumbnail_native.lua" \
             | tee "$RUNNER_TEMP/thumb.txt"
           grep -q '^THUMBNAIL_NATIVE_OK' "$RUNNER_TEMP/thumb.txt"
+          # The gallery at four densities: geometry, taps, real thumbnails,
+          # memory over 100 page changes, and 50/500-notebook timings.
+          TMPDIR="$RUNNER_TEMP" ./luajit "$GITHUB_WORKSPACE/justdraw.koplugin/tests/library_native.lua" \
+            | tee "$RUNNER_TEMP/library.txt"
+          grep -q '^LIBRARY_CHECK_OK' "$RUNNER_TEMP/library.txt"
 
       - name: Toolbar geometry
         run: |

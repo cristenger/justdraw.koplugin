@@ -21,6 +21,7 @@ function NotebookUI.new(opts)
         plugin = assert(opts.plugin),
         controller = assert(opts.controller),
         library_factory = opts.library_factory or Library,
+        thumbnail_factory = opts.thumbnail_factory,
         editor_factory = opts.editor_factory or Editor,
         library = nil,
         editor = nil,
@@ -52,12 +53,46 @@ function NotebookUI:openLibrary()
         is_covered = function() return self.editor ~= nil end,
         on_open = function(item) self:openNotebook(item) end,
         on_close = function() self:closeLibrary() end,
+        thumbnail_factory = self.thumbnail_factory ~= false
+            and (self.thumbnail_factory or function() return self:_newThumbnails() end)
+            or nil,
     }
     self.library = library
     UIManager:show(library, "ui")
     library:markShown()
     library:startLoading()
     return library
+end
+
+--[[--
+The gallery's thumbnail queue: files under KOReader's cache directory, the
+export's raster, MuPDF's reduction and KOReader's PNG writer (ADR-58). One per
+library window; closing the window closes it and cancels its job.
+]]
+function NotebookUI:_newThumbnails()
+    local DataStorage = require("datastorage")
+    local Thumbs = require("ink_thumbnail")
+    local deps = Thumbs.nativeDeps()
+    local controller = self.controller
+    local dir = DataStorage:getDataDir() .. "/cache/justdraw-thumbnails"
+    deps.fs.mkdir(DataStorage:getDataDir() .. "/cache")
+    deps.fs.mkdir(dir)
+    return Thumbs.new{
+        dir = dir,
+        repository = function() return controller:exportRepository() end,
+        schedule = function(delay, fn)
+            if delay and delay > 0 then UIManager:scheduleIn(delay, fn)
+            else UIManager:nextTick(fn) end
+        end,
+        unschedule = function(fn) UIManager:unschedule(fn) end,
+        raster_open = deps.raster_open, scale = deps.scale, write = deps.write,
+        fs = deps.fs,
+    }
+end
+
+function NotebookUI:onSuspend()
+    if self.library then self.library:onSuspend() end
+    return true
 end
 
 function NotebookUI:closeLibrary()
@@ -316,6 +351,7 @@ function NotebookUI:onResume()
         self.editor:onFullRepaint()
         UIManager:setDirty(self.editor, "full")
     elseif self.library then
+        self.library:onResume()
         UIManager:setDirty(self.library, "ui")
     end
     return true

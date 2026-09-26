@@ -1128,7 +1128,7 @@ return function(ctx)
         controller.repository = support.newNotebookStore()
         plugin:openNotebookLibrary()
         env.UIManager:flush()
-        plugin.notebook_ui.library.layout[1][1].callback()
+        plugin.notebook_ui.library:activateCard(plugin.notebook_ui.library.cards[1])
         env.UIManager:flush()
         return plugin, controller, plugin.notebook_ui.editor
     end

@@ -1651,6 +1651,196 @@ function support.newNotebookStore(opts)
         return { chunks = 0, strokes = 0, pages = 0, notebooks = 0, changed = 0 }
     end
 
+    -- ---------------------------------------------------- v3: the gallery
+    -- The same contracts as the repository's (ADR-58), over tables: folders
+    -- of one level, sorted pages of notebooks with an opaque cursor, content
+    -- revisions and bounded, hidden copies. Offsets stand in for keysets; the
+    -- controller never looks inside a cursor.
+    store.folders = opts.folders or {}
+    store.copies = {}
+    store.calls.list_folders = 0
+    store.calls.list_notebook_page = 0
+    store.calls.copy_batches = 0
+
+    function store:dbUid() return self.db_uid or "fake-db" end
+
+    function store:listFolders(spec)
+        self.calls.list_folders = self.calls.list_folders + 1
+        if self.fail_list_folders then return nil, self.fail_list_folders end
+        spec = spec or {}
+        local live = {}
+        for _, f in ipairs(self.folders) do
+            if not f.deleted_at then
+                local count = 0
+                for _, n in ipairs(self.notebooks) do
+                    if n.folder_id == f.id and not n.deleted_at and not n.copy_state then
+                        count = count + 1
+                    end
+                end
+                local row = copyRow(f)
+                row.notebook_count = count
+                live[#live + 1] = row
+            end
+        end
+        table.sort(live, function(a, b)
+            local la, lb = a.name:lower(), b.name:lower()
+            if la ~= lb then return la < lb end
+            return a.id < b.id
+        end)
+        local out = {}
+        local limit = math.min(tonumber(spec.limit) or 50, 200)
+        for _, f in ipairs(live) do
+            local after = spec.after_name ~= nil and (f.name:lower() < spec.after_name:lower()
+                or (f.name:lower() == spec.after_name:lower() and f.id <= spec.after_id))
+            if not after then
+                out[#out + 1] = f
+                if #out >= limit then break end
+            end
+        end
+        return out
+    end
+
+    function store:createFolder(name)
+        if self.fail_create_folder then return nil, self.fail_create_folder end
+        local folder = { id = #self.folders + 1, name = name }
+        self.folders[#self.folders + 1] = folder
+        return copyRow(folder)
+    end
+
+    local function activeFolder(id)
+        for _, f in ipairs(store.folders) do
+            if f.id == id and not f.deleted_at then return f end
+        end
+    end
+
+    function store:renameFolder(id, name)
+        local f = activeFolder(id)
+        if not f then return nil, "not_found" end
+        f.name = name
+        return true
+    end
+
+    function store:deleteFolder(id)
+        if self.fail_delete_folder then return nil, self.fail_delete_folder end
+        local f = activeFolder(id)
+        if not f then return nil, "not_found" end
+        for _, n in ipairs(self.notebooks) do
+            if n.folder_id == id then n.folder_id = nil end
+        end
+        f.deleted_at = 1
+        return true
+    end
+
+    function store:moveNotebook(id, folder_id)
+        if self.fail_move and self.fail_move[id] then return nil, self.fail_move[id] end
+        local n = activeNotebook(id)
+        if not n or n.copy_state then return nil, "not_found" end
+        if folder_id ~= nil and not activeFolder(folder_id) then return nil, "not_found" end
+        n.folder_id = folder_id
+        return true
+    end
+
+    local SORTS = {
+        recent = function(a, b)
+            if (a.updated_at or 0) ~= (b.updated_at or 0) then return (a.updated_at or 0) > (b.updated_at or 0) end
+            return a.id > b.id
+        end,
+        oldest = function(a, b)
+            if (a.updated_at or 0) ~= (b.updated_at or 0) then return (a.updated_at or 0) < (b.updated_at or 0) end
+            return a.id < b.id
+        end,
+        title_asc = function(a, b)
+            if a.title:lower() ~= b.title:lower() then return a.title:lower() < b.title:lower() end
+            return a.id < b.id
+        end,
+        title_desc = function(a, b)
+            if a.title:lower() ~= b.title:lower() then return a.title:lower() > b.title:lower() end
+            return a.id > b.id
+        end,
+    }
+
+    function store:listNotebookPage(spec)
+        self.calls.list_notebook_page = self.calls.list_notebook_page + 1
+        if self.fail_list_page then return nil, self.fail_list_page end
+        spec = spec or {}
+        local order = SORTS[spec.sort or "recent"]
+        if not order then return nil, "bad_sort" end
+        local rows = {}
+        for _, n in ipairs(self.notebooks) do
+            local in_scope = spec.scope == "all" or spec.scope == nil
+                or (spec.scope == "root" and n.folder_id == nil)
+                or (spec.scope == "folder" and n.folder_id == spec.folder_id)
+            if in_scope and not n.deleted_at and not n.copy_state then
+                local row = copyRow(n)
+                row.uid = row.uid or ("nb" .. row.id)
+                rows[#rows + 1] = row
+            end
+        end
+        table.sort(rows, order)
+        local offset = spec.cursor and spec.cursor.offset or 0
+        local limit = math.min(tonumber(spec.limit) or 50, 200)
+        local out = {}
+        for i = offset + 1, math.min(#rows, offset + limit) do out[#out + 1] = rows[i] end
+        local next_cursor
+        if offset + limit < #rows then next_cursor = { v = 1, offset = offset + limit } end
+        return out, next_cursor
+    end
+
+    function store:thumbnailPage(notebook_id)
+        local n = activeNotebook(notebook_id)
+        if not n then return nil, "not_found" end
+        local page = n.current_page_id and activePage(n.current_page_id)
+        if not page then return nil, "no_page" end
+        local notebook = copyRow(n)
+        notebook.uid = notebook.uid or ("nb" .. notebook.id)
+        local row = copyRow(page)
+        row.revision = row.revision or 1
+        return row, notebook
+    end
+
+    --- Copies are "done" after `copy_batches_needed` batches (default 2).
+    function store:beginCopy(source_id, title)
+        if self.fail_begin_copy then return nil, self.fail_begin_copy end
+        local n = activeNotebook(source_id)
+        if not n then return nil, "not_found" end
+        local dest = { id = #self.notebooks + 1, title = title or n.title,
+            page_count = n.page_count, copy_state = "copying", folder_id = n.folder_id,
+            updated_at = n.updated_at, current_page_id = n.current_page_id }
+        self.notebooks[#self.notebooks + 1] = dest
+        local state = { source_id = source_id, dest_id = dest.id, batches = 0 }
+        self.copies[#self.copies + 1] = state
+        return state
+    end
+
+    function store:copyBatch(state)
+        self.calls.copy_batches = self.calls.copy_batches + 1
+        if self.fail_copy_batch then return nil, self.fail_copy_batch end
+        state.batches = state.batches + 1
+        return state.batches >= (self.copy_batches_needed or 2)
+    end
+
+    function store:finishCopy(state)
+        if self.fail_finish_copy then return nil, self.fail_finish_copy end
+        for _, n in ipairs(self.notebooks) do
+            if n.id == state.dest_id then n.copy_state = nil end
+        end
+        state.done = true
+        return state.dest_id
+    end
+
+    function store:cancelCopy(state)
+        state.done = true
+        state.cancelled = true
+        for _, n in ipairs(self.notebooks) do
+            if n.id == state.dest_id and n.copy_state then n.copy_state = "cancelled" end
+        end
+        return true
+    end
+
+    function store:purgeAbandonedCopies()
+        return true
+    end
+
     return store
 end
 
@@ -2054,6 +2244,7 @@ function support.install()
         o = o or {}
         env.dialogs[#env.dialogs + 1] = o
         o.handleEvent = function() return true end
+        o.setTitle = function(self, title) self.title = title end
         return o
     end
 

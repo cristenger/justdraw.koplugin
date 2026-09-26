@@ -92,19 +92,92 @@ function Controller:listNotebooks(cursor, limit)
         opts.after_id = cursor.id
     end
     local rows, list_err = repo:listNotebooks(opts)
-    -- A library walk may request hundreds of keyset pages. Seed maintenance
-    -- once when the library first opens; subsequent tombstones explicitly
-    -- schedule it from delete/undo/erase paths.
-    if rows and not self.maintenance_seeded then
-        self.maintenance_seeded = true
-        self:schedulePurge()
-    end
+    if rows then self:_seedMaintenance() end
     return rows, list_err
 end
 
-function Controller:listNotebookBatch(cursor, limit)
+--[[--
+One batch of the gallery: folders first (at the root only), then notebooks in
+`opts.sort`, `limit` items in all. Folders are paginated with the notebooks
+rather than loaded whole, so the cursor says which list it is in:
+`{ phase = "folders", after_name, after_id }` or
+`{ phase = "notebooks", cursor = <the repository's cursor> }`.
+
+A repository without folders (an older fake, a store that predates v3) is
+listed the old way, by recency, with no folders.
+]]
+function Controller:listNotebookBatch(cursor, limit, opts)
     limit = tonumber(limit) or 50
     limit = math.max(1, math.min(199, math.floor(limit)))
+    opts = opts or {}
+    local repo, err = self:_ensureRepository()
+    if not repo then return nil, err end
+    if not repo.listNotebookPage then return self:_legacyBatch(cursor, limit) end
+    local folder_id = opts.folder_id
+    local sort = opts.sort or "recent"
+    local items, next_cursor = {}, nil
+    local phase = cursor and cursor.phase or (folder_id and "notebooks" or "folders")
+    if phase == "folders" and not folder_id then
+        local folders, folder_err = repo:listFolders{
+            after_name = cursor and cursor.after_name,
+            after_id = cursor and cursor.after_id,
+            limit = limit + 1,
+        }
+        if not folders then return nil, folder_err end
+        for i = 1, math.min(limit, #folders) do
+            folders[i].kind = "folder"
+            items[#items + 1] = folders[i]
+        end
+        if #folders > limit then
+            local last = items[#items]
+            next_cursor = { phase = "folders", after_name = last.name, after_id = last.id }
+        end
+    end
+    if not next_cursor then
+        local room = limit - #items
+        local repo_cursor = cursor and cursor.phase == "notebooks" and cursor.cursor or nil
+        -- With no room left, one row is still asked for: it says whether a
+        -- next screen exists, so Next is never offered onto an empty screen.
+        local rows, rows_next = repo:listNotebookPage{
+            scope = folder_id and "folder" or "root", folder_id = folder_id,
+            sort = sort, cursor = repo_cursor, limit = math.max(1, room),
+        }
+        if not rows then return nil, rows_next end
+        if room == 0 then
+            if #rows > 0 then next_cursor = { phase = "notebooks" } end
+        else
+            for _, row in ipairs(rows) do
+                row.kind = "notebook"
+                items[#items + 1] = row
+            end
+            if rows_next then next_cursor = { phase = "notebooks", cursor = rows_next } end
+        end
+    end
+    self:_seedMaintenance()
+    return {
+        items = items,
+        input_cursor = cursor,
+        next_cursor = next_cursor,
+        has_more = next_cursor ~= nil,
+        folder_id = folder_id,
+        sort = sort,
+        writable = self.repository and self.repository.read_only ~= true or false,
+        read_only_code = self.repository and self.repository.read_only
+            and "schema_newer" or nil,
+    }
+end
+
+-- A library walk may request hundreds of keyset pages. Seed maintenance once
+-- when the library first opens; subsequent tombstones explicitly schedule it
+-- from delete/undo/erase paths.
+function Controller:_seedMaintenance()
+    if not self.maintenance_seeded then
+        self.maintenance_seeded = true
+        self:schedulePurge()
+    end
+end
+
+function Controller:_legacyBatch(cursor, limit)
     local rows, err = self:listNotebooks(cursor, limit + 1)
     if not rows then return nil, err end
     local has_more = #rows > limit
@@ -123,6 +196,104 @@ function Controller:listNotebookBatch(cursor, limit)
         read_only_code = self.repository and self.repository.read_only
             and "schema_newer" or nil,
     }
+end
+
+--- A repository call that changes the library, announced when it did.
+function Controller:_mutate(method, ...)
+    local repo, err = self:_ensureRepository()
+    if not repo then return nil, err end
+    if repo.read_only then return nil, "read_only" end
+    if not repo[method] then return nil, "unsupported" end
+    local a, b = repo[method](repo, ...)
+    if a and self.on_library_changed then self.on_library_changed(self) end
+    return a, b
+end
+
+function Controller:listFolders(opts)
+    local repo, err = self:_ensureRepository()
+    if not repo then return nil, err end
+    if not repo.listFolders then return {} end
+    return repo:listFolders(opts)
+end
+
+function Controller:createFolder(name) return self:_mutate("createFolder", name) end
+function Controller:renameFolder(id, name) return self:_mutate("renameFolder", id, name) end
+function Controller:deleteFolder(id) return self:_mutate("deleteFolder", id) end
+function Controller:moveNotebook(id, folder_id) return self:_mutate("moveNotebook", id, folder_id) end
+
+--[[--
+What the gallery asks `ink_thumbnail` for to draw a notebook's card: its live
+current page (or first page), identified by database, notebook, page and
+content revision, at `w` x `h`.
+]]
+function Controller:thumbnailRequest(item, w, h)
+    local repo, err = self:_ensureRepository()
+    if not repo then return nil, err end
+    if not repo.thumbnailPage or not repo.dbUid then return nil, "unsupported" end
+    local page, notebook = repo:thumbnailPage(item.id)
+    if not page then return nil, notebook end
+    local uid, uid_err = repo:dbUid()
+    if not uid then return nil, uid_err end
+    return require("ink_thumbnail").request(uid, notebook, page, w, h)
+end
+
+--[[--
+Copy a notebook in bounded batches, one per scheduler tick, hidden until it is
+complete (ADR-58). `opts.title` names the copy; `opts.on_done(new_id | nil,
+reason)` runs once. Returns a job with `cancel()`, which abandons the copy --
+the partial rows are purged later, in batches -- and never calls `on_done`.
+
+The source is flushed first when it is the open notebook, so the copy has what
+the reader sees; a later edit to the source makes the copy fail rather than
+come out half old and half new (`source_changed`).
+]]
+Controller.COPY_LIMITS = { strokes = 32, chunks = 128, bytes = 512 * 1024 }
+
+function Controller:duplicateNotebook(id, opts)
+    opts = opts or {}
+    local repo, err = self:_ensureRepository()
+    if not repo then return nil, err end
+    if repo.read_only then return nil, "read_only" end
+    if not repo.beginCopy then return nil, "unsupported" end
+    if self.active_session and self.active_session:notebook().id == id then
+        self:onFlushSettings()
+    end
+    local state, begin_err = repo:beginCopy(id, opts.title)
+    if not state then return nil, begin_err end
+    local job = { done = false }
+    local action
+    local function settle(new_id, reason)
+        if job.done then return end
+        job.done = true
+        if not new_id then
+            repo:cancelCopy(state)
+            self:schedulePurge()
+        elseif self.on_library_changed then
+            self.on_library_changed(self)
+        end
+        if opts.on_done then opts.on_done(new_id, reason) end
+    end
+    action = function()
+        if job.done or self.closed then return end
+        local finished, batch_err = repo:copyBatch(state, opts.limits or Controller.COPY_LIMITS)
+        if finished == nil then return settle(nil, batch_err or "copy_failed") end
+        if not finished then
+            self.schedule(action)
+            return
+        end
+        local new_id, finish_err = repo:finishCopy(state)
+        settle(new_id, finish_err)
+    end
+    function job.cancel()
+        if job.done then return false end
+        job.done = true
+        self.unschedule(action)
+        repo:cancelCopy(state)
+        self:schedulePurge()
+        return true
+    end
+    self.schedule(action)
+    return job
 end
 
 -- Configure the non-visual interaction seam before a notebook is opened.
@@ -385,7 +556,14 @@ function Controller:runOnePurgeBatch(limits)
     end
     if session and session:stateName() == "loading" then return nil, "loading" end
     if session and session:stateName() == "save_failed" then return nil, "save_failed" end
-    return repo:purgeDeletedBatch(limits)
+    local counts, purge_err = repo:purgeDeletedBatch(limits)
+    -- Abandoned copies (cancelled here, or left by a process that died) go
+    -- in the same bounded passes, once the tombstones are done.
+    if counts and not (counts.changed and counts.changed > 0) and repo.purgeAbandonedCopies then
+        local finished = repo:purgeAbandonedCopies(limits)
+        if finished == false then counts.changed = 1 end
+    end
+    return counts, purge_err
 end
 
 function Controller:_schedulePurgeTick(delay)

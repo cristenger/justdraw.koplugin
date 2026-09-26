@@ -190,7 +190,7 @@ return function(ctx)
         plugin:openNotebookLibrary()
         ctx.env.UIManager:flush()
         local library = plugin.notebook_ui.library
-        library.layout[1][1].callback()
+        library:activateCard(library.cards[1])
         local editor = plugin.notebook_ui.editor
         local session = controller:activeSession()
         t:check(editor ~= nil and session ~= nil, "editor and page session opened")
@@ -252,7 +252,7 @@ return function(ctx)
         controller.repository = support.newNotebookStore()
         plugin:openNotebookLibrary()
         ctx.env.UIManager:flush()
-        plugin.notebook_ui.library.layout[1][1].callback()
+        plugin.notebook_ui.library:activateCard(plugin.notebook_ui.library.cards[1])
         local screen = ctx.env.Device.screen
         local before = #ctx.env.UIManager.dirty
         screen.rotation = screen.DEVICE_ROTATED_UPSIDE_DOWN
@@ -299,7 +299,7 @@ return function(ctx)
         plugin:openNotebookLibrary()
         ctx.env.UIManager:flush()
         local library = plugin.notebook_ui.library
-        library.layout[1][1].callback()
+        library:activateCard(library.cards[1])
         local editor = plugin.notebook_ui.editor
         local resize_calls = 0
         function controller:onScreenResize()
@@ -324,7 +324,7 @@ return function(ctx)
         controller.repository = support.newNotebookStore()
         plugin:openNotebookLibrary()
         ctx.env.UIManager:flush()
-        plugin.notebook_ui.library.layout[1][1].callback()
+        plugin.notebook_ui.library:activateCard(plugin.notebook_ui.library.cards[1])
         local adapter = plugin.notebook_input
         t:check(type(adapter.on_dirty) == "function", "editor callback is installed")
         plugin:teardown()
