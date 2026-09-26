@@ -201,7 +201,10 @@ return function(ctx)
         sched:advance(0.2)
         t:eq(sel.state, "selected", "still selected")
         t:eq(session:canRedo(), true, "redo survives a no-op move")
-        t:eq(sel.masked, false, "the originals are visible again")
+        t:eq(sel.masked, true, "the layer still stands in for the originals")
+        t:eq(sel.drag_dx, 0, "at their own place")
+        sel:clear("tool")
+        t:eq(sel.masked, false, "and ending the selection shows them again")
     end)
 
     t:case("a drag is clamped to the page", function()
@@ -237,6 +240,32 @@ return function(ctx)
         t:check(math.abs(x - 250) < 0.05, "moved")
     end)
 
+    t:case("the pen-down that starts a drag replays nothing: the mask is made at resolve", function()
+        local sel, session, _, sched, contact = fixture()
+        local a = draw(session, { 200, 200, 300, 200 })
+        lasso(sel, contact, 150, 150, 350, 260)
+        sched:advance(0.2)
+        t:eq(session:cache():isHidden(a), true, "masked when the selection resolved")
+        local hides, repairs = 0, 0
+        local real_hide = session.hideStrokes
+        session.hideStrokes = function(...) hides = hides + 1; return real_hide(...) end
+        local cache = session:cache()
+        local real_repair = cache.repair
+        cache.repair = function(...) repairs = repairs + 1; return real_repair(...) end
+        contact.down = true
+        sel:contactBegin(250, 200)
+        sel:contactMove(260, 210)
+        t:eq(hides, 0, "no mask made under the pen")
+        t:eq(repairs, 0, "and no raster repaired under it")
+        sel:contactEnd()
+        contact.down = false
+        cache.repair = real_repair
+        session.hideStrokes = real_hide
+        sched:advance(0.2)
+        t:eq(session:cache():isHidden(session:metaByKey(a.key)), true,
+            "the moved stroke is masked again after the commit")
+    end)
+
     t:case("a refused move puts the originals back, visible and in place", function()
         local sel, session, p, sched, contact = fixture()
         local a = draw(session, { 200, 200, 300, 200 })
@@ -248,7 +277,8 @@ return function(ctx)
         sched:advance(0.2)
         session.replaceStrokes = real
         t:eq(sel.state, "selected", "back to selected")
-        t:eq(session:cache():isHidden(a), false, "unmasked")
+        t:eq(session:cache():isHidden(a), true, "still masked while selected, drawn by the layer")
+        t:eq(sel.drag_dx, 0, "put back in place")
         local x = firstPoint(session, a.key)
         t:check(math.abs(x - 200) < 0.05, "never moved")
         t:eq(#p.notices, 1, "and the reader was told")

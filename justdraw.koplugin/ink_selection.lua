@@ -453,6 +453,14 @@ function Selection:_resolveFinish(found)
     self.drag_dx, self.drag_dy = 0, 0
     self:_erasePath()
     self.presenter:setPainter(self.painter)
+    -- Lift the originals off the page raster now, in this job, and let the
+    -- layer draw them where they are: the pen-down that starts a drag then
+    -- changes a state and an offset, and replays nothing (§D.3).
+    local hidden = session:hideStrokes(self:_keys())
+    if hidden then
+        self.masked = true
+        if type(hidden) == "table" then self.presenter:presentCacheBox(hidden) end
+    end
     self:_setState("selected")
     self:_showMenu()
     self:_repaintFrame()
@@ -530,7 +538,8 @@ frame's dashes are painted rectangle by rectangle: nothing is allocated.
 ]]
 function Selection:_paintOverlay(bb, clip)
     if not self.box then return end
-    if self.state == "dragging" and self.layer then
+    -- The layer stands in for the originals whenever they are masked.
+    if (self.masked or self.state == "dragging") and self.layer then
         self.layer:paintInto(bb, clip, self.rect_b)
     end
     local r = self:_frameScreen(self.rect_a)
@@ -561,12 +570,16 @@ function Selection:_beginDrag(cx, cy)
         self:clear("stale")
         return nil, "stale"
     end
-    local keys = self:_keys()
-    local box = session:hideStrokes(keys)
-    if not box then
-        return nil, "unavailable"
+    local box
+    if not self.masked then
+        -- Only when masking at resolve time failed: the old path, a repair
+        -- under the pen, rather than no move at all.
+        box = session:hideStrokes(self:_keys())
+        if not box then
+            return nil, "unavailable"
+        end
+        self.masked = true
     end
-    self.masked = true
     self.start_x, self.start_y = cx, cy
     self:_hideMenu()
     self:_setState("dragging")
@@ -623,7 +636,7 @@ function Selection:_revertDrag()
     self.drag_dx, self.drag_dy = self.committed_dx, self.committed_dy
     if self.layer then self.layer:setOffset(self.drag_dx, self.drag_dy) end
     self:_setState("selected")
-    self:_unmask(true)
+    -- The originals stay masked while selected: the layer draws them.
     self.presenter:repaint(ox0, oy0, ox1, oy1)
     self:_showMenu()
     self:_repaintFrame()
@@ -691,12 +704,16 @@ function Selection:_commitMove()
         self.presenter:notify(_("The selection could not be moved. Try again."))
         return
     end
-    -- The removed originals took their mask with them; nothing to unmask.
+    -- The removed originals took their mask with them; the moved strokes
+    -- are masked again here, in this job, so the next drag starts clean.
     self.masked = false
     for i = 1, #self.items do self.items[i].version = self.items[i].version + 1 end
     self.committed_dx, self.committed_dy = self.drag_dx, self.drag_dy
     self:_setState("selected")
+    local hidden = not result.repaint_error and session:hideStrokes(keys)
+    if hidden then self.masked = true end
     if result.box then self.presenter:presentCacheBox(result.box) end
+    if type(hidden) == "table" then self.presenter:presentCacheBox(hidden) end
     if result.repaint_error then
         self:clear("repaint_failed")
         return

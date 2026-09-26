@@ -611,6 +611,11 @@ function Cache:forgetStroke(id)
     end
     self.grid:remove(id)
     self.chunks_by_id[id] = nil
+    -- A forgotten stroke takes its mask entry with it (ADR-55).
+    if m.token and self.hidden[m.token] then
+        self.hidden[m.token] = nil
+        self.hidden_count = self.hidden_count - 1
+    end
     return m
 end
 
