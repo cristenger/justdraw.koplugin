@@ -2440,6 +2440,7 @@ for _, spec in ipairs({
     "notebook_library_spec",
     "notebook_editor_spec",
     "export_pdf_spec",
+    "export_xopp_spec",
     "export_raster_spec",
     "export_job_spec",
     "export_reader_spec",
