@@ -170,7 +170,12 @@ function NotebookUI:openNotebook(item)
         controller = self.controller,
         notebook = item,
         get_eraser = function() return self.plugin.eraser end,
-        set_eraser = function(value) self.plugin.eraser = value and true or false end,
+        set_eraser = function(value)
+            self.plugin:setTool(value and "eraser" or "pen", { quiet = true })
+        end,
+        get_tool = function() return self.plugin:toolFor("notebook") end,
+        set_tool = function(value) self.plugin:setTool(value, { quiet = true }) end,
+        observe_tool = function(fn) return self.plugin:observeTool(fn) end,
         get_input_mode = function() return self.plugin.input_mode end,
         set_input_mode = function(value) return self.plugin:setInputMode(value) end,
         get_pen_width = function() return self.plugin.pen_width end,

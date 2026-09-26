@@ -42,6 +42,7 @@ local NotebookController = require("ink_notebook_controller")
 local NotebookInput = require("ink_notebook_input")
 local PalmGate = require("ink_wacom_palm")
 local Style = require("ink_style")
+local ToolState = require("ink_tool_state")
 local StylusGeometry = require("ink_stylus_geometry")
 local StylusSequence = require("ink_stylus_sequence")
 local Legacy = require("ink_legacy_ink")
@@ -519,6 +520,7 @@ function JustDraw:init()
     self.screen_resize_pending = false
     self.drawing = false
     self.eraser = false
+    self.tool = "pen"
     self.bar = nil
     self.pen_width = Compat.readSetting(G_reader_settings, "pen_width", PEN_MEDIUM)
     self.pen_style = Style.normalize(
@@ -1999,21 +2001,74 @@ function JustDraw:setInputMode(mode)
     return true
 end
 
-function JustDraw:setEraser(on)
-    if on and self.canvas_open and self.session and not self.session:isWritable() then
+--[[--
+Choose the pen's tool (ADR-54): "pen", "eraser", "select", "shape" or "paste".
+
+The one place the tool changes. `self.eraser` stays, derived, because main.lua
+reads it in many places; nothing else writes it. Observers -- the notebook
+editor, the sheet's edit controllers -- hear every change, so a selection or a
+pending placement ends the moment the tool it belonged to does (§D.6.6).
+
+`opts.quiet` is for the notebook editor, which owns its own screen: it must
+not switch the reader's drawing mode or repaint the reader's bar.
+]]
+function JustDraw:setTool(name, opts)
+    name = ToolState.normalize(name)
+    opts = opts or {}
+    if name == "eraser" and self.canvas_open and self.session
+        and not self.session:isWritable() then
         self:notify(_("This sheet is read-only"))
         return
     end
-    self.eraser = on and true or false
+    local previous = self.tool or "pen"
+    if previous ~= name and name == "paste" then
+        -- Pasting returns to the tool it interrupted; the tool before that
+        -- paste is what the reader was using, not "paste" itself.
+        self.previous_tool = previous
+    elseif previous ~= name and previous ~= "paste" then
+        self.previous_tool = previous
+    end
+    self.tool = name
+    self.eraser = name == "eraser"
     if not self.eraser then
         self:endCanvasErase()
         self.direct_erase_x, self.direct_erase_y = nil, nil
     end
+    if previous ~= name then
+        for _, observer in ipairs(self.tool_observers or {}) do
+            local ok, err = pcall(observer, name, previous)
+            if not ok then logger.err("JustDraw: tool observer failed:", err) end
+        end
+    end
+    if opts.quiet then return end
     if self.eraser and not self.drawing then
         self:setDrawing(true)   -- also updates the bar
     elseif self.bar then
         self.bar:update(true)
     end
+end
+
+--- The tool as `surface` understands it ("notebook", "sheet", "page_ink",
+--- "legacy"): unsupported editing tools draw.
+function JustDraw:toolFor(surface)
+    return ToolState.effective(surface, self.tool or (self.eraser and "eraser") or "pen")
+end
+
+--- Hear every tool change; returns a function that stops listening.
+function JustDraw:observeTool(fn)
+    self.tool_observers = self.tool_observers or {}
+    local list = self.tool_observers
+    list[#list + 1] = fn
+    return function()
+        for i = #list, 1, -1 do
+            if list[i] == fn then table.remove(list, i) end
+        end
+    end
+end
+
+--- The eraser toggle, kept for its many callers. Off means the pen.
+function JustDraw:setEraser(on)
+    return self:setTool(on and "eraser" or "pen")
 end
 
 function JustDraw:resetContacts()
