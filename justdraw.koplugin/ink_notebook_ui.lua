@@ -199,7 +199,12 @@ function NotebookUI:openNotebook(item)
         set_tool = function(value) self.plugin:setTool(value, { quiet = true }) end,
         observe_tool = function(fn) return self.plugin:observeTool(fn) end,
         -- Editing tools wired in this build (ADR-55/56): Edit offers only these.
-        edit_tools_ready = function(tool) return tool == "select" end,
+        edit_tools_ready = function(tool)
+            return tool == "select" or tool == "paste" or tool == "shape"
+        end,
+        get_shape_options = function() return self.plugin:getShapeOptions() end,
+        set_shape_options = function(o) return self.plugin:setShapeOptions(o) end,
+        get_previous_tool = function() return self.plugin.previous_tool end,
         clipboard_has_content = function() return Clipboard.hasContent() end,
         get_input_mode = function() return self.plugin.input_mode end,
         set_input_mode = function(value) return self.plugin:setInputMode(value) end,

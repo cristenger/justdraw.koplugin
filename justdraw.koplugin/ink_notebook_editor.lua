@@ -31,8 +31,11 @@ local NotebookLayout = require("ink_notebook_layout")
 local ToolButton = require("ink_tool_button")
 local RefreshDialog = require("ink_refresh_dialog")
 local PenDialog = require("ink_pen_dialog")
+local Placement = require("ink_placement")
 local Render = require("ink_render")
 local Selection = require("ink_selection")
+local ShapeDialog = require("ink_shape_dialog")
+local Shapes = require("ink_shapes")
 local Stack = require("ink_stack")
 local Style = require("ink_style")
 
@@ -78,6 +81,9 @@ function Editor:init()
     --- Which editing tools are wired on this build: an Edit row for a tool
     --- whose controller is absent is shown disabled, never half-working.
     self.edit_tools_ready = self.edit_tools_ready or function() return false end
+    self.get_shape_options = self.get_shape_options or function() return Shapes.DEFAULT end
+    self.set_shape_options = self.set_shape_options or function(o) return o end
+    self.get_previous_tool = self.get_previous_tool or function() return "pen" end
     self.clipboard_has_content = self.clipboard_has_content or function() return false end
     self.get_input_mode = self.get_input_mode or function() return "auto" end
     self.set_input_mode = self.set_input_mode or function() return true end
@@ -1111,9 +1117,25 @@ function Editor:showEditMenu()
     return self:showModalSafely(dialog)
 end
 
---- Overridden in Phase 6 by the shape picker; until then Shapes is disabled.
+--- The Shapes menu (ADR-56): every choice stores the options and selects the
+--- shape tool; the preview is prepared afterwards, outside any contact.
 function Editor:showShapeMenu()
-    return nil, "unavailable"
+    if self.closed then return nil, "closed" end
+    local dialog = ShapeDialog.new{
+        options = self.get_shape_options(),
+        checkmark = " " .. Button.checkmark,
+        close = function(d) if d then self:_closeModal(d) end end,
+        choose = function(options)
+            self.set_shape_options(options)
+            if self.get_tool() == "shape" then
+                self:clearEditing("shape")
+                self:_preparePlacementSoon("shape")
+            else
+                self:setTool("shape")
+            end
+        end,
+    }
+    return self:showModalSafely(dialog)
 end
 
 function Editor:_dirtyRail()
@@ -1414,7 +1436,70 @@ function Editor:editController(tool)
         end
         return self.selection
     end
+    if tool == "paste" then
+        if not self.paste_placement then
+            self.paste_placement = self:_newPlacement("paste", function(transform)
+                return Clipboard.payload(transform.scale)
+            end)
+        end
+        return self.paste_placement
+    end
+    if tool == "shape" then
+        if not self.shape_placement then
+            self.shape_placement = self:_newPlacement("shape", function(transform)
+                return self:_shapePayload(transform)
+            end)
+        end
+        return self.shape_placement
+    end
     return nil
+end
+
+function Editor:_newPlacement(kind, source)
+    return Placement.new{
+        presenter = self:selectionPresenter(),
+        kind = kind,
+        source = source,
+        schedule = function(delay, fn) UIManager:scheduleIn(delay, fn) end,
+        unschedule = function(fn) UIManager:unschedule(fn) end,
+        can_work = function() return not self.has_active_contact() end,
+        on_committed = function(committed_kind)
+            -- Paste once, then back to what it interrupted; a shape tool
+            -- stays for the next shape (U-2).
+            if committed_kind == "paste" and not self.closed then
+                local previous = self.get_previous_tool()
+                if previous == "paste" or previous == nil then previous = "pen" end
+                self:setTool(previous)
+            end
+        end,
+    }
+end
+
+--[[--
+The shape the menu describes, in the destination's units, drawn with the pen
+as it is now: the same style and nib width `_beginInk` would give a stroke
+(ADR-56). Style and width are read when the preview is prepared, so changing
+the pen afterwards prepares it again rather than changing it under a contact.
+]]
+function Editor:_shapePayload(transform)
+    local style = Style.resolve(self.get_raw_pen_style(), nil, true)
+    local width = (tonumber(self.get_pen_width()) or 4) / transform.scale
+        * Style.widthScale(style)
+    local options = Shapes.normalize(self.get_shape_options())
+    return Shapes.generate{
+        kind = options.kind, size = options.size, angle = options.angle,
+        mm_to_px = function(mm) return NotebookLayout.physicalPixels(mm) or mm * 8 end,
+        scale = transform.scale, width = width, tool = style,
+    }
+end
+
+--- Prepare a placement tool's preview on a later tick, outside any contact.
+function Editor:_preparePlacementSoon(tool)
+    UIManager:nextTick(function()
+        if self.closed or self.get_tool() ~= tool then return end
+        local controller = self:editController(tool)
+        if controller and controller.prepare then controller:prepare() end
+    end)
 end
 
 --- End every editing interaction in progress. Safe from anywhere, any number
@@ -1424,15 +1509,18 @@ function Editor:clearEditing(reason)
         local ok, err = pcall(self.selection.clear, self.selection, reason)
         if not ok then logger.err("JustDraw notebooks: clearing a selection failed:", err) end
     end
-    if self.placement and self.placement:isActive() then
-        local ok, err = pcall(self.placement.cancel, self.placement, reason)
-        if not ok then logger.err("JustDraw notebooks: cancelling a placement failed:", err) end
+    for _, placement in ipairs({ self.paste_placement or false, self.shape_placement or false }) do
+        if placement and placement:isActive() then
+            local ok, err = pcall(placement.cancel, placement, reason)
+            if not ok then logger.err("JustDraw notebooks: cancelling a placement failed:", err) end
+        end
     end
 end
 
 function Editor:onToolChanged(name, previous)
     if self.closed then return end
     self:clearEditing("tool")
+    if name == "paste" or name == "shape" then self:_preparePlacementSoon(name) end
 end
 
 function Editor:onSuspend()
@@ -2219,6 +2307,8 @@ function Editor:onPenSettingsChanged()
     if self.closed then return end
     self:_rebuildControls()
     self:_dirtyRail()
+    -- A prepared shape carries the old nib: prepare it again.
+    if self.get_tool() == "shape" then self:_preparePlacementSoon("shape") end
 end
 
 function Editor:showPenSettings()
@@ -2347,6 +2437,8 @@ function Editor:shutdown()
     self.edit_controller = nil
     self:clearEditing("close")
     self.selection = nil
+    self.paste_placement = nil
+    self.shape_placement = nil
     if self.unobserve_tool then self.unobserve_tool(); self.unobserve_tool = nil end
     self.overlay_painter = nil
     self:_clearCoveredRepaint()

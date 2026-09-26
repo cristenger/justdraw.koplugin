@@ -2406,6 +2406,7 @@ for _, spec in ipairs({
     "stroke_split_spec",
     "lasso_spec",
     "shapes_spec",
+    "shape_dialog_spec",
     "paper_spec",
     "canvas_codec_spec",
     "canvas_repository_spec",

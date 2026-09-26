@@ -42,6 +42,7 @@ local NotebookController = require("ink_notebook_controller")
 local NotebookInput = require("ink_notebook_input")
 local PalmGate = require("ink_wacom_palm")
 local Style = require("ink_style")
+local Shapes = require("ink_shapes")
 local ToolState = require("ink_tool_state")
 local StylusGeometry = require("ink_stylus_geometry")
 local StylusSequence = require("ink_stylus_sequence")
@@ -2064,6 +2065,28 @@ function JustDraw:observeTool(fn)
             if list[i] == fn then table.remove(list, i) end
         end
     end
+end
+
+--[[--
+The Shapes menu's choices (ADR-56), stored like every other preference:
+`justdraw_shape_kind`, `justdraw_shape_size`, `justdraw_shape_angle`. Read
+through `Shapes.normalize`, so a corrupt or foreign value is the default
+rather than a shape the generator would refuse.
+]]
+function JustDraw:getShapeOptions()
+    return Shapes.normalize{
+        kind = Compat.readSetting(G_reader_settings, "shape_kind", Shapes.DEFAULT.kind),
+        size = Compat.readSetting(G_reader_settings, "shape_size", Shapes.DEFAULT.size),
+        angle = tonumber(Compat.readSetting(G_reader_settings, "shape_angle", 0)),
+    }
+end
+
+function JustDraw:setShapeOptions(options)
+    local normalized = Shapes.normalize(options)
+    Compat.saveSetting(G_reader_settings, "shape_kind", normalized.kind)
+    Compat.saveSetting(G_reader_settings, "shape_size", normalized.size)
+    Compat.saveSetting(G_reader_settings, "shape_angle", normalized.angle)
+    return normalized
 end
 
 --- The eraser toggle, kept for its many callers. Off means the pen.

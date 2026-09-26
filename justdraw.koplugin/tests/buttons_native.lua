@@ -1951,6 +1951,56 @@ else
                     settled("lasso copy/cut")
                 end)
 
+                case("Notebook editor: Paste places the copy where the pen lands, then gives the tool back", function()
+                    local Clipboard = require("ink_clipboard")
+                    local paper = editor().layout_geometry.paper_rect
+                    local x, y = centre(paper)
+                    selectLasso()
+                    lassoAround(x, y + 10, 150)
+                    tap(menuButton("Copy")); tick(3)
+                    expect(Clipboard.hasContent(), "setup: copied")
+                    local count = #strokes()
+                    local before = stack()[1]
+                    tap(rail(EDIT))
+                    press("Paste", opened(before, "Edit"))
+                    wait(2, function() return editor().paste_placement
+                        and editor().paste_placement.state == "ready" end)
+                    expect(editor().get_tool() == "paste", "Edit > Paste did not select Paste")
+                    expect(editor().paste_placement.state == "ready", "the paste preview was not prepared")
+                    drag(x - 100, paper.y + 120, x - 60, paper.y + 140, 6)
+                    wait(3, function() return #strokes() == count + 1 end)
+                    expect(#strokes() == count + 1, "Paste added %d strokes", #strokes() - count)
+                    expect(editor().get_tool() ~= "paste", "Paste did not give the tool back")
+                    shot("pasted")
+                    tap(rail(UNDO)); tick(4)
+                    expect(#strokes() == count, "Undo did not take the paste back")
+                    settled("paste")
+                end)
+
+                case("Notebook editor: Shapes places a circle per touch and stays the tool", function()
+                    local paper = editor().layout_geometry.paper_rect
+                    local count = #strokes()
+                    local before = stack()[1]
+                    tap(rail(EDIT))
+                    press("Shapes…", opened(before, "Edit"))
+                    press("Circle", opened(before, "Shapes"))
+                    wait(2, function() return editor().shape_placement
+                        and editor().shape_placement.state == "ready" end)
+                    expect(editor().get_tool() == "shape", "the shape tool is not selected")
+                    expect(rail(EDIT).icon == "shape", "the Edit control does not show Shapes")
+                    tapAt(paper.x + 120, paper.y + paper.h - 150)
+                    wait(3, function() return #strokes() == count + 1 end)
+                    expect(#strokes() == count + 1, "the first touch placed %d shapes", #strokes() - count)
+                    tapAt(paper.x + 300, paper.y + paper.h - 150)
+                    wait(3, function() return #strokes() == count + 2 end)
+                    expect(#strokes() == count + 2, "the tool did not stay for a second shape")
+                    shot("shapes")
+                    tap(rail(UNDO)); tick(4); tap(rail(UNDO)); tick(4)
+                    expect(#strokes() == count, "Undo did not take the shapes back")
+                    tap(rail(PEN)); tick(2)
+                    settled("shapes")
+                end)
+
                 case("Notebook editor: page buttons -- Add, Previous, Next, and the edges", function()
                     local s = editor().snapshot
                     expect(s.page_count == 1, "a new notebook has %d pages", s.page_count)
