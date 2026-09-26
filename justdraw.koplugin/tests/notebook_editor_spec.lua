@@ -2216,4 +2216,78 @@ return function(ctx)
         t:eq(editor.overlay_painter, nil, "and drops the painter")
         t:eq(editor:repaintScreenBox(10, paper.y + 10, 50, paper.y + 50), false, "closed: nothing")
     end)
+
+    t:describe("standalone notebooks / selection ownership")
+
+    t:case("the lasso controller exists only when wired, and dies with the window", function()
+        ctx.reset()
+        local editor = newEditor()
+        t:eq(editor:editController("select"), nil, "not wired: none")
+        editor.edit_tools_ready = function(tool) return tool == "select" end
+        local sel = editor:editController("select")
+        t:check(sel ~= nil, "wired: the controller")
+        t:eq(editor:editController("select"), sel, "one per window")
+        t:eq(editor:editController("shape"), nil, "shapes are not wired yet")
+        local cleared = {}
+        sel.clear = function(_, reason) cleared[#cleared + 1] = reason end
+        sel.isActive = function() return true end
+        editor:onToolChanged("pen", "select")
+        t:eq(cleared[1], "tool", "a tool change ends it")
+        editor:_runDomain("undo")
+        t:eq(cleared[2], "undo", "undo ends it")
+        editor:onSuspend()
+        t:eq(cleared[3], "suspend", "suspend ends it")
+        editor:shutdown()
+        t:eq(cleared[#cleared], "close", "closing ends it")
+        t:eq(editor.selection, nil, "and forgets it")
+    end)
+
+    t:case("the selection menu is a real region: the pen passes to it, rebuilds keep it", function()
+        ctx.reset()
+        local editor = newEditor()
+        local paper = editor.layout_geometry.paper_rect
+        local target = editor.layout_geometry.target_size
+        local pressed = {}
+        local frame = { x = paper.x + 200, y = paper.y + 300, w = 200, h = 100 }
+        local rect = editor:_showSelectionMenu(frame, {
+            { id = "copy", text = "Copy", callback = function() pressed[#pressed + 1] = "copy" end },
+            { id = "cut", text = "Cut", callback = function() end },
+            { id = "delete", text = "Delete", callback = function() end },
+            { id = "close", text = "x", callback = function() end },
+        })
+        t:eq(rect.y + rect.h <= frame.y, true, "placed above the frame")
+        t:eq(rect.h, target, "one row, one 10 mm target high")
+        t:eq(rect.w, 4 * target, "four targets wide")
+        t:eq(editor:stylusPassthrough(rect.x + 1, rect.y + 1), true, "the pen passes through to it")
+        t:eq(editor:stylusPassthrough(frame.x + 10, frame.y + 10), false, "the frame itself still takes ink")
+        local count = #editor
+        editor:_rebuildControls()
+        t:eq(#editor, count, "a rail rebuild keeps the menu's buttons")
+        editor.selection_menu_entries[1].widget.callback()
+        t:eq(pressed[1], "copy", "a button reaches its action")
+        editor:_hideSelectionMenu()
+        t:eq(editor:stylusPassthrough(rect.x + 1, rect.y + 1), false, "hidden: ink again")
+        t:eq(editor.selection_menu_entries, nil, "no entries left")
+        local top = { x = paper.x + 10, y = paper.y + 2, w = 100, h = 50 }
+        local below = editor:_showSelectionMenu(top, { { text = "a", callback = function() end } })
+        t:check(below.y >= top.y + top.h, "no room above: below the frame")
+        editor:shutdown()
+    end)
+
+    t:case("a narrow paper stacks the menu in two rows, never under 10 mm", function()
+        ctx.reset()
+        local editor = newEditor()
+        local geometry = editor.layout_geometry
+        local target = geometry.target_size
+        local saved = geometry.paper_rect
+        geometry.paper_rect = require("ui/geometry"):new{ x = saved.x, y = saved.y, w = 3 * target, h = saved.h }
+        local items = {}
+        for i = 1, 4 do items[i] = { text = tostring(i), callback = function() end } end
+        local rect = editor:_showSelectionMenu({ x = saved.x, y = saved.y + 400, w = 50, h = 50 }, items)
+        t:eq(rect.w, 2 * target, "two columns")
+        t:eq(rect.h, 2 * target, "two rows")
+        t:check(rect.x + rect.w <= saved.x + 3 * target, "inside the paper")
+        geometry.paper_rect = saved
+        editor:shutdown()
+    end)
 end

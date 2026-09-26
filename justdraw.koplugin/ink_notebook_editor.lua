@@ -1523,7 +1523,19 @@ buttons can be pressed, so the pen passes through it to them.
 ]]
 function Editor:_showSelectionMenu(frame, items)
     self:_hideSelectionMenu()
+    -- The page, not the letterboxed paper: the menu is painted over the
+    -- page's own pixels, like the selection it belongs to.
     local paper = self.layout_geometry.paper_rect
+    local session = self:_currentSession()
+    local surface = session and session:surface()
+    local transform = surface and surface:transform()
+    if transform then
+        local v = transform:visibleCanvasRect()
+        local x0, y0 = math.max(paper.x, v.x), math.max(paper.y, v.y)
+        local x1 = math.min(paper.x + paper.w, v.x + v.w)
+        local y1 = math.min(paper.y + paper.h, v.y + v.h)
+        if x1 > x0 and y1 > y0 then paper = { x = x0, y = y0, w = x1 - x0, h = y1 - y0 } end
+    end
     local target = self.layout_geometry.target_size
     local cols = #items
     if cols * target > paper.w then cols = math.ceil(#items / 2) end

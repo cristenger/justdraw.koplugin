@@ -503,6 +503,8 @@ function Selection:_showMenu()
         { id = "close", text = "✕", help = _("Close"), enabled = true,
             callback = function() if not busy() then self:clear("closed") end end },
     })
+    local r = self.menu_rect
+    if r then self.presenter:repaint(r.x, r.y, r.x + r.w, r.y + r.h) end
 end
 
 function Selection:_hideMenu()

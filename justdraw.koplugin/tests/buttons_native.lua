@@ -344,6 +344,33 @@ local function drag(x1, y1, x2, y2, steps, tool)
     tick(4)
 end
 
+--- One contact through several points, for a lasso: down at the first, a few
+--- moves along each segment, up at the last.
+local function trace(points, steps, tool)
+    local slot, tool_type = slotFor(tool)
+    paint()
+    advance(400)
+    contactDown(slot, tool_type, points[1][1], points[1][2])
+    for p = 2, #points do
+        local x1, y1 = points[p - 1][1], points[p - 1][2]
+        local x2, y2 = points[p][1], points[p][2]
+        for i = 1, steps do
+            advance(12)
+            local nx, ny = toNative(math.floor(x1 + (x2 - x1) * i / steps),
+                math.floor(y1 + (y2 - y1) * i / steps))
+            frame{
+                { C.EV_ABS, C.ABS_MT_SLOT, slot },
+                { C.EV_ABS, C.ABS_MT_POSITION_X, nx },
+                { C.EV_ABS, C.ABS_MT_POSITION_Y, ny },
+                { C.EV_SYN, C.SYN_REPORT, 0 },
+            }
+        end
+    end
+    advance(12)
+    contactUp(slot)
+    tick(4)
+end
+
 local function centre(rect)
     return rect.x + math.floor(rect.w / 2), rect.y + math.floor(rect.h / 2)
 end
@@ -1828,6 +1855,100 @@ else
 
                 case("Notebook editor: Edit opens its menu, and Close leaves it", function()
                     roundTrip("Edit", function() tap(rail(EDIT)) end)
+                end)
+
+                local function strokes()
+                    return editor().controller:activeSession():surface():cache():strokes()
+                end
+                local function selectLasso()
+                    local before = stack()[1]
+                    tap(rail(EDIT))
+                    press("Lasso", opened(before, "Edit"))
+                    tick(2)
+                    expect(editor().get_tool() == "select", "Edit > Lasso did not select the lasso")
+                    expect(rail(EDIT).icon == "lasso", "the Edit control does not show the lasso")
+                end
+                local function lassoAround(x, y, r)
+                    trace({ { x - r, y - r }, { x + r, y - r }, { x + r, y + r },
+                        { x - r, y + r }, { x - r, y - r + 2 } }, 6)
+                    wait(3, function() return editor().selection
+                        and editor().selection.state == "selected" end)
+                    expect(editor().selection and editor().selection.state == "selected",
+                        "the lasso selected nothing (state %s)",
+                        tostring(editor().selection and editor().selection.state))
+                end
+                local function menuButton(label)
+                    paint()
+                    for _, entry in ipairs(editor().selection_menu_entries or {}) do
+                        if entry.widget.text == label then return entry.widget end
+                    end
+                    error("no selection menu button " .. label)
+                end
+
+                case("Notebook editor: Lasso selects a stroke; Delete, Undo and Redo", function()
+                    local paper = editor().layout_geometry.paper_rect
+                    local x, y = centre(paper)
+                    drag(x - 60, y, x + 60, y + 20, 10)
+                    tick(4)
+                    expect(#strokes() == 1, "setup: one stroke, got %d", #strokes())
+                    selectLasso()
+                    lassoAround(x, y + 10, 120)
+                    expect(#editor().selection.items == 1, "one stroke selected")
+                    shot("lasso selected")
+                    expect(editor().interactive_regions.selection_menu, "the menu region is published")
+                    local del = menuButton("Delete")
+                    local region = editor().interactive_regions.selection_menu
+                    expect(del.dimen.x >= region.x and del.dimen.y >= region.y,
+                        "the menu was painted where its region is")
+                    tap(del)
+                    wait(3, function() return #strokes() == 0 end)
+                    expect(#strokes() == 0, "Delete left %d strokes", #strokes())
+                    expect(editor().selection.state == "idle", "the selection ended")
+                    tap(rail(UNDO)); tick(4)
+                    expect(#strokes() == 1, "Undo did not bring the stroke back")
+                    tap(rail(REDO)); tick(4)
+                    expect(#strokes() == 0, "Redo did not delete it again")
+                    tap(rail(UNDO)); tick(4)
+                    expect(#strokes() == 1, "Undo again")
+                    settled("lasso delete")
+                end)
+
+                case("Notebook editor: dragging a selection moves it, and Undo moves it back", function()
+                    local paper = editor().layout_geometry.paper_rect
+                    local x, y = centre(paper)
+                    lassoAround(x, y + 10, 120)
+                    local before = strokes()[1].min_x
+                    drag(x, y + 10, x + 90, y + 70, 8)
+                    wait(3, function() return editor().selection.state == "selected"
+                        and strokes()[1] and strokes()[1].min_x ~= before end)
+                    shot("lasso moved")
+                    local after = strokes()[1].min_x
+                    expect(math.abs(after - before) > 1, "the drag did not move the stroke")
+                    expect(#strokes() == 1, "a move must not duplicate ink")
+                    tap(rail(UNDO)); tick(4)
+                    expect(math.abs(strokes()[1].min_x - before) < 0.5, "Undo did not move it back")
+                    settled("lasso move")
+                end)
+
+                case("Notebook editor: Copy holds the ink, Cut removes it, Pen ends the lasso", function()
+                    local Clipboard = require("ink_clipboard")
+                    Clipboard.clear()
+                    local paper = editor().layout_geometry.paper_rect
+                    local x, y = centre(paper)
+                    lassoAround(x, y + 10, 150)
+                    tap(menuButton("Copy"))
+                    tick(3)
+                    expect(Clipboard.hasContent(), "Copy put nothing on the clipboard")
+                    expect(#strokes() == 1, "Copy changed the page")
+                    tap(menuButton("Cut"))
+                    wait(3, function() return #strokes() == 0 end)
+                    expect(#strokes() == 0, "Cut left the stroke")
+                    tap(rail(UNDO)); tick(4)
+                    lassoAround(x, y + 10, 150)
+                    tap(rail(PEN)); tick(3)
+                    expect(editor().selection.state == "idle", "Pen did not end the selection")
+                    expect(editor().interactive_regions.selection_menu == nil, "the menu stayed up")
+                    settled("lasso copy/cut")
                 end)
 
                 case("Notebook editor: page buttons -- Add, Previous, Next, and the edges", function()
