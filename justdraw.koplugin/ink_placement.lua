@@ -29,7 +29,7 @@ shape tool stays until the reader leaves it.
 local Codec = require("ink_canvas_codec")
 local FloatLayer = require("ink_float_layer")
 local logger = require("logger")
-local _ = require("gettext")
+local _ = require("ink_i18n")
 
 local Placement = {
     WAIT = 0.1,

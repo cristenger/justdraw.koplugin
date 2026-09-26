@@ -102,7 +102,7 @@ falls back to these after its own table, so a code here reaches a reader as a
 sentence, never as a code. Built per call so the language is current.
 ]]
 function XoppJob.messages()
-    local _ = require("gettext")
+    local _ = require("ink_i18n")
     return {
         notebook_changed = _("The notebook changed while it was being exported, so nothing was saved. Try again."),
         spool_failed = _("The export’s temporary file couldn’t be written. The device may be full; free some space and try again."),

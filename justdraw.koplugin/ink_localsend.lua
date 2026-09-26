@@ -371,7 +371,7 @@ Export `items` into one staged operation and open LocalSend on the result.
 One flow at a time. Returns the flow ({ cancel = fn }) or nil and a reason.
 ]]
 function LocalSend.send(opts)
-    local _ = require("gettext")
+    local _ = require("ink_i18n")
     local T = require("ffi/util").template
     local N_ = _.ngettext
     local ButtonDialog = require("ui/widget/buttondialog")

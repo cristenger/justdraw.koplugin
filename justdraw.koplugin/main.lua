@@ -27,7 +27,7 @@ local Version = require("version")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local logger = require("logger")
 local time = require("ui/time")
-local _ = require("gettext")
+local _ = require("ink_i18n")
 local T = require("ffi/util").template
 
 local CanvasSession = require("ink_canvas_session")

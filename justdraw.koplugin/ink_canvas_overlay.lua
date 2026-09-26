@@ -34,7 +34,7 @@ local Size = require("ui/size")
 local TextWidget = require("ui/widget/textwidget")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
-local _ = require("gettext")
+local _ = require("ink_i18n")
 local T = require("ffi/util").template
 
 local Layout = require("ink_notebook_layout")

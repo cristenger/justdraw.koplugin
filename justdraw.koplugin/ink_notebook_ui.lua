@@ -4,7 +4,7 @@ local InfoMessage = require("ui/widget/infomessage")
 local Notification = require("ui/widget/notification")
 local UIManager = require("ui/uimanager")
 local logger = require("logger")
-local _ = require("gettext")
+local _ = require("ink_i18n")
 
 local Clipboard = require("ink_clipboard")
 local Errors = require("ink_notebook_errors")

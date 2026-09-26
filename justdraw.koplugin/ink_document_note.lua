@@ -1,5 +1,5 @@
 -- Metadata shared by the notes browser and the document dossier. No pixels.
-local _ = require("gettext")
+local _ = require("ink_i18n")
 local T = require("ffi/util").template
 local Note = {}
 

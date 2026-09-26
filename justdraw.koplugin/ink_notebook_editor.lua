@@ -19,7 +19,7 @@ local UIManager = require("ui/uimanager")
 local time = require("ui/time")
 local logger = require("logger")
 local T = require("ffi/util").template
-local _ = require("gettext")
+local _ = require("ink_i18n")
 local N_ = _.ngettext
 
 local Clipboard = require("ink_clipboard")

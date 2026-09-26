@@ -37,7 +37,7 @@ local ExportRaster = require("ink_export_raster")
 local ExportReader = require("ink_export_reader")
 local ExportSource = require("ink_export_source")
 
-local _ = require("gettext")
+local _ = require("ink_i18n")
 
 local Controller = {}
 Controller.__index = Controller

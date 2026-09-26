@@ -27,7 +27,7 @@ local Size = require("ui/size")
 local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
-local _ = require("gettext")
+local _ = require("ink_i18n")
 
 local Stack = require("ink_stack")
 local PenDialog = require("ink_pen_dialog")

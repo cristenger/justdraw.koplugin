@@ -36,7 +36,7 @@ local FloatLayer = require("ink_float_layer")
 local Lasso = require("ink_lasso")
 local Render = require("ink_render")
 local logger = require("logger")
-local _ = require("gettext")
+local _ = require("ink_i18n")
 
 local Selection = {
     MAX_STROKES = 256,

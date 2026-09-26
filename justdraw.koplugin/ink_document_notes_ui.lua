@@ -19,7 +19,7 @@ local VerticalSpan = require("ui/widget/verticalspan")
 local Layout = require("ink_notebook_layout")
 local Note = require("ink_document_note")
 local T = require("ffi/util").template
-local _ = require("gettext")
+local _ = require("ink_i18n")
 local Screen = Device.screen
 -- Match KOReader's full-screen menus/viewers. A modal browser traps their
 -- non-modal child windows underneath it, before ImageViewer can paint.

@@ -6,7 +6,7 @@ local Geom = require("ui/geometry")
 local Device = require("device")
 local Screen = Device.screen
 local UIManager = require("ui/uimanager")
-local _ = require("gettext")
+local _ = require("ink_i18n")
 local Detail = ImageViewer:extend{ fullscreen = true, image_disposable = false, buttons_visible = true }
 
 function Detail:init()

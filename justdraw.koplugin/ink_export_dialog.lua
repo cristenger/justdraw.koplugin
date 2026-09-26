@@ -34,7 +34,7 @@ local Compat = require("ink_compat")
 local Export = require("ink_export")
 
 local T = require("ffi/util").template
-local _ = require("gettext")
+local _ = require("ink_i18n")
 local N_ = _.ngettext
 
 local Screen = Device.screen

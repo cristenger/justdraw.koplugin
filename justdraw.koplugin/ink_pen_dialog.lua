@@ -12,7 +12,7 @@ local Notification = require("ui/widget/notification")
 local UIManager = require("ui/uimanager")
 local Style = require("ink_style")
 local T = require("ffi/util").template
-local _ = require("gettext")
+local _ = require("ink_i18n")
 
 local Dialog = {}
 local styles = { Style.PEN, Style.GRAPHITE, Style.MARKER, Style.ROUND, Style.HIGHLIGHTER, Style.TEXTURED }

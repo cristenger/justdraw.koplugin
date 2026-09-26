@@ -24,7 +24,7 @@ time the book is renamed.
 
 local UIManager = require("ui/uimanager")
 local logger = require("logger")
-local _ = require("gettext")
+local _ = require("ink_i18n")
 
 local Anchor = require("ink_anchor")
 local BookDatabase = require("ink_book_database")

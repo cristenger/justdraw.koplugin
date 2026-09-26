@@ -25,7 +25,7 @@ local Geom = require("ui/geometry")
 local Size = require("ui/size")
 local TextWidget = require("ui/widget/textwidget")
 local UIManager = require("ui/uimanager")
-local _ = require("gettext")
+local _ = require("ink_i18n")
 local T = require("ffi/util").template
 
 local InkBar = require("ink_bar")

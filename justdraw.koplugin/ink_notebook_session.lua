@@ -13,7 +13,7 @@ local Errors = require("ink_notebook_errors")
 local SurfaceSession = require("ink_surface_session")
 local Transform = require("ink_canvas_transform")
 local logger = require("logger")
-local _ = require("gettext")
+local _ = require("ink_i18n")
 
 local Session = {}
 

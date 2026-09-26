@@ -48,7 +48,7 @@ SurfaceSession's queue and are written on the next tick.
 ]]
 
 local logger = require("logger")
-local _ = require("gettext")
+local _ = require("ink_i18n")
 
 local BookDatabase = require("ink_book_database")
 local DocumentTransform = require("ink_document_transform")

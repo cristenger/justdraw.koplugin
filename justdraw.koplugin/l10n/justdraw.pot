@@ -1,0 +1,2189 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the JustDraw package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: JustDraw\n"
+"Report-Msgid-Bugs-To: https://github.com/cristenger/justdraw.koplugin/"
+"issues\n"
+"POT-Creation-Date: 2026-01-01 00:00+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=INTEGER; plural=EXPRESSION;\n"
+
+#: ink_bar.lua main.lua
+msgid "Show note"
+msgstr ""
+
+#: ink_bar.lua ink_document_export_controller.lua ink_document_notes_ui.lua
+#: main.lua
+msgid "Document notes"
+msgstr ""
+
+#: ink_bar.lua
+msgid "Dismiss"
+msgstr ""
+
+#: ink_bar.lua ink_sheet_bar.lua
+msgid "Draw"
+msgstr ""
+
+#: ink_bar.lua ink_sheet_bar.lua
+msgid "Pen"
+msgstr ""
+
+#: ink_bar.lua ink_notebook_editor.lua ink_sheet_bar.lua
+msgid "Eraser"
+msgstr ""
+
+#: ink_bar.lua ink_notebook_editor.lua ink_sheet_bar.lua
+msgid "Undo"
+msgstr ""
+
+#: ink_bar.lua ink_notebook_editor.lua ink_notebook_library.lua
+#: ink_sheet_bar.lua
+msgid "More"
+msgstr ""
+
+#: ink_bar.lua ink_sheet_bar.lua main.lua
+msgid "Hide note"
+msgstr ""
+
+#: ink_bar.lua
+msgid "Hide toolbar"
+msgstr ""
+
+#: ink_bar.lua main.lua
+msgid "Go to note"
+msgstr ""
+
+#: ink_bar.lua ink_sheet_bar.lua
+msgid "Stop"
+msgstr ""
+
+#: ink_bar.lua ink_sheet_bar.lua
+msgid "Loading"
+msgstr ""
+
+#: ink_bar.lua ink_document_notes_ui.lua ink_sheet_bar.lua
+msgid "Retry"
+msgstr ""
+
+#: ink_bar.lua ink_notebook_editor.lua ink_notebook_library.lua
+#: ink_sheet_bar.lua
+msgid "Read-only"
+msgstr ""
+
+#: ink_bar.lua ink_sheet_bar.lua
+msgid "View"
+msgstr ""
+
+#: ink_bar.lua ink_notebook_editor.lua ink_sheet_bar.lua
+msgid "Tap the selected pen to change its style and width."
+msgstr ""
+
+#: ink_canvas_overlay.lua
+msgid "Sheet from page %1"
+msgstr ""
+
+#: ink_canvas_overlay.lua
+msgid "Sheet from elsewhere in this book"
+msgstr ""
+
+#: ink_canvas_overlay.lua main.lua
+msgid "This sheet's place in the book is missing"
+msgstr ""
+
+#: ink_canvas_session.lua
+msgid ""
+"This sheet changed since it was last open, so its undo history was cleared."
+msgstr ""
+
+#: ink_canvas_session.lua ink_notebook_session.lua
+msgid ""
+"Erasing stopped here so this erase can still be undone. Lift the pen and "
+"erase again."
+msgstr ""
+
+#: ink_canvas_session.lua
+msgid "Drawing sheets are unavailable for this book"
+msgstr ""
+
+#: ink_canvas_session.lua
+msgid "Drawing sheets need a database this KOReader cannot open"
+msgstr ""
+
+#: ink_canvas_session.lua ink_document_ink_session.lua
+msgid "Could not save ink. It is still here: use Retry saving."
+msgstr ""
+
+#: ink_canvas_session.lua
+msgid "Ink saved"
+msgstr ""
+
+#: ink_canvas_session.lua
+msgid "Still indexing this book's sheets"
+msgstr ""
+
+#: ink_canvas_session.lua
+msgid "Could not read this sheet's ink. The database was left unchanged."
+msgstr ""
+
+#: ink_canvas_session.lua
+msgid "Could not list this book's sheets."
+msgstr ""
+
+#: ink_canvas_session.lua
+msgid ""
+"This sheet is read-only because it was created by a newer JustDraw version."
+msgstr ""
+
+#: ink_canvas_session.lua
+msgid ""
+"Both JustDraw and FingerInk sheet databases exist. Close KOReader, then move "
+"one database together with its matching -wal and -shm files to another "
+"directory."
+msgstr ""
+
+#: ink_document_export_controller.lua ink_notebook_editor.lua
+msgid "This page"
+msgstr ""
+
+#: ink_document_export_controller.lua
+msgid "This sheet"
+msgstr ""
+
+#: ink_document_export_controller.lua
+msgid "All drawing sheets"
+msgstr ""
+
+#: ink_document_export_controller.lua
+msgid "Notes"
+msgstr ""
+
+#: ink_document_export_controller.lua
+msgid ""
+"This export includes legacy ink whose original zoom, rotation and screen "
+"geometry were not stored. Its layout cannot be guaranteed."
+msgstr ""
+
+#: ink_document_export_controller.lua
+msgid ""
+"This creates document pages as grayscale images. Text will not be selectable "
+"and links will not be preserved. Native annotations are included as text "
+"pages in an appendix."
+msgstr ""
+
+#: ink_document_export_controller.lua
+msgid ""
+"Legacy ink is included separately after the document pages, because its "
+"original position cannot be reconstructed."
+msgstr ""
+
+#: ink_document_export_controller.lua ink_export_dialog.lua
+#: ink_notebook_library.lua
+msgid "Export"
+msgstr ""
+
+#: ink_document_ink_session.lua
+msgid "Page notes are unavailable for this book"
+msgstr ""
+
+#: ink_document_ink_session.lua
+msgid "Page notes need a database this KOReader cannot open."
+msgstr ""
+
+#: ink_document_ink_session.lua
+msgid ""
+"Both JustDraw and FingerInk notes databases exist. Close KOReader, then move "
+"one database together with its matching -wal and -shm files to another "
+"directory."
+msgstr ""
+
+#: ink_document_ink_session.lua
+msgid ""
+"Page notes are read-only because this database was created by a newer "
+"JustDraw version."
+msgstr ""
+
+#: ink_document_ink_session.lua
+msgid "Turn off continuous scrolling to draw page notes."
+msgstr ""
+
+#: ink_document_ink_session.lua
+msgid "Turn off reflow to draw page notes."
+msgstr ""
+
+#: ink_document_ink_session.lua
+msgid "Turn off page optimisation to draw page notes."
+msgstr ""
+
+#: ink_document_ink_session.lua
+msgid "Page notes need the page unrotated."
+msgstr ""
+
+#: ink_document_ink_session.lua
+msgid "Zoom out to see and draw page notes."
+msgstr ""
+
+#: ink_document_ink_session.lua
+msgid "Page notes can't be placed on this view."
+msgstr ""
+
+#: ink_document_ink_session.lua
+msgid "This page's size changed. Its notes are kept but can't be edited."
+msgstr ""
+
+#: ink_document_ink_session.lua
+msgid "This page does not say how big it is, so notes cannot be placed on it."
+msgstr ""
+
+#: ink_document_ink_session.lua
+msgid "There are no page notes on this page yet."
+msgstr ""
+
+#: ink_document_ink_session.lua
+msgid "Page notes are still loading. Try again in a moment."
+msgstr ""
+
+#: ink_document_ink_session.lua
+msgid "This page's notes could not be read."
+msgstr ""
+
+#: ink_document_ink_session.lua
+msgid "Page notes are not available here."
+msgstr ""
+
+#: ink_document_note.lua
+msgid "KOReader note"
+msgstr ""
+
+#: ink_document_note.lua
+msgid "KOReader highlight"
+msgstr ""
+
+#: ink_document_note.lua
+msgid "KOReader bookmark"
+msgstr ""
+
+#: ink_document_note.lua
+msgid "Page note"
+msgstr ""
+
+#: ink_document_note.lua ink_document_notes_ui.lua
+msgid "Legacy ink"
+msgstr ""
+
+#: ink_document_note.lua main.lua
+msgid "Drawing sheet"
+msgstr ""
+
+#: ink_document_note.lua
+msgid "Location unavailable"
+msgstr ""
+
+#: ink_document_note.lua
+msgid "Stored page %1"
+msgstr ""
+
+#: ink_document_note.lua ink_document_notes_ui.lua ink_notebook_library.lua
+msgid "Page %1"
+msgstr ""
+
+#: ink_document_note.lua ink_document_notes_controller.lua
+msgid "Sheet %1 of %2"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "The previously selected sheet is no longer in this note."
+msgstr ""
+
+#: ink_document_notes_controller.lua ink_document_notes_detail.lua
+msgid "Read from here"
+msgstr ""
+
+#: ink_document_notes_controller.lua ink_document_notes_ui.lua
+#: ink_notebook_editor.lua ink_notebook_library.lua main.lua
+msgid "Export…"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Edit in KOReader"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Opening note…"
+msgstr ""
+
+#: ink_document_notes_controller.lua ink_document_notes_ui.lua
+#: ink_export_dialog.lua ink_localsend.lua ink_notebook_editor.lua
+#: ink_notebook_library.lua
+msgid "Cancel"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Note %1 of %2 · %3"
+msgstr ""
+
+#: ink_document_notes_controller.lua ink_document_notes_ui.lua
+msgid "Locating…"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Previous sheet"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Next sheet"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "This note could not be displayed."
+msgstr ""
+
+#: ink_document_notes_controller.lua main.lua
+msgid "This note’s location is no longer available."
+msgstr ""
+
+#: ink_document_notes_controller.lua main.lua
+msgid "This drawing sheet is no longer available."
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "This drawing sheet has invalid dimensions."
+msgstr ""
+
+#: ink_document_notes_controller.lua main.lua
+msgid "Could not open this note in the document."
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Add sheet at end"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Organize sheets…"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Export this note…"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Edit in document"
+msgstr ""
+
+#: ink_document_notes_controller.lua ink_notebook_editor.lua
+#: ink_notebook_library.lua ink_pen_dialog.lua ink_refresh_dialog.lua
+#: ink_selection.lua ink_shape_dialog.lua main.lua
+msgid "Close"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Sheet %1 · move to position…"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Position (1–%1)"
+msgstr ""
+
+#: ink_document_notes_controller.lua ink_notebook_library.lua
+msgid "Move"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Reorder sheets"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Preparing notes…"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Document image quality"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "150 dpi · smaller files"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "300 dpi · finer detail"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Complete document as images"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Annotated document pages as images"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Complete EPUB with notes appendix"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Export %1 pages of notes"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "%1 · %2 dpi"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "%1 output pages"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Every document page, including pages without notes"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Document pages containing the selected notes"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Laying out EPUB…"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Export page %1"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid ""
+"The complete EPUB is reflowed to A5 grayscale pages. Notes and native "
+"annotations follow in an appendix with source references. Text will not be "
+"selectable and links will not be preserved."
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "All document notes (%1)…"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Filtered results (%1)…"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Selected notes (%1)…"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Select this list page"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Select all filtered results"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Clear selection"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Annotated pages as images…"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Complete document as images…"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Complete EPUB with notes appendix…"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Export and selection"
+msgstr ""
+
+#: ink_document_notes_detail.lua
+msgid "View on page"
+msgstr ""
+
+#: ink_document_notes_detail.lua
+msgid "Actions…"
+msgstr ""
+
+#: ink_document_notes_detail.lua
+msgid "Previous note"
+msgstr ""
+
+#: ink_document_notes_detail.lua
+msgid "Next note"
+msgstr ""
+
+#: ink_document_notes_detail.lua
+msgid "Scale"
+msgstr ""
+
+#: ink_document_notes_detail.lua
+msgid "Rotate"
+msgstr ""
+
+#: ink_document_notes_detail.lua
+msgid "Original size"
+msgstr ""
+
+#: ink_document_notes_detail.lua
+msgid "No rotation"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Couldn’t load notes. Tap Retry."
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Finding notes and locations… %1 found"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "%1 of %2 notes · %3 selected"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Filter"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Filtered"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Done selecting"
+msgstr ""
+
+#: ink_document_notes_ui.lua ink_notebook_library.lua
+msgid "Select"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "%1 sheets"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Notes could not be loaded."
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Loading…"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "No notes in this document yet."
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "No notes match this filter."
+msgstr ""
+
+#: ink_document_notes_ui.lua ink_notebook_library.lua
+msgid "Previous"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "%1 / %2"
+msgstr ""
+
+#: ink_document_notes_ui.lua ink_notebook_library.lua
+msgid "Next"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Go to list page"
+msgstr ""
+
+#: ink_document_notes_ui.lua ink_notebook_editor.lua
+msgid "Go"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Enter a page from 1 to %1."
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Document page range"
+msgstr ""
+
+#: ink_document_notes_ui.lua ink_notebook_editor.lua
+msgid "First page"
+msgstr ""
+
+#: ink_document_notes_ui.lua ink_notebook_editor.lua
+msgid "Last page"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Apply"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Enter a valid first and last page."
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "All notes"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Drawing sheets"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "KOReader notes and highlights"
+msgstr ""
+
+#: ink_document_notes_ui.lua main.lua
+msgid "Page notes"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Without location"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Page range…"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Search annotation text…"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Search annotation text"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Search"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Chapter…"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "No chapters are available."
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Chapters with notes"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Sort by last change"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Sort in document order"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "KOReader annotations"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Filter notes"
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "That folder no longer exists. Choose another one."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "Nothing can be written to that folder. Choose another one."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "That file name can’t be used. Choose another one."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "That file type isn’t supported."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "That image quality isn’t supported."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "There’s nothing to export here."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "The sheets in this book are still being located. Try again in a moment."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid ""
+"This document can’t be exported yet. Only fixed-layout documents, such as "
+"PDFs, can."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "Turn off continuous scrolling to export the page you’re reading."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "This page is too large to export."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid ""
+"This selection has too many pages to export at once. Export a smaller range."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid ""
+"A note’s page size no longer matches the document. Export the notes "
+"separately."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "This note’s saved data cannot be read. Nothing was exported."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "The EPUB conversion stopped. The original document was not changed."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "This page’s size can’t be used for an export."
+msgstr ""
+
+#: ink_export_dialog.lua ink_notebook_editor.lua ink_notebook_ui.lua
+msgid "Lift the pen and try again."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid ""
+"The exported file couldn’t be put in place. Check the folder and try again."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "The image couldn’t be written. The folder may be full."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "The PDF couldn’t be written. The folder may be full."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "The file couldn’t be written. The folder may be full."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "This page couldn’t be drawn for export."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "The notebook store isn’t available right now."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "The pages couldn’t be read. Try again."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "Some ink hasn’t been saved yet, so nothing was exported. Try again."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "An export is already running. Wait for it to finish, or cancel it."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "Some leftover files couldn’t be removed. They may be in use."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "The export stopped unexpectedly. Nothing incomplete was kept."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "Drawing sheets aren’t available for this document."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "The export didn’t finish. Nothing was changed."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "Xournal++ keeps the strokes editable, with these limits:"
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid ""
+"Exported to:\n"
+"%1"
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "Exported %1 file."
+msgid_plural "Exported %1 files."
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_export_dialog.lua
+msgid "Export cancelled. Nothing was written."
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "Export cancelled. %1 file was already written."
+msgid_plural "Export cancelled. %1 files were already written."
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_export_dialog.lua
+msgid "Exporting… %1 / %2 pages"
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "%1 file in that folder has the same name and will be replaced."
+msgid_plural "%1 files in that folder have the same name and will be replaced."
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_export_dialog.lua
+msgid "Replace"
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "Exporting %1 page…"
+msgid_plural "Exporting %1 pages…"
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_export_dialog.lua
+msgid ""
+"This export may need about %1, and only %2 is free in that folder.\n"
+"\n"
+"Export anyway?"
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid ""
+"Only %1 is free in that folder.\n"
+"\n"
+"Export anyway?"
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "Folder: %1"
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "Export folder:"
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "Clean up %1 leftover file"
+msgid_plural "Clean up %1 leftover files"
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_export_dialog.lua
+msgid "Delete %1 leftover file from an interrupted export? This frees %2."
+msgid_plural ""
+"Delete %1 leftover files from an interrupted export? This frees %2."
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_export_dialog.lua ink_localsend.lua ink_notebook_editor.lua
+#: ink_notebook_library.lua ink_selection.lua main.lua
+msgid "Delete"
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "Removed %1 leftover file, freeing %2."
+msgid_plural "Removed %1 leftover files, freeing %2."
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_export_dialog.lua
+msgid "Folder…"
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "File name"
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "File type"
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "What to export"
+msgstr ""
+
+#: ink_export_xopp.lua
+msgid ""
+"The highlighter paints black at 20% opacity in JustDraw; Xournal++ stores "
+"highlighters at 50% (alpha 0x7f), so they look darker."
+msgstr ""
+
+#: ink_export_xopp.lua
+msgid ""
+"The legacy marker is exported as an opaque light-gray pen, not as a "
+"translucent highlighter."
+msgstr ""
+
+#: ink_export_xopp.lua
+msgid ""
+"Textured strokes lose their grain and become flat gray pen strokes. The PDF "
+"export remains the faithful picture."
+msgstr ""
+
+#: ink_export_xopp.lua
+msgid ""
+"Every stroke uses Xournal++'s round cap; JustDraw's original pen draws a "
+"square nib, so ends and corners may look slightly different."
+msgstr ""
+
+#: ink_export_xopp.lua
+msgid ""
+"Paper without a Xournal++ equivalent (narrow ruled, checklist) is exported "
+"as ruled."
+msgstr ""
+
+#: ink_export_xopp.lua
+msgid ""
+"Xournal++ draws ruled, squared and dotted backgrounds at its own spacing, "
+"not JustDraw's."
+msgstr ""
+
+#: ink_export_xopp.lua
+msgid "A dot is exported as a zero-length stroke of two identical points."
+msgstr ""
+
+#: ink_export_xopp_job.lua
+msgid ""
+"The notebook changed while it was being exported, so nothing was saved. Try "
+"again."
+msgstr ""
+
+#: ink_export_xopp_job.lua
+msgid ""
+"The export’s temporary file couldn’t be written. The device may be full; "
+"free some space and try again."
+msgstr ""
+
+#: ink_export_xopp_job.lua
+msgid ""
+"This notebook is too large to export to Xournal++. Export fewer pages, or "
+"use PDF."
+msgstr ""
+
+#: ink_export_xopp_job.lua
+msgid "Xournal++ export isn’t available in this KOReader version."
+msgstr ""
+
+#: ink_export_xopp_job.lua
+msgid "The file couldn’t be compressed. The folder may be full."
+msgstr ""
+
+#: ink_export_xopp_job.lua
+msgid "The compressed file didn’t check out, so it wasn’t saved. Try again."
+msgstr ""
+
+#: ink_export_xopp_job.lua
+msgid ""
+"A file with that name appeared while exporting. Nothing was replaced; export "
+"again to choose."
+msgstr ""
+
+#: ink_localsend.lua
+msgid ""
+"LocalSend isn’t available. Install or update the LocalSend plugin, then try "
+"again."
+msgstr ""
+
+#: ink_localsend.lua
+msgid ""
+"LocalSend isn’t available any more. The files are kept in:\n"
+"%1\n"
+"\n"
+"Try again?"
+msgstr ""
+
+#: ink_localsend.lua ink_notebook_library.lua
+msgid "Try again"
+msgstr ""
+
+#: ink_localsend.lua
+msgid "LocalSend is open. It shows the transfer and its result."
+msgstr ""
+
+#: ink_localsend.lua
+msgid ""
+"Couldn’t open LocalSend. The files are kept in:\n"
+"%1"
+msgstr ""
+
+#: ink_localsend.lua
+msgid "Couldn’t prepare %1 notebook for sending:"
+msgid_plural "Couldn’t prepare %1 notebooks for sending:"
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_localsend.lua
+msgid "Try again?"
+msgstr ""
+
+#: ink_localsend.lua
+msgid ""
+"Earlier sends still take up space. Delete the ones from previous sessions "
+"and try again?"
+msgstr ""
+
+#: ink_localsend.lua
+msgid "There is still no room to prepare the files. Nothing was sent."
+msgstr ""
+
+#: ink_localsend.lua
+msgid "Couldn’t prepare the files for sending. Nothing was sent."
+msgstr ""
+
+#: ink_localsend.lua
+msgid "Send %1 notebook with LocalSend as:"
+msgid_plural "Send %1 notebooks with LocalSend as:"
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_localsend.lua
+msgid ""
+"PDF is a picture of each page. Xournal++ keeps every stroke editable; some "
+"pen styles and papers are approximated."
+msgstr ""
+
+#: ink_localsend.lua
+msgid "PDF"
+msgstr ""
+
+#: ink_localsend.lua
+msgid "Xournal++"
+msgstr ""
+
+#: ink_localsend.lua ink_notebook_library.lua
+msgid "Send"
+msgstr ""
+
+#: ink_notebook_editor.lua ink_notebook_library.lua
+msgid "1 page"
+msgid_plural "%1 pages"
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_notebook_editor.lua
+msgid "Couldn’t load this page."
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Your previous ink is still saved. Try loading the page again."
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Retry loading"
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "This page’s ink hasn’t been saved."
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid ""
+"It is still on this device. You can’t leave this notebook or change pages "
+"until it is saved."
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Retry saving"
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Pen input stopped responding."
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Retry pen input"
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Exit notebook"
+msgstr ""
+
+#: ink_notebook_editor.lua ink_sheet_bar.lua
+msgid "Redo"
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Previous page"
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Add page at end"
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Next page"
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Error"
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Minimize"
+msgstr ""
+
+#: ink_notebook_editor.lua ink_sheet_bar.lua main.lua
+msgid "Lasso"
+msgstr ""
+
+#: ink_notebook_editor.lua ink_shape_dialog.lua ink_sheet_bar.lua
+msgid "Shapes"
+msgstr ""
+
+#: ink_notebook_editor.lua ink_sheet_bar.lua main.lua
+msgid "Paste"
+msgstr ""
+
+#: ink_notebook_editor.lua ink_sheet_bar.lua main.lua
+msgid "Edit"
+msgstr ""
+
+#: ink_notebook_editor.lua main.lua
+msgid "Shapes…"
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Lift the pen and your hand, then try again."
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Page %1 of %2"
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Loading page…"
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Go to page (1–%1)"
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Enter a whole page number from 1 to %1."
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Couldn’t open that page. Try again."
+msgstr ""
+
+#: ink_notebook_editor.lua ink_notebook_library.lua
+msgid "Rename notebook"
+msgstr ""
+
+#: ink_notebook_editor.lua ink_notebook_library.lua
+msgid "Rename"
+msgstr ""
+
+#: ink_notebook_editor.lua ink_notebook_library.lua
+msgid "Notebook name can’t be empty."
+msgstr ""
+
+#: ink_notebook_editor.lua ink_notebook_library.lua
+msgid "Notebook name is too long. Use a shorter name."
+msgstr ""
+
+#: ink_notebook_editor.lua ink_notebook_library.lua
+msgid "Couldn’t rename this notebook. Try again."
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "A notebook must keep at least one page, so this page can’t be deleted."
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid ""
+"Delete this page and its ink? The rest of the notebook won’t change. This "
+"can’t be undone."
+msgstr ""
+
+#: ink_notebook_editor.lua ink_notebook_library.lua
+msgid "Delete “%1”? This deletes its %2 and all ink. This can’t be undone."
+msgstr ""
+
+#: ink_notebook_editor.lua ink_notebook_library.lua
+msgid "Couldn’t delete this notebook. Try again."
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Send…"
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Go to page…"
+msgstr ""
+
+#: ink_notebook_editor.lua ink_pen_dialog.lua main.lua
+msgid "Pen settings"
+msgstr ""
+
+#: ink_notebook_editor.lua ink_notebook_library.lua
+msgid "Paper style"
+msgstr ""
+
+#: ink_notebook_editor.lua ink_refresh_dialog.lua main.lua
+msgid "Drawing refresh"
+msgstr ""
+
+#: ink_notebook_editor.lua main.lua
+msgid "Input mode"
+msgstr ""
+
+#: ink_notebook_editor.lua main.lua
+msgid "Stylus diagnostics"
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Delete page"
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Delete notebook"
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Whole notebook"
+msgstr ""
+
+#: ink_notebook_editor.lua ink_notebook_library.lua
+msgid "Export “%1”"
+msgstr ""
+
+#: ink_notebook_editor.lua main.lua
+msgid "Automatic"
+msgstr ""
+
+#: ink_notebook_editor.lua main.lua
+msgid "Stylus"
+msgstr ""
+
+#: ink_notebook_editor.lua main.lua
+msgid "Finger"
+msgstr ""
+
+#: ink_notebook_editor.lua
+msgid "Couldn’t change the paper style. Try again."
+msgstr ""
+
+#: ink_notebook_editor.lua ink_notebook_library.lua
+msgid "Blank"
+msgstr ""
+
+#: ink_notebook_editor.lua ink_notebook_library.lua
+msgid "Ruled"
+msgstr ""
+
+#: ink_notebook_editor.lua ink_notebook_library.lua
+msgid "Squared"
+msgstr ""
+
+#: ink_notebook_editor.lua ink_notebook_library.lua
+msgid "Dotted"
+msgstr ""
+
+#: ink_notebook_editor.lua ink_notebook_library.lua
+msgid "Narrow ruled"
+msgstr ""
+
+#: ink_notebook_editor.lua ink_notebook_library.lua
+msgid "Checklist"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "1 notebook"
+msgid_plural "%1 notebooks"
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_notebook_library.lua
+msgid "Oldest first"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Title A–Z"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Title Z–A"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Recently changed"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Loading notebooks…"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Both JustDraw and FingerInk notebook databases exist."
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid ""
+"Close KOReader, then move one database together with its matching -wal and -"
+"shm files to another directory."
+msgstr ""
+
+#: ink_notebook_library.lua ink_notebook_ui.lua
+msgid "Couldn’t open the notebook library."
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid ""
+"Your notebooks are still stored on this device. Try again, or restart "
+"KOReader."
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid ""
+"This notebook library was created by a newer version of JustDraw. You can’t "
+"create or edit notebooks with this version."
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "No notebooks yet"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Create your first notebook to write by hand without opening a book."
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "New notebook"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "New folder"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Sort"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Duplicate"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Done"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "%1 selected"
+msgid_plural "%1 selected"
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_notebook_library.lua main.lua
+msgid "Notebooks"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "No preview"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid ""
+"This notebook was created by a newer version of JustDraw. You can view it "
+"and change pages, but you can’t edit it."
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "All notebooks"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Back"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Notebook name"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Create"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Couldn’t create this notebook. Try again."
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "That name is too long. Use a shorter name."
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "The name can’t be empty."
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Couldn’t create this folder. Try again."
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Rename folder"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Couldn’t rename this folder. Try again."
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Sort notebooks"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Move…"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Retry preview"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Open"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Moved %1 notebook."
+msgid_plural "Moved %1 notebooks."
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_notebook_library.lua
+msgid "Duplicated %1 notebook."
+msgid_plural "Duplicated %1 notebooks."
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_notebook_library.lua
+msgid "Exported %1 notebook."
+msgid_plural "Exported %1 notebooks."
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_notebook_library.lua
+msgid "Deleted %1 item."
+msgid_plural "Deleted %1 items."
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_notebook_library.lua
+msgid "%1 failed:"
+msgid_plural "%1 failed:"
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_notebook_library.lua
+msgid "%1 cancelled."
+msgid_plural "%1 cancelled."
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_notebook_library.lua
+msgid "Nothing was changed."
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Couldn’t list the folders. Try again."
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "No folder"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "More folders…"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Move %1 notebook to:"
+msgid_plural "Move %1 notebooks to:"
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_notebook_library.lua
+msgid "Duplicating %1 of %2…"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "%1 (copy)"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid ""
+"Export %1 notebook as %2 to:\n"
+"%3"
+msgid_plural ""
+"Export %1 notebooks as %2 to:\n"
+"%3"
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_notebook_library.lua
+msgid ""
+"Delete the folder “%1”? Its notebooks are not deleted: they go back to "
+"Notebooks."
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Delete %1 item? This can’t be undone."
+msgid_plural "Delete these %1 items? This can’t be undone."
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_notebook_library.lua
+msgid "Folder “%1”"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid ""
+"Notebooks inside a deleted folder are not deleted: they go back to Notebooks."
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Couldn’t delete this folder. Try again."
+msgstr ""
+
+#: ink_notebook_session.lua
+msgid ""
+"This page changed since it was last open, so its undo history was cleared."
+msgstr ""
+
+#: ink_notebook_ui.lua
+msgid ""
+"This screen is too small for the notebook controls. Rotate the device or "
+"lower the screen DPI and try again."
+msgstr ""
+
+#: ink_notebook_ui.lua main.lua
+msgid "Stroke was not saved because the write queue is busy. Try again."
+msgstr ""
+
+#: ink_notebook_ui.lua main.lua
+msgid ""
+"Stroke stopped because the pen contact did not end. Lift the pen and try "
+"again."
+msgstr ""
+
+#: ink_pen_dialog.lua main.lua
+msgid "Graphite"
+msgstr ""
+
+#: ink_pen_dialog.lua main.lua
+msgid "Ink pen"
+msgstr ""
+
+#: ink_pen_dialog.lua main.lua
+msgid "Marker"
+msgstr ""
+
+#: ink_pen_dialog.lua main.lua
+msgid "Round ink"
+msgstr ""
+
+#: ink_pen_dialog.lua main.lua
+msgid "Highlighter"
+msgstr ""
+
+#: ink_pen_dialog.lua main.lua
+msgid "Textured graphite"
+msgstr ""
+
+#: ink_pen_dialog.lua ink_shape_dialog.lua main.lua
+msgid "Medium"
+msgstr ""
+
+#: ink_pen_dialog.lua main.lua
+msgid "Thick"
+msgstr ""
+
+#: ink_pen_dialog.lua main.lua
+msgid "Thin"
+msgstr ""
+
+#: ink_pen_dialog.lua
+msgid "%1 · %2"
+msgstr ""
+
+#: ink_pen_dialog.lua
+msgid "Custom (%1)"
+msgstr ""
+
+#: ink_placement.lua
+msgid "That is too large for this page."
+msgstr ""
+
+#: ink_placement.lua
+msgid "That could not be prepared for placing."
+msgstr ""
+
+#: ink_placement.lua
+msgid "That could not be placed. Try again."
+msgstr ""
+
+#: ink_refresh_dialog.lua
+msgid "%1 ms"
+msgstr ""
+
+#: ink_refresh_dialog.lua
+msgid "%1 ms (default)"
+msgstr ""
+
+#: ink_refresh_dialog.lua
+msgid ""
+"For graphite, marker, and pages containing gray ink. Lower intervals update "
+"the screen more often."
+msgstr ""
+
+#: ink_selection.lua
+msgid "The selection could not be completed."
+msgstr ""
+
+#: ink_selection.lua
+msgid "That lasso was too long. Draw a shorter one."
+msgstr ""
+
+#: ink_selection.lua
+msgid "That lasso is too complex. Draw a simpler one."
+msgstr ""
+
+#: ink_selection.lua
+msgid "The selection could not be read."
+msgstr ""
+
+#: ink_selection.lua
+msgid "Too much ink for one selection. Select less."
+msgstr ""
+
+#: ink_selection.lua
+msgid "That selection is too large to move. Select less."
+msgstr ""
+
+#: ink_selection.lua
+msgid "The selection could not be prepared."
+msgstr ""
+
+#: ink_selection.lua
+msgid "Copy"
+msgstr ""
+
+#: ink_selection.lua
+msgid "Cut"
+msgstr ""
+
+#: ink_selection.lua
+msgid "The selection could not be moved. Try again."
+msgstr ""
+
+#: ink_selection.lua
+msgid "The selection could not be copied."
+msgstr ""
+
+#: ink_selection.lua
+msgid "Copied"
+msgstr ""
+
+#: ink_selection.lua
+msgid "The selection could not be removed. Try again."
+msgstr ""
+
+#: ink_shape_dialog.lua
+msgid "Arrow"
+msgstr ""
+
+#: ink_shape_dialog.lua
+msgid "Line"
+msgstr ""
+
+#: ink_shape_dialog.lua
+msgid "Square"
+msgstr ""
+
+#: ink_shape_dialog.lua
+msgid "Circle"
+msgstr ""
+
+#: ink_shape_dialog.lua
+msgid "Ellipse"
+msgstr ""
+
+#: ink_shape_dialog.lua
+msgid "Rectangle"
+msgstr ""
+
+#: ink_shape_dialog.lua
+msgid "Triangle"
+msgstr ""
+
+#: ink_shape_dialog.lua
+msgid "Large"
+msgstr ""
+
+#: ink_shape_dialog.lua
+msgid "Small"
+msgstr ""
+
+#: ink_sheet_bar.lua main.lua
+msgid "Close sheet"
+msgstr ""
+
+#: main.lua
+msgid "Stylus input requires KOReader v2026.07 or newer"
+msgstr ""
+
+#: main.lua
+msgid "Another plugin is already using stylus input"
+msgstr ""
+
+#: main.lua
+msgid "JustDraw: cannot hook touch input"
+msgstr ""
+
+#: main.lua
+msgid "Pen input needs KOReader v2026.07 or newer. Drawing with finger."
+msgstr ""
+
+#: main.lua
+msgid ""
+"This device does not say which input slot its pen uses, so the pen route is "
+"unavailable."
+msgstr ""
+
+#: main.lua
+msgid "JustDraw: input is already captured"
+msgstr ""
+
+#: main.lua
+msgid "JustDraw: drawing stopped after an input error"
+msgstr ""
+
+#: main.lua
+msgid "JustDraw"
+msgstr ""
+
+#: main.lua
+msgid "Open sheet here"
+msgstr ""
+
+#: main.lua
+msgid "Open a drawing sheet to draw in this book: %1 ▸ %2 ▸ %3."
+msgstr ""
+
+#: main.lua
+msgid "This sheet belongs to page %1. Go back to it, or open a sheet here."
+msgstr ""
+
+#: main.lua
+msgid ""
+"This sheet belongs to another place in the book. Go back to it, or open a "
+"sheet here."
+msgstr ""
+
+#: main.lua
+msgid "JustDraw: toggle drawing"
+msgstr ""
+
+#: main.lua
+msgid "JustDraw: toggle eraser"
+msgstr ""
+
+#: main.lua
+msgid "JustDraw: undo stroke"
+msgstr ""
+
+#: main.lua
+msgid "JustDraw: redo"
+msgstr ""
+
+#: main.lua
+msgid "JustDraw: toggle toolbar"
+msgstr ""
+
+#: main.lua
+msgid "JustDraw: open notebooks"
+msgstr ""
+
+#: main.lua
+msgid "JustDraw: browse document notes"
+msgstr ""
+
+#: main.lua
+msgid "JustDraw: open/close drawing sheet"
+msgstr ""
+
+#: main.lua
+msgid "JustDraw: toggle marker/pen"
+msgstr ""
+
+#: main.lua
+msgid "This sheet is read-only"
+msgstr ""
+
+#: main.lua
+msgid "Could not save ink. Use Retry saving before drawing again."
+msgstr ""
+
+#: main.lua
+msgid "This sheet's ink is still loading"
+msgstr ""
+
+#: main.lua
+msgid "Input mode is set to Finger. Set it to Automatic or Stylus."
+msgstr ""
+
+#: main.lua
+msgid "This KOReader has no stylus API. The pen route needs v2026.07 or newer."
+msgstr ""
+
+#: main.lua
+msgid "Another plugin already owns the stylus input callback."
+msgstr ""
+
+#: main.lua
+msgid ""
+"This device does not report a pen digitizer. Set Input mode to Stylus by "
+"hand."
+msgstr ""
+
+#: main.lua
+msgid ""
+"Pen coordinates will be written to the local KOReader log for up to 60 "
+"seconds. JustDraw does not upload them; shared logs may contain them. Turn "
+"KOReader's debug logging off again afterwards: it records all raw input and "
+"the file grows very quickly."
+msgstr ""
+
+#: main.lua
+msgid "Start"
+msgstr ""
+
+#: main.lua
+msgid "Cannot anchor a sheet at this position"
+msgstr ""
+
+#: main.lua
+msgid "Drawing sheets need an open book"
+msgstr ""
+
+#: main.lua
+msgid "Drawing sheets are not available in this document"
+msgstr ""
+
+#: main.lua
+msgid "Pen style: marker"
+msgstr ""
+
+#: main.lua
+msgid "Pen style: marker (needs a sheet here)"
+msgstr ""
+
+#: main.lua
+msgid "Pen style: ink pen"
+msgstr ""
+
+#: main.lua
+msgid "Nothing to undo on this page"
+msgstr ""
+
+#: main.lua
+msgid "Nothing to undo on this sheet"
+msgstr ""
+
+#: main.lua
+msgid "Nothing to redo on this sheet"
+msgstr ""
+
+#: main.lua
+msgid "Redo is available on notebooks and sheets"
+msgstr ""
+
+#: main.lua
+msgid "Sheet height: %1 %"
+msgstr ""
+
+#: main.lua
+msgid "Delete sheet"
+msgstr ""
+
+#: main.lua
+msgid "Toolbar side"
+msgstr ""
+
+#: main.lua
+#, lua-format
+msgid "Sheet %d"
+msgstr ""
+
+#: main.lua
+msgid "Sheets at this position"
+msgstr ""
+
+#: main.lua
+msgid "Delete this sheet and everything drawn on it?"
+msgstr ""
+
+#: main.lua
+msgid "Could not delete this sheet"
+msgstr ""
+
+#: main.lua
+msgid "Go to this sheet's page"
+msgstr ""
+
+#: main.lua
+msgid ""
+"The sheet stays open while you read on, and it does not follow the page: it "
+"hangs on a position in the text. This goes back to that position, which is "
+"the only place it will take ink."
+msgstr ""
+
+#: main.lua
+msgid "Open a sheet here instead"
+msgstr ""
+
+#: main.lua
+msgid "Delete this sheet"
+msgstr ""
+
+#: main.lua
+msgid "Indexing sheets %1/%2"
+msgstr ""
+
+#: main.lua
+msgid "Indexing sheets %1"
+msgstr ""
+
+#: main.lua
+msgid ""
+"Creates a blank sheet anchored to this position in the book, or opens the "
+"one that is already here. The sheet keeps its own coordinates, so changing "
+"font or margins moves the sheet, not what you drew on it."
+msgstr ""
+
+#: main.lua
+msgid "Retry saving ink"
+msgstr ""
+
+#: main.lua
+msgid ""
+"A write to the sheet database failed. Nothing has been lost -- the strokes "
+"are still in memory -- but they are not durable until this succeeds, and no "
+"more can be drawn until it does."
+msgstr ""
+
+#: main.lua
+msgid "Retry loading sheet"
+msgstr ""
+
+#: main.lua
+msgid "Sheets on this page"
+msgstr ""
+
+#: main.lua
+#, lua-format
+msgid "Lost sheet %d"
+msgstr ""
+
+#: main.lua
+msgid "Open it anyway"
+msgstr ""
+
+#: main.lua
+msgid "Delete it"
+msgstr ""
+
+#: main.lua
+#, lua-format
+msgid "Lost sheets (%d)"
+msgstr ""
+
+#: main.lua
+msgid ""
+"Sheets whose place in the book can no longer be found -- usually because the "
+"file was replaced with a different edition. Nothing drawn on them has been "
+"lost."
+msgstr ""
+
+#: main.lua
+msgid ""
+"Delete the ink on this page? Drawing sheets and legacy ink are not affected."
+msgstr ""
+
+#: main.lua
+msgid ""
+"Delete the ink on every page of this book? Drawing sheets and legacy ink are "
+"not affected."
+msgstr ""
+
+#: main.lua
+msgid ""
+"A write to the page-ink database failed. Nothing has been lost -- the "
+"strokes are still in memory -- but they are not durable until this succeeds, "
+"and no more can be drawn until it does."
+msgstr ""
+
+#: main.lua
+msgid "Delete this page note"
+msgstr ""
+
+#: main.lua
+msgid "Delete all page notes"
+msgstr ""
+
+#: main.lua
+msgid ""
+"Deletes the ink drawn on the pages of this book. Drawing sheets and ink "
+"drawn before this KOReader version are not affected."
+msgstr ""
+
+#: main.lua
+msgid ""
+"Blank sheets anchored to a position in a reflowable book. Not available in "
+"PDFs and other fixed layouts, where drawing goes straight onto the page "
+"instead."
+msgstr ""
+
+#: main.lua
+msgid ""
+"Browse every JustDraw note in this book, read it at full size, go to its "
+"location, or export a selection."
+msgstr ""
+
+#: main.lua
+msgid "Start drawing"
+msgstr ""
+
+#: main.lua
+msgid ""
+"Use the Draw/Stop button on the side toolbar to switch drawing off again. "
+"Two fingers also work as usual while drawing is on."
+msgstr ""
+
+#: main.lua
+msgid "Show toolbar"
+msgstr ""
+
+#: main.lua
+msgid "Left"
+msgstr ""
+
+#: main.lua
+msgid "Right"
+msgstr ""
+
+#: main.lua
+msgid ""
+"Automatic uses the stylus route on devices that report a pen digitizer, and "
+"the finger route everywhere else. On a drawing sheet, finger and palm never "
+"draw; touches above the bounded sheet can still turn pages. With direct ink, "
+"press Stop to return all touch input to reading."
+msgstr ""
+
+#: main.lua
+msgid "Pen style"
+msgstr ""
+
+#: main.lua
+msgid "Pen width"
+msgstr ""
+
+#: main.lua
+msgid "Fast refresh while drawing"
+msgstr ""
+
+#: main.lua
+msgid ""
+"On: strokes appear with the DU waveform — quick, but grainy and it leaves "
+"ghosting until the next page turn. Off: slower, cleaner."
+msgstr ""
+
+#: main.lua
+msgid ""
+"Shows why the pen route is or is not running. With confirmation, it writes "
+"pen coordinates and decisions to the local log for up to one minute or 8,192 "
+"events. No book or notebook identity is logged."
+msgstr ""
+
+#: main.lua
+msgid ""
+"Writes what you have drawn to a PDF, PNG or JPEG in a folder of your "
+"choosing. Exports the page you are reading, the sheet that is open, or every "
+"sheet in this book. Nothing in the book itself is changed."
+msgstr ""
+
+#: main.lua
+msgid "Clear this page"
+msgstr ""
+
+#: main.lua
+msgid "No ink on this page"
+msgstr ""
+
+#: main.lua
+msgid "Clear whole document"
+msgstr ""
+
+#: main.lua
+msgid "No ink in this document"
+msgstr ""
+
+#: main.lua
+msgid "Delete all ink in this document?"
+msgstr ""
+
+#: main.lua
+msgid "Clear legacy ink on this stored page"
+msgstr ""
+
+#: main.lua
+msgid ""
+"Ink drawn on this page by an older JustDraw or FingerInk, in screen pixels. "
+"It is shown and exported as it was stored, and this is the only thing that "
+"can change it."
+msgstr ""
+
+#: main.lua
+msgid "Clear all legacy ink"
+msgstr ""
+
+#: main.lua
+msgid ""
+"Delete the legacy ink stored for page %1? Drawing sheets and page notes are "
+"not affected."
+msgstr ""
+
+#: main.lua
+msgid ""
+"Delete all legacy ink in this book? Drawing sheets and page notes are not "
+"affected."
+msgstr ""
+
+#: main.lua
+msgid ""
+"Ink drawn on the pages of a PDF or another fixed layout, stored in the "
+"page's own units so it follows zoom and panning. Not available in reflowable "
+"books, where a drawing sheet is anchored to the text instead."
+msgstr ""

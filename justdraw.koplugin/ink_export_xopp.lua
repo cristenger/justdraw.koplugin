@@ -144,21 +144,25 @@ end
 
 --- Everything this export approximates. `id` is stable for code; `text` is
 --- for people, and the dialog is expected to translate it.
+--- Marks a string for extraction (tools/extract_strings) without translating
+--- it here: this module is pure, and the dialog translates when it shows it.
+local function gettext_noop(text) return text end
+
 Xopp.limitations = {
     { id = "highlighter_opacity",
-      text = "The highlighter paints black at 20% opacity in JustDraw; Xournal++ stores highlighters at 50% (alpha 0x7f), so they look darker." },
+      text = gettext_noop("The highlighter paints black at 20% opacity in JustDraw; Xournal++ stores highlighters at 50% (alpha 0x7f), so they look darker.") },
     { id = "marker_opaque",
-      text = "The legacy marker is exported as an opaque light-gray pen, not as a translucent highlighter." },
+      text = gettext_noop("The legacy marker is exported as an opaque light-gray pen, not as a translucent highlighter.") },
     { id = "textured_grain",
-      text = "Textured strokes lose their grain and become flat gray pen strokes. The PDF export remains the faithful picture." },
+      text = gettext_noop("Textured strokes lose their grain and become flat gray pen strokes. The PDF export remains the faithful picture.") },
     { id = "nib_shape",
-      text = "Every stroke uses Xournal++'s round cap; JustDraw's original pen draws a square nib, so ends and corners may look slightly different." },
+      text = gettext_noop("Every stroke uses Xournal++'s round cap; JustDraw's original pen draws a square nib, so ends and corners may look slightly different.") },
     { id = "paper_fallback",
-      text = "Paper without a Xournal++ equivalent (narrow ruled, checklist) is exported as ruled." },
+      text = gettext_noop("Paper without a Xournal++ equivalent (narrow ruled, checklist) is exported as ruled.") },
     { id = "paper_pitch",
-      text = "Xournal++ draws ruled, squared and dotted backgrounds at its own spacing, not JustDraw's." },
+      text = gettext_noop("Xournal++ draws ruled, squared and dotted backgrounds at its own spacing, not JustDraw's.") },
     { id = "single_point",
-      text = "A dot is exported as a zero-length stroke of two identical points." },
+      text = gettext_noop("A dot is exported as a zero-length stroke of two identical points.") },
 }
 
 -- ------------------------------------------------------------------ numbers

@@ -3,7 +3,7 @@
 local ButtonDialog = require("ui/widget/buttondialog")
 local LiveRefresh = require("ink_live_refresh")
 local T = require("ffi/util").template
-local _ = require("gettext")
+local _ = require("ink_i18n")
 
 local Dialog = {}
 

@@ -1,0 +1,48 @@
+#!/bin/sh
+# Regenerate justdraw.koplugin/l10n/justdraw.pot from the plugin's sources with
+# GNU xgettext (a development tool: nothing here runs on the device).
+#
+#   tools/extract_strings           write the template
+#   tools/extract_strings --check   fail if the shipped template is stale
+#
+# Deterministic: files in byte order, locations by file only (no line
+# numbers to churn), and a fixed POT-Creation-Date. Keywords are the plugin's
+# spellings: _("..."), N_(singular, plural, n), _.ngettext(singular, plural, n)
+# and gettext_noop("...") for strings translated later (ink_export_xopp).
+#
+# Excluded on purpose: _meta.lua (read by KOReader's PluginLoader with the
+# global gettext before the plugin loads) and ink_i18n.lua (the adapter,
+# whose only gettext use is the fallback to KOReader's own catalogue).
+#
+# Generated with GNU gettext-tools 0.21. Other versions may order or wrap
+# differently; the --check in CI pins the version it runs.
+set -eu
+root=$(cd "$(dirname "$0")/.." && pwd)
+plugin="$root/justdraw.koplugin"
+out="$plugin/l10n/justdraw.pot"
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+
+cd "$plugin"
+# shellcheck disable=SC2046
+LC_ALL=C xgettext --language=Lua --from-code=UTF-8 \
+    --keyword=_ --keyword=N_:1,2 --keyword=_.ngettext:1,2 --keyword=gettext_noop \
+    --add-comments=TRANSLATORS: --add-location=file --sort-by-file \
+    --package-name=JustDraw --msgid-bugs-address=https://github.com/cristenger/justdraw.koplugin/issues \
+    --output=- $(LC_ALL=C ls *.lua | grep -v -e '^_meta\.lua$' -e '^ink_i18n\.lua$') \
+  | sed -e 's/^"POT-Creation-Date: .*\\n"$/"POT-Creation-Date: 2026-01-01 00:00+0000\\n"/' \
+        -e 's/^"Content-Type: text\/plain; charset=CHARSET\\n"$/"Content-Type: text\/plain; charset=UTF-8\\n"/' \
+  > "$tmp"
+
+if [ "${1:-}" = "--check" ]; then
+    if ! cmp -s "$tmp" "$out"; then
+        echo "l10n/justdraw.pot is stale: run tools/extract_strings" >&2
+        diff -u "$out" "$tmp" | head -40 >&2 || true
+        exit 1
+    fi
+    echo "POT_UP_TO_DATE $(grep -c '^msgid ' "$out") entries"
+    exit 0
+fi
+mkdir -p "$plugin/l10n"
+cp "$tmp" "$out"
+echo "wrote $out: $(grep -c '^msgid ' "$out") entries"

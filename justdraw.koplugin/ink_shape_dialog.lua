@@ -12,7 +12,7 @@ exist, which one is marked, and what each one stores.
 
 local ButtonDialog = require("ui/widget/buttondialog")
 local Shapes = require("ink_shapes")
-local _ = require("gettext")
+local _ = require("ink_i18n")
 
 local ShapeDialog = {}
 

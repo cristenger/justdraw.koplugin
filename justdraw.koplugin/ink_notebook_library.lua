@@ -49,7 +49,7 @@ local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local logger = require("logger")
 local T = require("ffi/util").template
-local _ = require("gettext")
+local _ = require("ink_i18n")
 local N_ = _.ngettext
 
 local Card = require("ink_library_card")
