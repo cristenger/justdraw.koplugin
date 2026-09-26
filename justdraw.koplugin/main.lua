@@ -3788,7 +3788,7 @@ function JustDraw:onCanvasOverlayPainted(overlay)
     end
 end
 
-function JustDraw:blitCanvasBox(box, tr)
+function JustDraw:blitCanvasBox(box, tr, editing)
     if not box or box.w <= 0 or box.h <= 0 then return end
     local cache = self.session and self.session:cache()
     local bb = cache and cache:buffer()
@@ -3806,15 +3806,20 @@ function JustDraw:blitCanvasBox(box, tr)
     if painter then
         -- A selection or placement floats above the page: repaint it inside
         -- this box too, or the repair would wipe it until the next move.
-        local clip = { x = sx, y = sy, w = box.w, h = box.h }
+        -- One reused clip: during a drag this runs on every pen sample.
+        local clip = self._sheet_clip
+        if not clip then clip = {}; self._sheet_clip = clip end
+        clip.x, clip.y, clip.w, clip.h = sx, sy, box.w, box.h
         painter:paintOverlay(Screen.bb, clip)
         gray = gray or painter:hasGrayInk()
     end
     if overlay then
-        overlay:restoreChromeIfIntersecting(Screen.bb,
-            { x = sx, y = sy, w = box.w, h = box.h }, 0, 0)
+        local chrome = self._sheet_chrome
+        if not chrome then chrome = {}; self._sheet_chrome = chrome end
+        chrome.x, chrome.y, chrome.w, chrome.h = sx, sy, box.w, box.h
+        overlay:restoreChromeIfIntersecting(Screen.bb, chrome, 0, 0)
     end
-    self:refreshBox(sx, sy, sx + box.w, sy + box.h, gray)
+    self:refreshBox(sx, sy, sx + box.w, sy + box.h, gray, editing)
 end
 
 --[[--
@@ -3828,7 +3833,10 @@ function JustDraw:repaintSheetBox(x0, y0, x1, y1)
     local tr = session and session:transform()
     local cache = session and session:cache()
     if not tr or not cache or not cache:buffer() then return false end
-    local r = tr:canvasRect()
+    -- Scratch tables, reused: this runs on every sample of an editing drag.
+    local r = self._sheet_rect
+    if not r then r = {}; self._sheet_rect = r end
+    tr:canvasRect(r)
     local left = math.max(math.floor(x0), r.x)
     local top = math.max(math.floor(y0), r.y)
     local right = math.min(math.ceil(x1), r.x + r.w)
@@ -3836,7 +3844,10 @@ function JustDraw:repaintSheetBox(x0, y0, x1, y1)
     if right <= left or bottom <= top then return false end
     local kx = math.floor(left - tr.offset_x + 0.5)
     local ky = math.floor(top - tr.offset_y + 0.5)
-    self:blitCanvasBox({ x = kx, y = ky, w = right - left, h = bottom - top }, tr)
+    local box = self._sheet_box
+    if not box then box = {}; self._sheet_box = box end
+    box.x, box.y, box.w, box.h = kx, ky, right - left, bottom - top
+    self:blitCanvasBox(box, tr, true)
     return true
 end
 
@@ -4321,7 +4332,7 @@ evdev and drops input (ADR-26/36, crash (7).log). That same fence is why a
 device whose `partial` blocks rides `ui` here even with the live-fast
 preference turned off.
 ]]
-function JustDraw:refreshBox(left, top, right, bottom, grayscale)
+function JustDraw:refreshBox(left, top, right, bottom, grayscale, no_partial)
     local x, y, w, h = screenBox(left, top, right, bottom)
     if not x then return end
 
@@ -4330,7 +4341,9 @@ function JustDraw:refreshBox(left, top, right, bottom, grayscale)
         mode = "ui"
     elseif self.live_fast then
         mode = "fast"
-    elseif self:partialBlocksInput() then
+    elseif no_partial or self:partialBlocksInput() then
+        -- An editing drag (lasso, move, placement) repaints under a pen that
+        -- is still down: never `partial` there, on any device.
         mode = "ui"
     else
         mode = "partial"

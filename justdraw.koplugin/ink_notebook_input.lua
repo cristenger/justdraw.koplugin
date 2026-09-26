@@ -240,7 +240,19 @@ end
 function Adapter:_beginInk(sx, sy, tool)
     if not self:_accepts(sx, sy) then return false end
     local surface = self:_surface()
-    if not surface or not surface:isReady() then return false end
+    if not surface or not surface:isReady() then
+        -- An editing contact that begins while the page is changing is
+        -- refused until its lift: `_continueInk` must not hand the rest of it
+        -- to a controller as if it had just begun (§D.8, Task 4.3).
+        local latched = self.contact_tool
+            or (self.get_tool and self.get_tool(self.active_session)) or nil
+        if tool ~= Capture.TOOL_ERASER and ToolState.isEditing(latched)
+            and not truthy(self.get_eraser, self.active_session) then
+            self.edit_contact = "rejected"
+            return true
+        end
+        return false
+    end
     local cx, cy = self.transform:toCanvas(sx, sy)
     local erasing = tool == Capture.TOOL_ERASER
         or truthy(self.get_eraser, self.active_session)

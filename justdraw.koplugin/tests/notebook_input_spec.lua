@@ -942,6 +942,27 @@ return function(ctx)
         t:eq(ends, 1, "coming back and lifting does not start or end another edit")
     end)
 
+    t:case("an editing contact that starts during a page transition stays refused until lift", function()
+        local controller = recorder()
+        local session, _, _, spec = fixture("stylus", {
+            get_tool = function() return "select" end,
+            get_edit_controller = function() return controller end,
+        })
+        local surface = session:surface()
+        local ready = surface.isReady
+        surface.isReady = function() return false end   -- the page is changing
+        spec.stylus_handler{ slot = 4, id = 9, x = 10, y = 10, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 9, x = 20, y = 30, tool = 1 }
+        surface.isReady = ready                          -- and now it is ready
+        spec.stylus_handler{ slot = 4, id = 9, x = 40, y = 60, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 9, x = 80, y = 90, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = -1, x = 80, y = 90, tool = 0 }
+        t:eq(#controller.calls, 0, "the rest of that contact never began an edit")
+        t:eq(#surface:cache():strokes(), 0, "nor became ink")
+        pen(spec, { { 10, 10 }, { 20, 30 }, { 40, 60 } })
+        t:eq(controller.calls[1], "begin", "the next contact edits normally")
+    end)
+
     t:case("the physical eraser ends a selection and erases", function()
         local controller = recorder{ selected = true }
         local session, _, _, spec = fixture("stylus", {

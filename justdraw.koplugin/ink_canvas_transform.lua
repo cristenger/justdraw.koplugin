@@ -195,17 +195,19 @@ local function visibleEdges(self)
 end
 
 --- The part of the canvas that is actually on screen. What ink is clipped to.
-function Transform:canvasRect()
+--- With `out`, fills and returns that table instead of a new one: the drag
+--- paths ask on every pen sample and must not allocate.
+function Transform:canvasRect(out)
     local left, top, right, bottom = visibleEdges(self)
     local w, h = max(0, right - left), max(0, bottom - top)
-    return {
-        x = floor(left + 0.5),
-        y = floor(top + 0.5),
-        w = floor(w + 0.5),
-        h = floor(h + 0.5),
-        cache_x = floor(left - self.offset_x + 0.5),
-        cache_y = floor(top - self.offset_y + 0.5),
-    }
+    out = out or {}
+    out.x = floor(left + 0.5)
+    out.y = floor(top + 0.5)
+    out.w = floor(w + 0.5)
+    out.h = floor(h + 0.5)
+    out.cache_x = floor(left - self.offset_x + 0.5)
+    out.cache_y = floor(top - self.offset_y + 0.5)
+    return out
 end
 
 Transform.visibleCanvasRect = Transform.canvasRect

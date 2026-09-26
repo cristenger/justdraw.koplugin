@@ -167,6 +167,38 @@ return function(ctx)
         t:eq(#session:cache():strokes(), 1, "and lands")
     end)
 
+    t:case("following the pen allocates nothing per sample", function()
+        local pl, _, _, _, contact = fixture()
+        pl:prepare()
+        contact.down = true
+        pl:contactBegin(300, 300)
+        -- Warm long enough for LuaJIT to finish recording its traces: that is
+        -- a one-off cost, not a per-sample one (it does not grow with N).
+        for i = 1, 3000 do pl:contactMove(300 + i % 50, 300 + i % 70) end
+        collectgarbage("collect"); collectgarbage("stop")
+        local before = collectgarbage("count")
+        for i = 1, 50000 do pl:contactMove(300 + i % 50, 300 + i % 70) end
+        local grown = collectgarbage("count") - before
+        collectgarbage("restart")
+        pl:contactAbort()
+        contact.down = false
+        -- A per-sample table would be >= 16 B each, 800 KiB here; what is
+        -- left under the threshold is trace bookkeeping that does not scale.
+        t:check(grown < 64, ("50000 samples allocated %.1f KiB"):format(grown))
+    end)
+
+    t:case("the visible canvas rect can be filled in place", function()
+        local Transform = require("ink_canvas_transform")
+        local tr = Transform.new{ logical_w = 100, logical_h = 100,
+            fit_rect = { x = 10, y = 20, w = 100, h = 100 }, clip_rect = { x = 0, y = 0, w = 200, h = 200 } }
+        local out = {}
+        t:eq(tr:canvasRect(out), out, "the table it was given")
+        local fresh = tr:canvasRect()
+        for _, k in ipairs({ "x", "y", "w", "h", "cache_x", "cache_y" }) do
+            t:eq(out[k], fresh[k], k .. " as a fresh one")
+        end
+    end)
+
     t:case("a stale preview refuses the contact and prepares again after it", function()
         local pl, _, p, sched, contact = fixture()
         pl:prepare()

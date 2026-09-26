@@ -1387,7 +1387,9 @@ function Editor:repaintScreenBox(x0, y0, x1, y1)
         return false
     end
     local paper = self.layout_geometry.paper_rect
-    local visible = transform:visibleCanvasRect()
+    local visible = self._visible_rect
+    if not visible then visible = {}; self._visible_rect = visible end
+    transform:visibleCanvasRect(visible)
     local left = math.max(math.floor(x0), paper.x, visible.x)
     local top = math.max(math.floor(y0), paper.y, visible.y)
     local right = math.min(math.ceil(x1), paper.x + paper.w, visible.x + visible.w)
@@ -1405,9 +1407,11 @@ function Editor:repaintScreenBox(x0, y0, x1, y1)
         gray = gray or self.overlay_painter:hasGrayInk()
     end
     self:_restorePaperChromeIfIntersecting(Screen.bb, clip)
-    -- Gray never rides the monochrome fast pass (ADR-36), and nothing here
-    -- asks for `partial` while the pen may still be down (ADR-26).
-    self.live_refresh:add(gray and "ui" or "fast", left, top, right, bottom)
+    -- Gray never rides the monochrome fast pass (ADR-36), fast is the
+    -- reader's preference to keep or refuse, and nothing here asks for
+    -- `partial` while the pen may still be down (ADR-26).
+    local mode = (gray or self.get_live_fast() == false) and "ui" or "fast"
+    self.live_refresh:add(mode, left, top, right, bottom)
     return true
 end
 
@@ -1578,11 +1582,24 @@ function Editor:selectionPresenter()
     function presenter:drawPath(x0, y0, x1, y1)
         if editor.closed or not Screen.bb or Stack.visualAbove(editor) then return end
         local paper = editor.layout_geometry.paper_rect
-        local view = Screen.bb:viewport(paper.x, paper.y, paper.w, paper.h)
+        -- One viewport per layout and framebuffer, not one per pen sample.
+        local view = editor._paper_view
+        if not view or editor._paper_view_rect ~= paper or editor._paper_view_bb ~= Screen.bb then
+            view = Screen.bb:viewport(paper.x, paper.y, paper.w, paper.h)
+            editor._paper_view, editor._paper_view_rect = view, paper
+            editor._paper_view_bb = Screen.bb
+        end
         local painted, l, t, r, b = Render.segment(view, x0 - paper.x, y0 - paper.y,
             x1 - paper.x, y1 - paper.y, 2, Blitbuffer.COLOR_BLACK)
         if painted then
-            editor.live_refresh:add("fast", l + paper.x, t + paper.y, r + paper.x, b + paper.y)
+            -- Gray ink under the path, or fast refresh switched off, is
+            -- refreshed as `ui` (ADR-36), like every other live repaint.
+            local session = editor:_currentSession()
+            local surface = session and session:surface()
+            local cache = surface and surface:cache()
+            local mode = (cache and cache:hasGrayInk())
+                and "ui" or (editor.get_live_fast() ~= false and "fast" or "ui")
+            editor.live_refresh:add(mode, l + paper.x, t + paper.y, r + paper.x, b + paper.y)
         end
     end
     function presenter:setPainter(painter) editor:setOverlayPainter(painter) end
