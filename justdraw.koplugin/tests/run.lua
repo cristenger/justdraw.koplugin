@@ -2411,6 +2411,7 @@ for _, spec in ipairs({
     "document_transform_spec",
     "canvas_cache_spec",
     "canvas_overlay_spec",
+    "float_layer_spec",
     "canvas_router_spec",
     "capture_filter_spec",
     "slot_steer_spec",
