@@ -1712,6 +1712,11 @@ function Editor:_hideSelectionMenu()
     return old
 end
 
+--- A button that touches `clip` is painted whole, at its own place. That
+--- can write outside the clip, deliberately: the menu is the topmost layer,
+--- so those pixels are the menu's own and come out identical; and painting a
+--- Button anywhere else (a viewport) would move the `dimen` KOReader
+--- hit-tests its taps against.
 function Editor:_paintSelectionMenu(bb, clip)
     for _, entry in ipairs(self.selection_menu_entries or {}) do
         local r = entry.rect
