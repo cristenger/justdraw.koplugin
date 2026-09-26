@@ -25,6 +25,7 @@ and Stop was the only way back to the book.
 ]]
 
 local Blitbuffer = require("ffi/blitbuffer")
+local Button = require("ui/widget/button")
 local Device = require("device")
 local Font = require("ui/font")
 local Geom = require("ui/geometry")
@@ -36,6 +37,7 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local _ = require("gettext")
 local T = require("ffi/util").template
 
+local Layout = require("ink_notebook_layout")
 local SheetBar = require("ink_sheet_bar")
 local Compat = require("ink_compat")
 local Stack = require("ink_stack")
@@ -171,6 +173,11 @@ end
 --- Rebuild everything that depends on the screen or the height: the
 --- transform, the toolbar's fixed position, and the dirty region.
 function InkCanvasOverlay:_rebuild()
+    -- A selection or placement on this sheet ends while the old geometry and
+    -- raster can still repair what it lifted (§D.6.6).
+    if self.plugin and self.plugin.onCanvasOverlayWillRebuild then
+        self.plugin:onCanvasOverlayWillRebuild(self)
+    end
     local transform, sheet, pct = InkCanvasOverlay.geometry(self.canvas, self.height_pct)
     if not transform then
         -- The session validated this canvas against the screen before the
@@ -447,12 +454,101 @@ function InkCanvasOverlay:paintTo(bb, x, y)
     -- margin after a rotation would otherwise never be cleared.
     bb:paintRect(sheet.x, sheet.y, sheet.w, sheet.h, Blitbuffer.COLOR_WHITE)
 
-    if self.cache then self.cache:paintTo(bb) end
+    if self.cache then
+        self.cache:paintTo(bb)
+        -- Base, then what floats above it (Phase 7, §D.3).
+        if self.overlay_painter and self.transform then
+            self.overlay_painter:paintOverlay(bb, self.transform:canvasRect())
+        end
+    end
 
     self:paintChromeTo(bb, x, y)
     if self.plugin and self.plugin.onCanvasOverlayPainted then
         self.plugin:onCanvasOverlayPainted(self)
     end
+end
+
+-- ------------------------------------------------------------ editing (ADR-57)
+
+--- Draw something above the sheet's page, or stop with nil. The same
+--- contract as the notebook editor's (`paintOverlay(bb, clip)`, `hasGrayInk()`).
+function InkCanvasOverlay:setOverlayPainter(painter)
+    self.overlay_painter = painter
+end
+
+--[[--
+The selection menu on the sheet: one row of 10 mm buttons above the frame,
+else below, else inside, on the visible page, two rows when the sheet is too
+narrow. Real Buttons, children of this window after the bar, so they take
+their own taps; the rectangle is what the pen route passes through.
+]]
+function InkCanvasOverlay:showSelectionMenu(frame, items)
+    self:hideSelectionMenu()
+    if not self.transform then return nil end
+    local page = self.transform:canvasRect()
+    local target = math.max(Layout.physicalPixels(10) or 0, Size.item.height_large)
+    local cols = #items
+    if cols * target > page.w then cols = math.ceil(#items / 2) end
+    local rows = math.ceil(#items / cols)
+    local w, h = cols * target, rows * target
+    local gap = math.max(2, floor(target / 8))
+    local y
+    if frame.y - gap - h >= page.y then
+        y = frame.y - gap - h
+    elseif frame.y + frame.h + gap + h <= page.y + page.h then
+        y = frame.y + frame.h + gap
+    else
+        y = math.max(page.y, math.min(frame.y + gap, page.y + page.h - h))
+    end
+    local x = math.max(page.x, math.min(frame.x, page.x + page.w - w))
+    self.selection_menu_rect = Geom:new{ x = x, y = y, w = w, h = h }
+    self.selection_menu_entries = {}
+    for i, item in ipairs(items) do
+        local col, row = (i - 1) % cols, floor((i - 1) / cols)
+        local slot = Geom:new{ x = x + col * target, y = y + row * target, w = target, h = target }
+        local button = Button:new{
+            text = item.text, help_text = item.help or item.text,
+            show_parent = self, width = slot.w,
+            height = Layout.buttonLabelHeight(slot.h),
+            margin = Layout.BUTTON_MARGIN, padding = Size.padding.button,
+            enabled = item.enabled ~= false,
+            callback = function() if item.enabled ~= false then item.callback() end end,
+        }
+        self.selection_menu_entries[#self.selection_menu_entries + 1] = { widget = button, rect = slot }
+        self[#self + 1] = button
+    end
+    return self.selection_menu_rect
+end
+
+function InkCanvasOverlay:hideSelectionMenu()
+    local entries = self.selection_menu_entries
+    if not entries then return nil end
+    self.selection_menu_entries = nil
+    local old = self.selection_menu_rect
+    self.selection_menu_rect = nil
+    for _, entry in ipairs(entries) do
+        for i = #self, 2, -1 do
+            if self[i] == entry.widget then table.remove(self, i) end
+        end
+        if entry.widget.free then entry.widget:free() end
+    end
+    return old
+end
+
+function InkCanvasOverlay:paintSelectionMenu(bb, clip)
+    for _, entry in ipairs(self.selection_menu_entries or {}) do
+        local r = entry.rect
+        if r.x < clip.x + clip.w and clip.x < r.x + r.w
+            and r.y < clip.y + clip.h and clip.y < r.y + r.h then
+            bb:paintRect(r.x, r.y, r.w, r.h, Blitbuffer.COLOR_WHITE)
+            entry.widget:paintTo(bb, r.x, r.y)
+        end
+    end
+end
+
+function InkCanvasOverlay:inSelectionMenu(x, y)
+    local r = self.selection_menu_rect
+    return r ~= nil and x >= r.x and x < r.x + r.w and y >= r.y and y < r.y + r.h
 end
 
 -- --------------------------------------------------------------------- input

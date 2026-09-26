@@ -25,11 +25,11 @@ local KNOWN = {
     pen = true, eraser = true, select = true, shape = true, paste = true,
 }
 
---- Tools each surface understands. Sheets gain the editing tools in Phase 7
---- (ADR-57); page ink and legacy direct ink never do.
+--- Tools each surface understands. Notebooks and sheets edit alike (ADR-57);
+--- page ink and legacy direct ink never do.
 ToolState.SUPPORT = {
     notebook = { pen = true, eraser = true, select = true, shape = true, paste = true },
-    sheet = { pen = true, eraser = true },
+    sheet = { pen = true, eraser = true, select = true, shape = true, paste = true },
     page_ink = { pen = true, eraser = true },
     legacy = { pen = true, eraser = true },
 }

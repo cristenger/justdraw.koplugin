@@ -1240,6 +1240,72 @@ else
                 settled("sheet Undo")
             end)
 
+            case("EPUB sheet: Lasso, Delete, Undo, Redo, Paste and a shape, with the pen", function()
+                local Clipboard = require("ink_clipboard")
+                Clipboard.clear()
+                local rect = overlay().transform:canvasRect()
+                local x, y = centre(rect)
+                local function count() return #plugin.session:cache():strokes() end
+                local before = count()
+                drag(x - 60, y - 20, x + 60, y + 30, 10, "pen")
+                expect(count() == before + 1, "setup: one stroke")
+                local function editPick(label, sub)
+                    local top = stack()[1]
+                    tap(sheetBar().edit_btn, "pen")
+                    press(label, opened(top, "Edit"), "pen")
+                    if sub then press(sub, opened(top, "Shapes"), "pen") end
+                    tick(3)
+                end
+                editPick("Lasso")
+                expect(plugin.tool == "select", "Edit > Lasso did not select the lasso")
+                expect(sheetBar().edit_btn.icon == "lasso", "the sheet's Edit does not show the lasso")
+                trace({ { x - 120, y - 90 }, { x + 120, y - 90 }, { x + 120, y + 100 },
+                    { x - 120, y + 100 }, { x - 120, y - 88 } }, 6, "pen")
+                wait(3, function() return plugin.sheet_selection
+                    and plugin.sheet_selection.state == "selected" end)
+                expect(plugin.sheet_selection.state == "selected", "the sheet lasso selected nothing")
+                shot("sheet lasso")
+                local overlay_w = overlay()
+                paint()
+                local copy
+                for _, e in ipairs(overlay_w.selection_menu_entries or {}) do
+                    if e.widget.text == "Copy" then copy = e.widget end
+                end
+                expect(copy, "no Copy on the sheet's selection menu")
+                tap(copy, "pen"); tick(3)
+                expect(Clipboard.hasContent(), "sheet Copy put nothing on the clipboard")
+                local delete
+                for _, e in ipairs(overlay_w.selection_menu_entries or {}) do
+                    if e.widget.text == "Delete" then delete = e.widget end
+                end
+                tap(delete, "pen")
+                wait(3, function() return count() == before end)
+                expect(count() == before, "sheet Delete left the stroke")
+                tap(sheetBar().undo_btn, "pen"); tick(3)
+                expect(count() == before + 1, "sheet Undo did not restore it")
+                tap(sheetBar().redo_btn, "pen"); tick(3)
+                expect(count() == before, "sheet Redo did not delete it again")
+                tap(sheetBar().undo_btn, "pen"); tick(3)
+                editPick("Paste")
+                wait(2, function() return plugin.sheet_paste and plugin.sheet_paste.state == "ready" end)
+                expect(plugin.tool == "paste", "Edit > Paste did not select Paste")
+                tapAt(x, rect.y + 80, "pen")
+                wait(3, function() return count() == before + 2 end)
+                expect(count() == before + 2, "sheet Paste added %d", count() - before - 1)
+                expect(plugin.tool ~= "paste", "Paste did not give the tool back")
+                editPick("Shapes…", "Square")
+                wait(2, function() return plugin.sheet_shape and plugin.sheet_shape.state == "ready" end)
+                tapAt(x, rect.y + rect.h - 120, "pen")
+                wait(3, function() return count() == before + 3 end)
+                expect(count() == before + 3, "the square was not placed")
+                shot("sheet paste and shape")
+                for _ = 1, 3 do tap(sheetBar().undo_btn, "pen"); tick(3) end
+                expect(count() == before, "undo did not clear the sheet edits")
+                tap(sheetBar().pen_btn, "pen"); tick(2)
+                expect(plugin.tool == "pen", "Pen did not end the shape tool")
+                settled("sheet editing")
+            end)
+
             toolCases("EPUB sheet", sheetBar, "pen")
 
             case("EPUB sheet: a hold on every icon names it", function()
@@ -1248,8 +1314,26 @@ else
                 settled("holds")
             end)
 
-            case("EPUB sheet: Notes opens the document notes, and they close", function()
-                roundTrip("Notes", function() tap(sheetBar().notes_btn, "pen") end)
+            -- D-S1 (ADR-57): Document notes and the height moved into More; the
+            -- bar's six slots hold Pen, Eraser, Edit, Undo, Redo and More.
+            case("EPUB sheet: the tools row is Pen, Eraser, Edit, Undo, Redo, More", function()
+                local bar = sheetBar()
+                local order = { bar.pen_btn, bar.eraser_btn, bar.edit_btn, bar.undo_btn,
+                    bar.redo_btn, bar.more_btn }
+                for i, b in ipairs(order) do
+                    expect(b and b.dimen, "tool %d is missing", i)
+                    if i > 1 then
+                        local a = order[i - 1].dimen
+                        expect(a.y < b.dimen.y or (a.y == b.dimen.y and a.x < b.dimen.x),
+                            "tool %d is out of order", i)
+                    end
+                end
+                expect(bar.notes_btn == nil and bar.height_btn == nil,
+                    "Notes and the height left the bar")
+            end)
+
+            case("EPUB sheet: Edit opens its menu, and Close leaves it", function()
+                roundTrip("Edit", function() tap(sheetBar().edit_btn, "pen") end)
             end)
 
             for _, entry in ipairs({ "Document notes", "Pen settings", "Drawing refresh",
@@ -1267,10 +1351,19 @@ else
                 settled("More > Close")
             end)
 
-            case("EPUB sheet: the height button steps 40 → 70 → 100 → 40", function()
+            case("EPUB sheet: More > Sheet height steps 40 → 70 → 100 → 40", function()
                 local seen = {}
                 for _ = 1, 4 do
-                    tap(sheetBar().height_btn, "pen")
+                    local before = stack()[1]
+                    tap(sheetBar().more_btn, "pen")
+                    local more = opened(before, "More")
+                    local label
+                    for _, b in ipairs(buttonLabels(more)) do
+                        if b:find("Sheet height", 1, true) then label = b end
+                    end
+                    expect(label == "Sheet height: " .. overlay().height_pct .. " %",
+                        "More reads %q at %d%%", tostring(label), overlay().height_pct)
+                    press(label, more, "pen")
                     tick(3)
                     seen[#seen + 1] = overlay().height_pct
                     baseline = stack()
@@ -1278,9 +1371,6 @@ else
                 local s = table.concat(seen, ",")
                 expect(s == "40,70,100,40" or s == "70,100,40,70" or s == "100,40,70,100",
                     "the height went %s", s)
-                expect(sheetBar().height_btn.text == overlay().height_pct .. " %",
-                    "the button reads %q at %d%%", tostring(sheetBar().height_btn.text),
-                    overlay().height_pct)
                 settled("height")
             end)
 

@@ -38,6 +38,10 @@ local floor = math.floor
 
 local TOOLS = 6
 
+--- What the Edit control says for the editing tool that is active.
+local EDIT_LABELS = { select = _("Lasso"), shape = _("Shapes"), paste = _("Paste") }
+local EDIT_ICONS = { select = "lasso", shape = "shape", paste = "paste" }
+
 local SheetBar = InkBar:extend{
     embedded = true,
     --- Screen y of the bar's first row. The overlay puts it under the handle.
@@ -103,21 +107,18 @@ function SheetBar:init()
     self.hide_btn = place(self.note_context and _("Hide note") or _("Close sheet"), 0, 3, 3,
         function() p:setBarShown(false) end, "close")
 
+    -- Six tools, as before (D-S1, ADR-57): Document notes and the height
+    -- stop moved to the top of More, so the bar keeps its height and no sheet
+    -- changes shape.
     self.pen_btn = tool(_("Pen"), 1, function()
-        if not p.eraser and p.drawing then p:showPenSettingsDialog()
-        else p:setEraser(false) end
+        if (p.tool or "pen") == "pen" and not p.eraser and p.drawing then p:showPenSettingsDialog()
+        else p:setTool("pen") end
     end, "pen")
     self.eraser_btn = tool(_("Eraser"), 2, function() p:setEraser(true) end, "eraser")
-    self.undo_btn = tool(_("Undo"), 3, function() p:onJustDrawUndo() end, "undo")
-    self.notes_btn = tool(_("Document notes"), 4, function() p:onShowDocumentNotes() end, "notes")
-    self.more_btn = tool(_("More"), 5, function() p:showBarMenu() end, "more")
-    self.height_btn = tool(T(_("%1 %"), overlay.height_pct), 6, function()
-        -- A height change replaces this bar. Let the tap finish with the
-        -- button first, and ignore a second tap on a bar already replaced.
-        UIManager:nextTick(function()
-            if overlay.bar == self then overlay:setHeight(overlay:nextStop()) end
-        end)
-    end)
+    self.edit_btn = tool(_("Edit"), 3, function() p:showSheetEditMenu() end, "edit")
+    self.undo_btn = tool(_("Undo"), 4, function() p:onJustDrawUndo() end, "undo")
+    self.redo_btn = tool(_("Redo"), 5, function() p:onJustDrawRedo() end, "redo")
+    self.more_btn = tool(_("More"), 6, function() p:showBarMenu() end, "more")
     self:update(false)
 end
 
@@ -138,10 +139,18 @@ function SheetBar:update(refresh)
     self:setContextText(self.draw_btn, draw_text)
 
     local label = PenDialog.label(p:effectiveStyle(), p.pen_width)
+    local tool = p.toolFor and p:toolFor("sheet") or (p.eraser and "eraser" or "pen")
     ToolButton.setState(self.pen_btn, label .. "\n"
-        .. _("Tap the selected pen to change its style and width."), not p.eraser)
-    ToolButton.setState(self.eraser_btn, _("Eraser"), p.eraser)
-    self:_setStatus(p.eraser and _("Eraser") or label)
+        .. _("Tap the selected pen to change its style and width."), tool == "pen")
+    ToolButton.setState(self.eraser_btn, _("Eraser"), tool == "eraser")
+    local edit_label = EDIT_LABELS[tool]
+    local edit_icon = EDIT_ICONS[tool] or "edit"
+    if self.edit_btn.icon ~= edit_icon then
+        -- The glyph says which editing tool is active, as on the notebook rail.
+        ToolButton.decorate(self.edit_btn, edit_icon, edit_label ~= nil, edit_label or _("Edit"))
+    end
+    ToolButton.setState(self.edit_btn, edit_label or _("Edit"), edit_label ~= nil)
+    self:_setStatus(tool == "eraser" and _("Eraser") or edit_label or label)
 
     if self.note_context and session then
         local ready = cache and cache:isReady()
@@ -151,6 +160,8 @@ function SheetBar:update(refresh)
         self.pen_btn:enableDisable(editing)
         self.eraser_btn:enableDisable(editing)
         self.undo_btn:enableDisable(editing)
+        self.edit_btn:enableDisable(editing)
+        self.redo_btn:enableDisable(editing)
     end
     if refresh then UIManager:setDirty(self.parent, "ui", self.dimen) end
 end

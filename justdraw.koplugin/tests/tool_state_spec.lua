@@ -28,8 +28,10 @@ return function(ctx)
         end
     end)
 
-    t:case("sheets wait for phase 7", function()
-        t:eq(ToolState.effective("sheet", "paste"), "pen", "paste draws on a sheet for now")
+    -- Changed on purpose in Phase 7 (ADR-57): sheets edit like notebooks.
+    t:case("sheets edit like notebooks since phase 7", function()
+        t:eq(ToolState.effective("sheet", "paste"), "paste", "paste pastes on a sheet")
+        t:eq(ToolState.effective("sheet", "select"), "select", "the lasso selects")
         t:eq(ToolState.effective("sheet", "eraser"), "eraser", "the eraser erases")
     end)
 

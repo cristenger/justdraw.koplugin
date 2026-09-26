@@ -42,6 +42,11 @@ local NotebookController = require("ink_notebook_controller")
 local NotebookInput = require("ink_notebook_input")
 local PalmGate = require("ink_wacom_palm")
 local Style = require("ink_style")
+local Clipboard = require("ink_clipboard")
+local Layout = require("ink_notebook_layout")
+local Placement = require("ink_placement")
+local Selection = require("ink_selection")
+local ShapeDialog = require("ink_shape_dialog")
 local Shapes = require("ink_shapes")
 local ToolState = require("ink_tool_state")
 local StylusGeometry = require("ink_stylus_geometry")
@@ -388,6 +393,27 @@ local function applySurfacePoint(self, route, x, y, tool)
         return false
     end
     local cx, cy = tr:toCanvas(x, y)
+    if route == CANVAS_ROUTE then
+        -- Editing tools on a sheet (ADR-57): a contact that began with one
+        -- belongs to its controller until it ends, and never becomes ink.
+        local edit = self.sheet_edit_contact
+        if edit == "rejected" then return true end
+        if edit then
+            edit:contactMove(cx, cy)
+            return true
+        end
+        if tool == Capture.TOOL_ERASER then
+            self:clearSheetEditing("eraser")
+        elseif not self.eraser and not self[route.stroke] then
+            local contact_tool = self.contact_tool or self:toolFor("sheet")
+            if ToolState.isEditing(contact_tool) then
+                local controller = self:_sheetEditController(contact_tool)
+                local taken = controller and controller:contactBegin(cx, cy)
+                self.sheet_edit_contact = taken and controller or "rejected"
+                return true
+            end
+        end
+    end
     if tool == Capture.TOOL_ERASER or self.eraser then
         eraseSurfaceAt(self, route, cx, cy, tr)
     else
@@ -413,6 +439,14 @@ to rebuild the region from what was underneath rather than leave ink on screen
 that is in no surface at all.
 ]]
 local function endSurfaceStroke(self, route)
+    if route == CANVAS_ROUTE and self.sheet_edit_contact then
+        -- The logical end of an editing contact; its commit waits for the
+        -- physical one (`can_work`).
+        local edit = self.sheet_edit_contact
+        self.sheet_edit_contact = nil
+        if edit ~= "rejected" then edit:contactEnd() end
+        return true
+    end
     self[route.end_erase](self)
     local s = self[route.stroke]
     self[route.stroke] = nil
@@ -473,6 +507,11 @@ end
 --- Give up the stroke in progress: its segments are already in the raster, so
 --- the region has to be rebuilt from what was underneath.
 local function abortSurfaceStroke(self, route)
+    if route == CANVAS_ROUTE and self.sheet_edit_contact then
+        local edit = self.sheet_edit_contact
+        self.sheet_edit_contact = nil
+        if edit ~= "rejected" then edit:contactAbort() end
+    end
     endSurfaceErase(self, route)
     local s = self[route.stroke]
     self[route.stroke] = nil
@@ -522,6 +561,13 @@ function JustDraw:init()
     self.drawing = false
     self.eraser = false
     self.tool = "pen"
+    -- A tool change from anywhere ends editing on the open sheet (§D.6.6).
+    self:observeTool(function(name)
+        self:clearSheetEditing("tool")
+        if (name == "paste" or name == "shape") and self.canvas_open then
+            self:_prepareSheetPlacementSoon(name)
+        end
+    end)
     self.bar = nil
     self.pen_width = Compat.readSetting(G_reader_settings, "pen_width", PEN_MEDIUM)
     self.pen_style = Style.normalize(
@@ -1039,6 +1085,7 @@ function JustDraw:onSuspend()
     Export.cancelRunning()
     if self.notes_controller then self.notes_controller:close() end
     if self.notebooks then self.notebooks:onSuspend() end
+    self:clearSheetEditing("suspend")
     if not self.is_docless then self:setDrawing(false) end
 end
 
@@ -1657,6 +1704,7 @@ function JustDraw:regionAt(x, y)
     end
     if overlay.bar:contains(x, y) then return "bar" end
     if overlay:inHandle(x, y) then return "handle" end
+    if overlay:inSelectionMenu(x, y) then return "menu" end
     if overlay:inSheet(x, y) then return "canvas" end
     return "reader"
 end
@@ -2517,6 +2565,7 @@ function JustDraw:onStylusContactStart()
     -- change in that window must not reach a contact already under way.
     self.contact_style = self:effectiveStyle(
         self.stylus_sequence and self.stylus_sequence.current_tool)
+    self.contact_tool = self:toolFor(self.canvas_open and "sheet" or "page_ink")
     if self.canvas_open and self.router then
         -- The pen is on the page from this frame, even though where is not
         -- known yet. A finger arriving in that window is no less of a palm.
@@ -2539,7 +2588,7 @@ function JustDraw:onStylusPoint(x, y, tool, is_first)
 
     if self.canvas_open then
         local region = self:regionAt(x, y)
-        if region == "bar" or region == "handle" then
+        if region == "bar" or region == "handle" or region == "menu" then
             return "finish_suspend"
         end
         self:applyCanvasPoint(x, y, tool)
@@ -2574,6 +2623,7 @@ end
 
 function JustDraw:onStylusContactEnd()
     self.contact_style = nil
+    self.contact_tool = nil
     if self.router then self.router:penUp() end
     return true
 end
@@ -2589,7 +2639,7 @@ to work, and a stroke is not what the reader meant there.
 function JustDraw:penPassesThrough(x, y)
     if self.canvas_open then
         local region = self:regionAt(x, y)
-        return region == "bar" or region == "handle"
+        return region == "bar" or region == "handle" or region == "menu"
     end
     return self:inBar(x, y)
 end
@@ -3211,6 +3261,12 @@ end
 --- Overlay replaces its embedded toolbar whenever geometry or side changes.
 --- Keep `self.bar` bound to the visible object; all state and input routing in
 --- this module intentionally go through that single owner reference.
+--- The sheet is about to change geometry (height, rotation): end editing
+--- while the old raster can still repair what a selection lifted.
+function JustDraw:onCanvasOverlayWillRebuild(overlay)
+    self:clearSheetEditing("height")
+end
+
 function JustDraw:onCanvasOverlayBarChanged(overlay)
     local current = self.session and self.session:overlay()
     if self.canvas_open and (current == nil or current == overlay) then
@@ -3571,6 +3627,7 @@ end
 
 function JustDraw:closeCanvas(restore_bar)
     if not self.canvas_open then return end
+    self:clearSheetEditing("close")
     -- Keep the visible sheet, its retry queue and ReaderUI capture intact if
     -- durability refuses the transition. Only dismantle the surface after the
     -- same explicit save gate used by document lifecycle events succeeds.
@@ -3743,11 +3800,228 @@ function JustDraw:blitCanvasBox(box, tr)
     self:_flushCanvasPendingRepaint(false)
     local sx, sy = tr:fromCache(box.x, box.y)
     blitCacheBox(cache, bb, Screen.bb, sx, sy, box.x, box.y, box.w, box.h)
+    local gray = cache:hasGrayInk()
+    local painter = self.sheet_overlay_painter
+    if painter then
+        -- A selection or placement floats above the page: repaint it inside
+        -- this box too, or the repair would wipe it until the next move.
+        local clip = { x = sx, y = sy, w = box.w, h = box.h }
+        painter:paintOverlay(Screen.bb, clip)
+        gray = gray or painter:hasGrayInk()
+    end
     if overlay then
         overlay:restoreChromeIfIntersecting(Screen.bb,
             { x = sx, y = sy, w = box.w, h = box.h }, 0, 0)
     end
-    self:refreshBox(sx, sy, sx + box.w, sy + box.h, cache:hasGrayInk())
+    self:refreshBox(sx, sy, sx + box.w, sy + box.h, gray)
+end
+
+--[[--
+Repaint one screen rectangle of the open sheet, page then overlay (Phase 7).
+The sheet's counterpart of `Editor:repaintScreenBox`: clipped to the page on
+screen, through `blitCanvasBox`, so the chrome and the refresh policy are the
+sheet's own.
+]]
+function JustDraw:repaintSheetBox(x0, y0, x1, y1)
+    local session = self.session
+    local tr = session and session:transform()
+    local cache = session and session:cache()
+    if not tr or not cache or not cache:buffer() then return false end
+    local r = tr:canvasRect()
+    local left = math.max(math.floor(x0), r.x)
+    local top = math.max(math.floor(y0), r.y)
+    local right = math.min(math.ceil(x1), r.x + r.w)
+    local bottom = math.min(math.ceil(y1), r.y + r.h)
+    if right <= left or bottom <= top then return false end
+    local kx = math.floor(left - tr.offset_x + 0.5)
+    local ky = math.floor(top - tr.offset_y + 0.5)
+    self:blitCanvasBox({ x = kx, y = ky, w = right - left, h = bottom - top }, tr)
+    return true
+end
+
+--[[--
+The sheet's presenter for the lasso and placement controllers: the same
+contract as the notebook editor's (see ink_selection), painted through this
+plugin's own sheet blit, chrome repair and refresh policy.
+]]
+function JustDraw:_sheetPresenter()
+    if self.sheet_presenter then return self.sheet_presenter end
+    local plugin = self
+    local presenter = {}
+    function presenter:session()
+        local surface = plugin.canvas_open and plugin.session and plugin.session.surface_session
+        if not surface or not surface:isReady() or plugin.canvas_off_page then return nil end
+        return surface
+    end
+    function presenter:transform()
+        return plugin.session and plugin.session:transform() or nil
+    end
+    function presenter:identity()
+        local surface = plugin.session and plugin.session.surface_session
+        local tr = plugin.session and plugin.session:transform()
+        if not surface or not tr then return nil end
+        plugin.sheet_identity_serial = plugin.sheet_identity_serial or 0
+        if plugin.sheet_identity_surface ~= surface or plugin.sheet_identity_transform ~= tr then
+            plugin.sheet_identity_surface, plugin.sheet_identity_transform = surface, tr
+            plugin.sheet_identity_serial = plugin.sheet_identity_serial + 1
+        end
+        return plugin.sheet_identity_serial
+    end
+    function presenter:repaint(x0, y0, x1, y1) return plugin:repaintSheetBox(x0, y0, x1, y1) end
+    function presenter:presentCacheBox(box)
+        local tr = self:transform()
+        if box and tr then plugin:blitCanvasBox(box, tr) end
+    end
+    function presenter:drawPath(x0, y0, x1, y1)
+        local tr = self:transform()
+        if not tr or not Screen.bb then return end
+        local r = tr:canvasRect()
+        local view = Screen.bb:viewport(r.x, r.y, r.w, r.h)
+        local painted, l, t, rr, b = Render.segment(view, x0 - r.x, y0 - r.y,
+            x1 - r.x, y1 - r.y, 2, Blitbuffer.COLOR_BLACK)
+        if painted then plugin:refreshBox(l + r.x, t + r.y, rr + r.x, b + r.y, false) end
+    end
+    function presenter:setPainter(painter)
+        plugin.sheet_overlay_painter = painter
+        local overlay = plugin.session and plugin.session:overlay()
+        if overlay then overlay:setOverlayPainter(painter) end
+    end
+    function presenter:showMenu(frame, items)
+        local overlay = plugin.session and plugin.session:overlay()
+        return overlay and overlay:showSelectionMenu(frame, items) or nil
+    end
+    function presenter:hideMenu()
+        local overlay = plugin.session and plugin.session:overlay()
+        return overlay and overlay:hideSelectionMenu() or nil
+    end
+    function presenter:paintMenu(bb, clip)
+        local overlay = plugin.session and plugin.session:overlay()
+        if overlay then overlay:paintSelectionMenu(bb, clip) end
+    end
+    function presenter:notify(text)
+        UIManager:nextTick(function() plugin:notify(text) end)
+    end
+    function presenter:mmToPixels(mm) return Layout.physicalPixels(mm) or mm * 8 end
+    function presenter:budget(bytes)
+        if bytes > 16 * 1024 * 1024 then return nil, "preview_too_large" end
+        return true
+    end
+    self.sheet_presenter = presenter
+    return presenter
+end
+
+--- The sheet's controller for an editing tool, built on first use.
+function JustDraw:_sheetEditController(tool)
+    if not ToolState.supports("sheet", tool) or not self.canvas_open then return nil end
+    local can_work = function()
+        local lease = self.input_lease
+        return not (lease and lease:hasActiveContact())
+    end
+    local schedule = function(delay, fn) UIManager:scheduleIn(delay, fn) end
+    local unschedule = function(fn) UIManager:unschedule(fn) end
+    if tool == "select" then
+        if not self.sheet_selection then
+            self.sheet_selection = Selection.new{
+                presenter = self:_sheetPresenter(), schedule = schedule,
+                unschedule = unschedule, can_work = can_work, clipboard = Clipboard,
+            }
+        end
+        return self.sheet_selection
+    end
+    local function placement(kind, source)
+        return Placement.new{
+            presenter = self:_sheetPresenter(), kind = kind, source = source,
+            schedule = schedule, unschedule = unschedule, can_work = can_work,
+            on_committed = function(committed)
+                if committed == "paste" then
+                    local previous = self.previous_tool
+                    if previous == nil or previous == "paste" then previous = "pen" end
+                    self:setTool(previous)
+                end
+            end,
+        }
+    end
+    if tool == "paste" then
+        self.sheet_paste = self.sheet_paste or placement("paste", function(tr)
+            return Clipboard.payload(tr.scale)
+        end)
+        return self.sheet_paste
+    end
+    if tool == "shape" then
+        self.sheet_shape = self.sheet_shape or placement("shape", function(tr)
+            local style = self:effectiveStyle()
+            local options = self:getShapeOptions()
+            return Shapes.generate{
+                kind = options.kind, size = options.size, angle = options.angle,
+                mm_to_px = function(mm) return Layout.physicalPixels(mm) or mm * 8 end,
+                scale = tr.scale, width = self.pen_width / tr.scale * Style.widthScale(style),
+                tool = style,
+            }
+        end)
+        return self.sheet_shape
+    end
+    return nil
+end
+
+--[[--
+Edit on the sheet's bar: Lasso, Shapes…, Paste (ADR-57), the notebook's menu.
+Rows close their dialog; Paste is disabled with nothing copied.
+]]
+function JustDraw:showSheetEditMenu()
+    local lease = self.input_lease
+    if lease and lease:hasActiveContact() then return nil, "contact_active" end
+    local dialog
+    local tool = self.tool
+    local function row(text, name, enabled, action)
+        return {{
+            text = text .. (tool == name and "  ✓" or ""),
+            enabled = enabled and true or false,
+            no_refresh_checkmark = true,
+            callback = function() self:closeReaderModal(dialog); action() end,
+        }}
+    end
+    local function choose(name)
+        self:setTool(name)
+        if not self.drawing then self:setDrawing(true) end
+        if name == "paste" or name == "shape" then self:_prepareSheetPlacementSoon(name) end
+    end
+    dialog = ButtonDialog:new{
+        title = _("Edit"),
+        buttons = {
+            row(_("Lasso"), "select", true, function() choose("select") end),
+            row(_("Shapes…"), "shape", true, function() self:showSheetShapeMenu() end),
+            row(_("Paste"), "paste", Clipboard.hasContent(), function() choose("paste") end),
+            {{ text = _("Close"), callback = function() self:closeReaderModal(dialog) end }},
+        },
+    }
+    return self:showReaderModal(dialog)
+end
+
+function JustDraw:showSheetShapeMenu()
+    local dialog = ShapeDialog.new{
+        options = self:getShapeOptions(),
+        close = function(d) if d then self:closeReaderModal(d) end end,
+        choose = function(options)
+            self:setShapeOptions(options)
+            if self.tool == "shape" then
+                if self.sheet_shape then self.sheet_shape:cancel("shape") end
+            else
+                self:setTool("shape")
+            end
+            if not self.drawing then self:setDrawing(true) end
+            self:_prepareSheetPlacementSoon("shape")
+        end,
+    }
+    return self:showReaderModal(dialog)
+end
+
+--- Prepare a sheet placement's preview on a later tick, outside any contact.
+function JustDraw:_prepareSheetPlacementSoon(tool)
+    UIManager:nextTick(function()
+        if self.tool ~= tool or not self.canvas_open then return end
+        local controller = self:_sheetEditController(tool)
+        if controller and controller.prepare then controller:prepare() end
+    end)
 end
 
 function JustDraw:endCanvasStroke()
@@ -4384,6 +4658,17 @@ function JustDraw:showBarMenu()
     local rows = {
         { { text = _("Document notes"),
             callback = pick(function() self:onShowDocumentNotes() end) } },
+    }
+    local overlay = self.canvas_open and self.session and self.session:overlay()
+    if overlay then
+        -- Moved here from the bar (D-S1, ADR-57): the bar's six slots now hold
+        -- Edit and Redo, and its height -- part of every sheet's shape -- stays.
+        rows[#rows + 1] = { { text = T(_("Sheet height: %1 %"), overlay.height_pct),
+            callback = pick(function()
+                if self.session:overlay() == overlay then overlay:setHeight(overlay:nextStop()) end
+            end) } }
+    end
+    for _, row in ipairs({
         { { text = _("Pen settings"),
             callback = pick(function() self:showPenSettingsDialog() end) } },
         { { text = _("Drawing refresh"),
@@ -4392,7 +4677,7 @@ function JustDraw:showBarMenu()
             callback = pick(function() self:showInputModeDialog() end) } },
         { { text = _("Export…"), enabled = self:canExport(),
             callback = pick(function() self:showExportDialog() end) } },
-    }
+    }) do rows[#rows + 1] = row end
     if self.canvas_open then
         local active = self.session:activeCanvas()
         rows[#rows + 1] = { { text = self.note_context and _("Hide note") or _("Close sheet"),

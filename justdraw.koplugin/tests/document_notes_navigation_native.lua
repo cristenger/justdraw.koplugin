@@ -126,7 +126,7 @@ local function selectedReady()
 end
 local function checkBar()
     UI:_repaint()
-    for _, key in ipairs({"draw_btn","pen_btn","eraser_btn","undo_btn","notes_btn","more_btn","hide_btn"}) do
+    for _, key in ipairs({"draw_btn","pen_btn","eraser_btn","edit_btn","undo_btn","redo_btn","more_btn","hide_btn"}) do
         local btn=assert(host.bar[key],"missing control "..key)
         local d=assert(btn.dimen)
         local label=btn.label_widget
@@ -176,7 +176,8 @@ assert(not host.bar or not host.bar.note_return,"Dismiss retained compact bar")
 local reopen
 for _,item in ipairs(host:canvasMenu()) do if item.text=="Show note" then reopen=item end end
 assert(reopen and reopen.enabled_func()); reopen.callback(); selectedReady()
-tap(host.bar.notes_btn); listReady()
+-- Document notes moved from the sheet bar into More (D-S1, ADR-57).
+host:onShowDocumentNotes(); listReady()
 assert(notes.catalog.filter.kind=="sheet" and notes.catalog.order=="recent","filter/order lost")
 assert(notes.catalog.selected[group_id],"export selection lost")
 assert(notes.browser.visible_ids[1]==first_id,"list viewport lost")
