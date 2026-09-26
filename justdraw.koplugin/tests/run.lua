@@ -2449,6 +2449,7 @@ for _, spec in ipairs({
     "export_xopp_spec",
     "export_raster_spec",
     "thumbnail_spec",
+    "localsend_spec",
     "export_job_spec",
     "export_xopp_job_spec",
     "export_reader_spec",
