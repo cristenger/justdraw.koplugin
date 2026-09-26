@@ -264,6 +264,124 @@ function Queue:removeStroke(canvas, id)
     return true
 end
 
+--- A quick answer to "would `ops` more operations and `bytes` more bytes fit
+--- right now". An estimate only: `prepareBatch` is what admits an edit.
+function Queue:canAccept(ops, bytes)
+    if self.closed or self.failed then return false end
+    return #self.ops + (ops or 0) <= self.hard_ops
+        and self.bytes + (bytes or 0) <= self.hard_bytes
+end
+
+--[[--
+Work out, without changing anything, what replacing `remove_ids` with
+`inserts` costs this queue (ADR-53).
+
+A sequence of `addStroke`/`removeStroke` calls is not atomic: the fifth one
+can hit backpressure after the first four already changed the queue, and a
+removal of a pending insert withdraws it without a trace to put back. So an
+edit is costed as a whole first -- inserts it withdraws, deletes it adds, the
+exact encoded bytes of what it inserts -- and only a plan that fits is ever
+published.
+
+`inserts[i]` is `{seq, paint_seq, width, tool, points, n}`. Returns a plan or
+nil plus a reason: `unknown_stroke`, `bad_stroke`, `operation_too_large`,
+`batch_too_large` (would not fit even an empty queue) or `queue_backpressure`
+(fits after a flush).
+]]
+function Queue:prepareBatch(canvas, remove_ids, inserts)
+    if self.closed then return nil, "closed" end
+    if self.failed then return nil, "failed" end
+    remove_ids, inserts = remove_ids or {}, inserts or {}
+    local withdraw, deletes = {}, {}
+    local withdrawn_bytes, withdrawn_ops = 0, 0
+    local seen = {}
+    for r = 1, #remove_ids do
+        local id = remove_ids[r]
+        if type(id) ~= "number" or seen[id] then return nil, "unknown_stroke" end
+        seen[id] = true
+        local pending = nil
+        for i = #self.ops, 1, -1 do
+            local op = self.ops[i]
+            if op.kind == "insert" and op.local_id == id then pending = op; break end
+        end
+        if pending then
+            withdraw[pending] = true
+            withdrawn_ops = withdrawn_ops + 1
+            withdrawn_bytes = withdrawn_bytes + pending.estimated_bytes
+        else
+            local row_id = id > 0 and id or self.real[id]
+            if not row_id then return nil, "unknown_stroke" end
+            deletes[#deletes + 1] = { local_id = id < 0 and id or nil, row_id = row_id }
+        end
+    end
+    local insert_bytes, estimates = 0, {}
+    for i = 1, #inserts do
+        local estimated = self.estimate_insert_bytes(inserts[i] and inserts[i].n)
+        if type(estimated) ~= "number" or estimated ~= estimated
+            or estimated < 0 or estimated == math.huge then
+            return nil, "bad_stroke"
+        end
+        if estimated > self.max_single_op_bytes then return nil, "operation_too_large" end
+        estimates[i] = estimated
+        insert_bytes = insert_bytes + estimated
+    end
+    -- Worst case after a flush: every removal is a delete of its own.
+    if #remove_ids + #inserts > self.hard_ops or insert_bytes > self.hard_bytes then
+        return nil, "batch_too_large"
+    end
+    local ops_after = #self.ops - withdrawn_ops + #deletes + #inserts
+    local bytes_after = self.bytes - withdrawn_bytes + insert_bytes
+    if ops_after > self.hard_ops or bytes_after > self.hard_bytes then
+        return nil, "queue_backpressure"
+    end
+    return {
+        queue = self, canvas = canvas, withdraw = withdraw, deletes = deletes,
+        inserts = inserts, estimates = estimates,
+        ops_before = #self.ops, bytes_after = bytes_after,
+    }
+end
+
+--[[--
+Apply a plan from `prepareBatch`. Nothing in here can refuse: every check ran
+in the preparation, and a plan whose queue moved on since is rejected rather
+than half-applied. Inserts precede deletes, as in the erase split, so one
+transaction never holds a delete without its replacements. Returns the new
+local ids in the order of `plan.inserts`.
+]]
+function Queue:publishBatch(plan)
+    if plan.queue ~= self or plan.ops_before ~= #self.ops
+        or self.closed or self.failed then
+        return nil, "stale_plan"
+    end
+    local kept = {}
+    for i = 1, #self.ops do
+        if not plan.withdraw[self.ops[i]] then kept[#kept + 1] = self.ops[i] end
+    end
+    local ids = {}
+    for i = 1, #plan.inserts do
+        local stroke = plan.inserts[i]
+        self.next_local = self.next_local + 1
+        local local_id = -self.next_local
+        kept[#kept + 1] = {
+            kind = "insert", canvas = plan.canvas, canvas_id = plan.canvas.id,
+            seq = stroke.seq, local_id = local_id, stroke = stroke,
+            estimated_bytes = plan.estimates[i],
+        }
+        ids[i] = local_id
+    end
+    for i = 1, #plan.deletes do
+        local d = plan.deletes[i]
+        kept[#kept + 1] = {
+            kind = "delete", canvas = plan.canvas,
+            local_id = d.local_id, row_id = d.row_id,
+        }
+    end
+    self.ops = kept
+    self.bytes = plan.bytes_after
+    if #self.ops == 0 then self:_cancelTimer() else self:_afterChange() end
+    return ids
+end
+
 function Queue:_afterChange()
     if #self.ops >= self.max_ops or self.bytes >= self.max_bytes then
         return self:_armTimer("urgent", 0)

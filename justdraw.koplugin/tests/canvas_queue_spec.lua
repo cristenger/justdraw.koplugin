@@ -539,4 +539,65 @@ return function(ctx)
         sched:advance(1)
         t:eq(sched:pending(), 0, "nothing left in the scheduler")
     end)
+
+    t:describe("ink_canvas_queue / prepared batches")
+
+    t:case("a batch is costed exactly and publishes as one change", function()
+        local queue = fixture{ max_ops = 100, hard_ops = 10 }
+        local a = queue:addStroke(CANVAS, stroke(4, 1))
+        local b = queue:addStroke(CANVAS, stroke(4, 2))
+        queue:flush()
+        local c = queue:addStroke(CANVAS, stroke(4, 3))
+        local plan = assert(queue:prepareBatch(CANVAS, { 1, c }, { stroke(2, 4), stroke(3, 5) }))
+        t:eq(queue:pendingCount(), 1, "preparing changes nothing")
+        local ids = assert(queue:publishBatch(plan))
+        t:eq(#ids, 2, "two inserts published")
+        t:eq(queue:pendingCount(), 3, "c withdrawn; two inserts and one delete queued")
+        local kinds = {}
+        for i = 1, #queue.ops do kinds[i] = queue.ops[i].kind end
+        t:eq(table.concat(kinds, ","), "insert,insert,delete", "inserts precede the delete")
+        t:eq(queue.bytes, (3 + 8) + (3 + 12), "bytes are the inserts' exact estimate")
+        t:check(a and b, "setup")
+    end)
+
+    t:case("refusals change nothing and name their reason", function()
+        local queue = fixture{ max_ops = 3, hard_ops = 4, max_single_op_bytes = 3 + 4 * 10 }
+        queue:addStroke(CANVAS, stroke(4, 1))
+        local ops, bytes, next_local = #queue.ops, queue.bytes, queue.next_local
+        local function same(label)
+            t:eq(#queue.ops, ops, label .. ": ops")
+            t:eq(queue.bytes, bytes, label .. ": bytes")
+            t:eq(queue.next_local, next_local, label .. ": local ids")
+        end
+        local _, err = queue:prepareBatch(CANVAS, { -99 }, {})
+        t:eq(err, "unknown_stroke", "unknown local id"); same("unknown")
+        _, err = queue:prepareBatch(CANVAS, {}, { stroke(11, 2) })
+        t:eq(err, "operation_too_large", "one insert too big"); same("too large")
+        _, err = queue:prepareBatch(CANVAS, {}, { stroke(1), stroke(1), stroke(1), stroke(1), stroke(1) })
+        t:eq(err, "batch_too_large", "could not fit an empty queue"); same("batch")
+        _, err = queue:prepareBatch(CANVAS, {}, { stroke(1), stroke(1), stroke(1), stroke(1) })
+        t:eq(err, "queue_backpressure", "fits only after a flush"); same("backpressure")
+        _, err = queue:prepareBatch(CANVAS, {}, { { n = "x" } })
+        t:eq(err, "bad_stroke", "a bad count"); same("bad")
+    end)
+
+    t:case("a plan whose queue moved on is refused, not half-applied", function()
+        local queue = fixture{ max_ops = 100 }
+        local plan = assert(queue:prepareBatch(CANVAS, {}, { stroke(2, 1) }))
+        queue:addStroke(CANVAS, stroke(2, 2))
+        local ids, err = queue:publishBatch(plan)
+        t:eq(ids, nil, "refused")
+        t:eq(err, "stale_plan", "as stale")
+        t:eq(queue:pendingCount(), 1, "only the later insert")
+    end)
+
+    t:case("exactly at the bound admits, one past refuses", function()
+        local queue = fixture{ max_ops = 3, hard_ops = 4, hard_bytes = 1000 }
+        for i = 1, 3 do queue:addStroke(CANVAS, stroke(1, i)) end
+        t:check(queue:prepareBatch(CANVAS, {}, { stroke(1, 4) }) ~= nil, "the fourth op fits")
+        local _, err = queue:prepareBatch(CANVAS, {}, { stroke(1, 4), stroke(1, 5) })
+        t:eq(err, "queue_backpressure", "the fifth does not")
+        t:eq(queue:canAccept(1, 7), true, "canAccept agrees at the bound")
+        t:eq(queue:canAccept(2, 7), false, "and one past it")
+    end)
 end

@@ -323,4 +323,46 @@ return function(ctx)
         t:eq(pts[3], 100, "x1")
         t:check(math.abs(pts[4] - 50) < 0.01, "y1 back within a hundredth")
     end)
+
+    t:describe("ink_canvas_codec / snap")
+
+    t:case("snap is the value a round trip through the store produces", function()
+        local pts = { 0, 0, W, H, 123.456, 789.012, W / 3, H / 7 }
+        local snapped = assert(Codec.snap(pts, 4, W, H))
+        local back = assert(Codec.join(Codec.encode(pts, 4, W, H), W, H))
+        for i = 1, 8 do t:eq(snapped[i], back[i], "coordinate " .. i .. " matches the stored one") end
+        t:check(snapped ~= pts, "a fresh table")
+        t:eq(pts[5], 123.456, "the input untouched")
+        local again = assert(Codec.snap(snapped, 4, W, H))
+        for i = 1, 8 do t:eq(again[i], snapped[i], "snapping is idempotent at " .. i) end
+    end)
+
+    t:case("snap refuses what it would otherwise have to clamp", function()
+        local cases = {
+            { "left of the page", { -0.01, 5 } }, { "below the page", { 5, H + 0.01 } },
+            { "NaN", { 0 / 0, 5 } }, { "infinite", { math.huge, 5 } },
+        }
+        for _, c in ipairs(cases) do
+            local out, err = Codec.snap(c[2], 1, W, H)
+            t:eq(out, nil, c[1] .. " refused")
+            t:check(err == "out_of_range" or err == "bad_point", c[1] .. " named")
+        end
+        t:eq(Codec.snap({ 1, 1 }, 0, W, H), nil, "an empty stroke is refused")
+        local clamped = Codec.snap({ -5, H + 5 }, 1, W, H, { clamp = true })
+        t:eq(clamped[1], 0, "clamping is explicit, left edge")
+        t:eq(clamped[2], H, "clamping is explicit, bottom edge")
+        local tiny = assert(Codec.snap({ 1e-9, 1e-9 }, 1, W, H))
+        t:eq(tiny[1], 0, "sub-quantum coordinates snap to the grid")
+    end)
+
+    t:case("snap agrees with the codec across a chunk seam", function()
+        local n = Codec.MAX_POINTS + 5
+        local pts = {}
+        for i = 1, n do pts[#pts + 1] = (i * 1.37) % W; pts[#pts + 1] = (i * 2.11) % H end
+        local snapped = assert(Codec.snap(pts, n, W, H))
+        local back = assert(Codec.join(Codec.encode(pts, n, W, H), W, H))
+        local same = true
+        for i = 1, n * 2 do if snapped[i] ~= back[i] then same = false; break end end
+        t:check(same, "every point, the seam included")
+    end)
 end

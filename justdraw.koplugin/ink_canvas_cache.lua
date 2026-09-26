@@ -279,6 +279,91 @@ function Cache:metaById(id)
     return self.by_id[id]
 end
 
+--[[--
+A stroke's points as a table the caller owns.
+
+`_readAllPoints` hands a live stroke's own array back, and the history,
+selection and clipboard all keep what they read long after the stroke moved
+on (§D.1.3), so this always copies. A read failure answers nil plus the reason
+and leaves the cache as it was: the caller is preparing an edit, and refusing
+that edit is the whole response.
+]]
+function Cache:readPoints(m, ctx)
+    if self.closed then return nil, "closed" end
+    if type(m) ~= "table" or self.by_id[m.id] ~= m then return nil, "unknown_stroke" end
+    local points, n = self:_readAllPoints(m, ctx)
+    if not points then return nil, n end
+    local copy = {}
+    for i = 1, n * 2 do copy[i] = points[i] end
+    return copy, n
+end
+
+local Query = {}
+Query.__index = Query
+
+--[[--
+A bounded walk over the strokes whose boxes could touch a rectangle.
+
+`_metaNear` materialises every candidate at once, which is fine for the eraser
+(a capsule's worth of page) and wrong for a lasso that may enclose the whole
+sheet: the list alone would grow with the page. The cursor walks the grid's
+cells in row-major order and hands back at most `limit` metas a call, each
+exactly once even when it spans many cells or was re-keyed by a COMMIT in
+between (uniqueness is by the meta's session token). A rebuild or close
+makes the cursor stale rather than letting it read a different generation.
+]]
+function Cache:openQuery(min_x, min_y, max_x, max_y)
+    if self.closed or not self.grid then return nil, "not_ready" end
+    local grid = self.grid
+    local c0, r0, c1, r1 = grid:_span(min_x, min_y, max_x, max_y)
+    return setmetatable({
+        cache = self, grid = grid, generation = self.generation,
+        c0 = c0, c1 = c1, r1 = r1, r = r0, c = c0, i = 1,
+        seen = {}, done = false,
+    }, Query)
+end
+
+--- Append up to `limit` new candidate metas to `out`. Returns the number
+--- appended and whether the walk is complete, or nil and "stale".
+function Query:next(limit, out)
+    local cache = self.cache
+    if self.done then return 0, true end
+    if cache.closed or cache.generation ~= self.generation
+        or cache.grid ~= self.grid then
+        self.done = true
+        return nil, "stale"
+    end
+    local grid, added = self.grid, 0
+    -- Buckets may have changed since the last call (an erase, a COMMIT's
+    -- re-key); restarting the current one is safe because `seen` dedupes.
+    self.i = 1
+    while self.r <= self.r1 do
+        local bucket = grid.cells[self.r * grid.cols + self.c]
+        if bucket then
+            while self.i <= #bucket do
+                local m = cache.by_id[bucket[self.i]]
+                self.i = self.i + 1
+                if m and not self.seen[m.token] then
+                    self.seen[m.token] = true
+                    out[#out + 1] = m
+                    added = added + 1
+                    if added >= limit then return added, false end
+                end
+            end
+        end
+        self.i = 1
+        self.c = self.c + 1
+        if self.c > self.c1 then self.c = self.c0; self.r = self.r + 1 end
+    end
+    self.done = true
+    return added, true
+end
+
+function Query:close()
+    self.done = true
+    self.seen = {}
+end
+
 --- The raster buffer, for the overlay's regional blits. nil once closed.
 --- Whether any gray ink has reached the raster since the last rebuild. Box
 --- refreshes over this cache must ride a grayscale pass while true (ADR-36).

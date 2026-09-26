@@ -86,6 +86,36 @@ end
 
 Codec.validate = validateInput
 
+--[[--
+The coordinates a stroke will have once it has been written and read back.
+
+Synthetic ink -- a moved selection, a pasted payload, a placed shape -- is
+validated and then snapped once, so what the editor shows before COMMIT is
+exactly what a rebuild decodes after it. Out-of-page points are refused
+rather than clamped: `quantise` clamps silently, which would store a point
+somewhere other than where it was painted.
+
+`opts.clamp` is for recording ink that already exists: a pen stroke the input
+path accepted may graze the edge, and the history has to hold what the store
+holds, which is the clamped value. Returns a fresh flat array, never the
+caller's.
+]]
+function Codec.snap(points, n, logical_w, logical_h, opts)
+    local valid, err = validateInput(points, n, logical_w, logical_h)
+    if not valid then return nil, err end
+    local clamp = opts and opts.clamp
+    local out = {}
+    for i = 1, n do
+        local x, y = points[i * 2 - 1], points[i * 2]
+        if not clamp and (x < 0 or y < 0 or x > logical_w or y > logical_h) then
+            return nil, "out_of_range"
+        end
+        out[i * 2 - 1] = dequantise(quantise(x, logical_w), logical_w)
+        out[i * 2] = dequantise(quantise(y, logical_h), logical_h)
+    end
+    return out
+end
+
 --- Encode and release one chunk at a time. The whole input is validated before
 --- the callback sees the first blob, so a late bad point cannot leave a
 --- partially emitted stroke inside the caller's transaction.

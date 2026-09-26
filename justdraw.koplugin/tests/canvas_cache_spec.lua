@@ -963,4 +963,58 @@ return function(ctx)
         cache:paintTo(dest)
         t:eq(#dest.blits, 0, "nothing painted, nothing raised")
     end)
+
+    t:describe("ink_canvas_cache / copied reads and bounded queries")
+
+    t:case("readPoints hands out a copy, for live and stored strokes alike", function()
+        local cache = readyCache{ strokes = { bar(10, 10) } }
+        local stored = cache:strokes()[1]
+        local pts, n = cache:readPoints(stored)
+        t:eq(n, 4, "stored stroke read")
+        pts[1] = 999
+        local again = cache:readPoints(stored)
+        t:check(again[1] ~= 999, "a fresh table each time")
+        local live_points = { 100, 100, 200, 200 }
+        cache:addStroke({ id = -1, seq = 9, width = 4, tool = 1, point_count = 2,
+            min_x = 100, min_y = 100, max_x = 200, max_y = 200 }, live_points, 2)
+        local live = cache:readPoints(cache:metaById(-1))
+        live[1] = 5
+        t:eq(live_points[1], 100, "the live stroke's own array is untouched")
+        t:eq(cache:readPoints({ id = 42 }), nil, "an unknown meta is refused")
+    end)
+
+    t:case("a read failure is a refusal, not a failed cache", function()
+        local cache, store = readyCache{ strokes = { bar(10, 10) } }
+        store.fail_stroke_chunk = 0
+        local pts, err = cache:readPoints(cache:strokes()[1])
+        t:eq(pts, nil, "refused")
+        t:check(err ~= nil, "with a reason")
+        t:eq(cache:stateName(), "ready", "the cache is still ready")
+    end)
+
+    t:case("openQuery walks each candidate once, in bounded steps, and goes stale on rebuild", function()
+        local strokes = {}
+        for i = 1, 30 do strokes[i] = bar((i % 6) * 250, math.floor(i / 6) * 300, 30, 4) end
+        local cache = readyCache{ strokes = strokes }
+        local cursor = assert(cache:openQuery(0, 0, W, H))
+        local out, steps = {}, 0
+        while true do
+            local added, done = cursor:next(4, out)
+            steps = steps + 1
+            t:check(added <= 4, "never more than the limit")
+            if done then break end
+        end
+        t:eq(#out, 30, "every stroke exactly once")
+        local seen = {}
+        for _, m in ipairs(out) do
+            t:eq(seen[m.token], nil, "no duplicate " .. m.token)
+            seen[m.token] = true
+        end
+        t:check(steps >= 8, "it took several bounded steps")
+        local c2 = assert(cache:openQuery(0, 0, W, H))
+        cache:setTransform(transform(nil, 930, 1240))
+        local r, err = c2:next(4, {})
+        t:eq(r, nil, "a rebuild makes the cursor stale")
+        t:eq(err, "stale", "named")
+    end)
 end
