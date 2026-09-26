@@ -7,13 +7,21 @@ raster is complete, so a failed load cannot strand the next launch on a blank
 or corrupt page.
 ]]
 
+local History = require("ink_edit_history")
 local InputController = require("ink_input_controller")
 local Errors = require("ink_notebook_errors")
 local SurfaceSession = require("ink_surface_session")
 local Transform = require("ink_canvas_transform")
 local logger = require("logger")
+local _ = require("gettext")
 
 local Session = {}
+
+--- What the reader is told when a page's history had to change under them.
+local HISTORY_NOTICES = {
+    history_stale = _("This page changed since it was last open, so its undo history was cleared."),
+    erase_limit = _("Erasing stopped here so this erase can still be undone. Lift the pen and erase again."),
+}
 Session.__index = Session
 
 function Session.new(opts)
@@ -53,9 +61,71 @@ function Session.new(opts)
         navigation_status_error = nil,
         page_position = nil,
         page_position_error = nil,
+        --- Undo histories of the pages visited while this notebook is open
+        --- (ADR-53), keyed by page identity and bounded together by one
+        --- pool: at most eight pages and one shared memory budget.
+        history_pool = History.newPool(),
+        histories = {},
         opened = false,
         closed = false,
     }, Session)
+end
+
+--- The key a page's history is kept under. Identity is the notebook and the
+--- page row within this session's repository; a new repository means a new
+--- Session and therefore no histories at all.
+function Session:_historyKey(page)
+    return tostring(page.notebook_id) .. ":" .. tostring(page.id)
+end
+
+function Session:_historyFor(page)
+    local key = self:_historyKey(page)
+    local h = self.histories[key]
+    if not h or h.released then
+        h = History.new{ pool = self.history_pool, identity = key }
+        self.histories[key] = h
+    end
+    self.history_pool:touch(h)
+    for _, evicted in ipairs(self.history_pool:enforceCount(h)) do
+        if evicted.identity then self.histories[evicted.identity] = nil end
+    end
+    return h
+end
+
+function Session:_releaseHistory(page_id)
+    for key, h in pairs(self.histories) do
+        if key:match(":(%-?%d+)$") == tostring(page_id) then
+            h:release()
+            self.histories[key] = nil
+        end
+    end
+end
+
+function Session:_historyNotice(what)
+    local text = HISTORY_NOTICES[what]
+    if not text then return end
+    -- Reachable from the stylus callback (an erase contact ending): never
+    -- put a widget up from there.
+    self.schedule(function()
+        if not self.closed then self.notify(text) end
+    end)
+end
+
+--[[--
+Close the page's surface, taking its history along.
+
+The queue has already committed (`_beforeSwitch`), so every live stroke has a
+row, which is what the detached history remembers its keys by. A close that
+fails puts the history straight back.
+]]
+function Session:_closeSurface(surface)
+    local history = surface:detachHistory()
+    local closed, close_err = surface:close()
+    if not closed then
+        if history then surface:reattachHistory(history) end
+        return nil, close_err
+    end
+    return true
 end
 
 function Session:_notifyState()
@@ -164,7 +234,10 @@ function Session:uiSnapshot()
         -- rather than reaching into the page row for a second opinion.
         template_kind = self.current_page and self.current_page.template_kind
             or "blank",
-        can_undo = state == "ready" and surface ~= nil and surface:canUndo() or false,
+        can_undo = state == "ready" and transition_free and not contact
+            and surface ~= nil and surface:canUndo() or false,
+        can_redo = state == "ready" and transition_free and not contact
+            and surface ~= nil and surface:canRedo() or false,
         pending_writes = surface and surface:pendingWrites() or 0,
         error_code = error_code,
     }
@@ -301,6 +374,7 @@ function Session:_retryMetadata()
             self:_setMetadataError(delete_err)
             return nil, delete_err
         end
+        self:_releaseHistory(self.pending_delete_page)
         self.pending_delete_page = nil
         self.notebook_obj.page_count = self.notebook_obj.page_count - 1
         if self.on_notebook_changed then self.on_notebook_changed(self) end
@@ -331,6 +405,7 @@ function Session:_pageReady(page, surface)
             self:_setMetadataError(delete_err)
             return
         end
+        self:_releaseHistory(self.pending_delete_page)
         self.pending_delete_page = nil
         self.notebook_obj.page_count = self.notebook_obj.page_count - 1
         if self.on_notebook_changed then self.on_notebook_changed(self) end
@@ -361,6 +436,10 @@ function Session:_openPage(page, persist_current, transform)
         -- The notebook route owns its own lease, so it can answer this
         -- itself: no commit runs under a contact (ADR-42).
         can_work = function() return not self:_hasActiveContact() end,
+        history = self:_historyFor(page),
+        on_history_notice = function(what)
+            if self.surface_session == surface then self:_historyNotice(what) end
+        end,
         on_ready = function() self:_pageReady(page, surface) end,
         on_load_error = function(reason)
             if self.surface_session == surface then
@@ -491,7 +570,7 @@ function Session:goToPage(page_id)
     if not prepared then return nil, prepare_err end
     local old_surface = self.surface_session
     if old_surface then
-        local closed, close_err = old_surface:close()
+        local closed, close_err = self:_closeSurface(old_surface)
         if not closed then self:_acquireCapture(); return nil, close_err end
     end
     self.surface_session = nil
@@ -553,7 +632,7 @@ function Session:appendPage(spec)
     if self.on_notebook_changed then self.on_notebook_changed(self) end
     local old_surface = self.surface_session
     if old_surface then
-        local closed, close_err = old_surface:close()
+        local closed, close_err = self:_closeSurface(old_surface)
         if not closed then self:_acquireCapture(); return nil, close_err end
     end
     self.surface_session = nil
@@ -565,7 +644,19 @@ function Session:undo()
     if not self.surface_session then return nil, "no_page" end
     local box, err = self.surface_session:undo()
     if not box then return nil, err end
-    if self.on_dirty_box then self.on_dirty_box(box, "undo", self) end
+    if self.on_dirty_box and type(box) == "table" then self.on_dirty_box(box, "undo", self) end
+    self:_notifyState()
+    return box
+end
+
+--- Give back what undo took (ADR-53). Same gates as undo: never under a
+--- contact, never on a surface that cannot accept the edit.
+function Session:redo()
+    if self:_hasActiveContact() then return nil, "contact_active" end
+    if not self.surface_session then return nil, "no_page" end
+    local box, err = self.surface_session:redo()
+    if not box then return nil, err end
+    if self.on_dirty_box and type(box) == "table" then self.on_dirty_box(box, "redo", self) end
     self:_notifyState()
     return box
 end
@@ -631,7 +722,7 @@ function Session:softDeleteCurrentPage()
         return nil, transform_err or "bad_geometry"
     end
     local old_surface = self.surface_session
-    local closed, close_err = old_surface:close()
+    local closed, close_err = self:_closeSurface(old_surface)
     if not closed then self:_acquireCapture(); return nil, close_err end
     self.surface_session = nil
     self.pending_delete_page = old_page.id
@@ -740,9 +831,17 @@ function Session:close()
     end
     self.surface_session = nil
     self.current_page = nil
+    self:_releaseHistories()
     self.closed = true
     self:_notifyState()
     return true
+end
+
+function Session:_releaseHistories()
+    for key, h in pairs(self.histories) do
+        h:release()
+        self.histories[key] = nil
+    end
 end
 
 
@@ -777,6 +876,7 @@ function Session:shutdown()
     self.current_page = nil
     self.pending_current = nil
     self.pending_delete_page = nil
+    self:_releaseHistories()
     self.closed = true
     self:_notifyState()
     if first_error then return nil, first_error end

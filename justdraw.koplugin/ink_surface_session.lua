@@ -642,6 +642,21 @@ function SurfaceSession:detachHistory()
     return history
 end
 
+--- Take a history back after a detach whose close then failed. The metas
+--- still carry their keys; nothing has been reloaded.
+function SurfaceSession:reattachHistory(history)
+    history.live, history.live_count = nil, nil
+    history.attached = true
+    self.history = history
+    self.by_key = {}
+    if self.cache_obj then
+        local metas = self.cache_obj:strokes()
+        for i = 1, #metas do
+            if metas[i].key then self.by_key[metas[i].key] = metas[i] end
+        end
+    end
+end
+
 --[[--
 Validate one incoming stroke description. `trusted` specs come from the
 history's own snapshots, whose points are already the stored quantised

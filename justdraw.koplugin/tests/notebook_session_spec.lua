@@ -635,4 +635,139 @@ return function(ctx)
         t:eq(input.released, released + 1, "old callback released")
         t:eq(input.acquired, acquired + 1, "new callback acquired")
     end)
+
+    t:describe("ink_notebook_session / page histories")
+
+    local function strokesOf(session)
+        local out = {}
+        for _, m in ipairs(session:surface():cache():strokes()) do
+            local pts = session:surface():cache():readPoints(m)
+            out[#out + 1] = string.format("%d:%.0f,%.0f", m.key or -1, pts[1], pts[2])
+        end
+        return table.concat(out, " ")
+    end
+
+    t:case("edit page A, visit B, come back: undo and redo still reach A's edits", function()
+        local session, _, sched = fixture()
+        session:open(1)
+        sched:drain()
+        local surface = session:surface()
+        surface:addStroke({ 100, 100, 200, 200 }, 2, 4, 1)
+        local ctx = surface:beginErase()
+        surface:eraseAt(150, 150, 80, ctx)
+        surface:endErase(ctx)
+        t:eq(#surface:cache():strokes(), 0, "A was erased")
+        t:eq(session:goNext(), true, "to B")
+        sched:drain()
+        session:surface():addStroke({ 5, 5, 6, 6 }, 2, 4, 1)
+        t:eq(session:goPrevious(), true, "back to A")
+        sched:drain()
+        t:eq(session:uiSnapshot().can_undo, true, "A's history came back")
+        t:eq(session:uiSnapshot().can_redo, false, "no redo yet")
+        t:check(session:undo(), "undo the erase")
+        t:eq(#session:surface():cache():strokes(), 1, "the stroke is back after the page switch")
+        t:eq(session:uiSnapshot().can_redo, true, "redo offered")
+        t:check(session:undo(), "undo the drawing")
+        t:eq(#session:surface():cache():strokes(), 0, "gone")
+        t:check(session:redo(), "redo the drawing")
+        t:check(session:redo(), "redo the erase")
+        t:eq(#session:surface():cache():strokes(), 0, "erased again")
+    end)
+
+    t:case("a flush between edits changes ids but not what undo finds", function()
+        local session, _, sched = fixture()
+        session:open(1)
+        sched:drain()
+        local surface = session:surface()
+        surface:addStroke({ 100, 100, 200, 200 }, 2, 4, 1)
+        session:flush()
+        surface:addStroke({ 300, 300, 400, 400 }, 2, 4, 1)
+        session:flush()
+        local ids = {}
+        for _, m in ipairs(surface:cache():strokes()) do ids[#ids + 1] = m.id end
+        t:check(ids[1] > 0 and ids[2] > 0, "both rows committed")
+        t:check(session:undo(), "undo")
+        t:eq(strokesOf(session):find("300,300") == nil, true, "the newest drawing went")
+        t:eq(strokesOf(session):find("100,100") ~= nil, true, "the older one stayed")
+    end)
+
+    t:case("a failed save keeps the reader on the page with its history", function()
+        local session, store, sched = fixture()
+        session:open(1)
+        sched:drain()
+        session:surface():addStroke({ 100, 100, 200, 200 }, 2, 4, 1)
+        store.fail_transaction = "commit"
+        local ok, err = session:goNext()
+        t:eq(ok, nil, "navigation refused")
+        t:check(err ~= nil, "with a reason")
+        t:eq(session:currentPage().id, 11, "still on A")
+        t:eq(session:surface():hasHistory(), true, "the history stays with the open page")
+        store.fail_transaction = nil
+        t:check(session:retrySave(), "retry")
+        t:check(session:undo(), "and undo still works")
+    end)
+
+    t:case("histories are bounded to eight pages; the oldest is forgotten, never replayed", function()
+        local pages = {}
+        for i = 1, 10 do pages[i] = page(100 + i, i * 1024) end
+        local session, _, sched = fixture{ pages = pages }
+        session:open(1)
+        sched:drain()
+        for i = 1, 10 do
+            session:surface():addStroke({ 10 * i, 10, 10 * i, 20 }, 2, 4, 1)
+            if i < 10 then t:eq(session:goNext(), true, "next " .. i); sched:drain() end
+        end
+        local count = 0
+        for _ in pairs(session.histories) do count = count + 1 end
+        t:check(count <= 8, "at most eight histories resident (" .. count .. ")")
+        for _ = 1, 9 do session:goPrevious(); sched:drain() end
+        t:eq(session:currentPage().id, 101, "back on the first page")
+        local snap = session:uiSnapshot()
+        t:eq(snap.can_redo, false, "no redo")
+        -- Its history was evicted: a fresh one treats the page's ink as the
+        -- pre-session frontier, so undo takes back the stroke drawn there --
+        -- and the reader can redo it.
+        t:check(session:undo(), "the frontier stroke")
+        t:check(session:redo(), "redone")
+        t:eq(#session:surface():cache():strokes(), 1, "nothing lost")
+    end)
+
+    t:case("deleting a page releases its history", function()
+        local session, _, sched = fixture()
+        session:open(1)
+        sched:drain()
+        session:goNext(); sched:drain()
+        session:surface():addStroke({ 5, 5, 6, 6 }, 2, 4, 1)
+        t:check(session.histories["1:12"] ~= nil, "B has a history")
+        t:eq(session:softDeleteCurrentPage(), true, "B deleted")
+        sched:drain()
+        t:eq(session.histories["1:12"], nil, "its history went with it")
+    end)
+
+    t:case("a page whose rows changed while away drops its history and tells the reader", function()
+        local session, store, sched = fixture()
+        local told = {}
+        session.notify = function(text) told[#told + 1] = text end
+        session:open(1)
+        sched:drain()
+        session:surface():addStroke({ 100, 100, 200, 200 }, 2, 4, 1)
+        session:goNext(); sched:drain()
+        store:putStroke(11, { width = 4, tool = 1, points = { 9, 9 }, n = 1 })
+        session:goPrevious(); sched:drain()
+        t:eq(#told, 1, "one notice")
+        t:eq(session:uiSnapshot().can_undo, false, "no undo, and no fallback that removes ink")
+        t:eq(#session:surface():cache():strokes(), 2, "both strokes remain")
+    end)
+
+    t:case("close releases every history", function()
+        local session, _, sched = fixture()
+        session:open(1)
+        sched:drain()
+        session:surface():addStroke({ 5, 5, 6, 6 }, 2, 4, 1)
+        local pool = session.history_pool
+        t:check(pool.points > 0, "retained")
+        t:eq(session:close(), true, "closed")
+        t:eq(pool.points, 0, "released")
+        t:eq(#pool.members, 0, "no member left")
+    end)
 end
