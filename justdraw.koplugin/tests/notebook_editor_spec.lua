@@ -2087,4 +2087,109 @@ return function(ctx)
         found.callback()
         t:eq(controller.calls[#controller.calls], "add", "and it appends")
     end)
+
+    t:describe("standalone notebooks / overlay presentation")
+
+    local function overlayFixture(gray)
+        local Transform = require("ink_canvas_transform")
+        local buffer = ctx.support.newBlitbuffer(1000, 1000)
+        local cache = { buffer = function() return buffer end,
+            hasGrayInk = function() return gray or false end,
+            paintTo = function() end }
+        local overrides = { cache = cache }
+        local editor, _, _, _, session = newEditor(overrides)
+        local fit, clip = editor:viewport()
+        local transform = Transform.new{ logical_w = 1184, logical_h = 1680,
+            fit_rect = fit, clip_rect = clip }
+        overrides.transform = transform
+        return editor, transform, buffer, session
+    end
+
+    local function painter(gray)
+        local p = { calls = {} }
+        function p:paintOverlay(bb, clip)
+            self.calls[#self.calls + 1] = { bb = bb, x = clip.x, y = clip.y, w = clip.w, h = clip.h }
+        end
+        function p:hasGrayInk() return gray or false end
+        return p
+    end
+
+    t:case("repaintScreenBox paints page, then overlay, clipped, and refreshes fast", function()
+        ctx.reset()
+        local editor, transform, buffer = overlayFixture(false)
+        editor:markShown()
+        local p = painter(false)
+        editor:setOverlayPainter(p)
+        local screen = ctx.env.Device.screen.bb
+        local before = #screen.blits
+        local added = {}
+        editor.live_refresh.add = function(_, kind, x0, y0, x1, y1)
+            added[#added + 1] = { kind, x0, y0, x1, y1 }
+        end
+        local paper = editor.layout_geometry.paper_rect
+        t:eq(editor:repaintScreenBox(-50, paper.y - 40, 200.4, paper.y + 60.2), true, "repainted")
+        local blit = screen.blits[before + 1]
+        t:eq(blit.src, buffer, "the page's own raster first")
+        t:eq(blit.dest_x, math.max(paper.x, transform:visibleCanvasRect().x),
+            "clipped to the paper and the page on the left")
+        t:check(blit.dest_y >= paper.y, "and never above the paper")
+        t:eq(#p.calls, 1, "then the overlay, once")
+        t:eq(p.calls[1].x, blit.dest_x, "inside the same clip")
+        t:eq(p.calls[1].w, blit.w, "same width")
+        t:eq(added[1][1], "fast", "black ink rides the fast pass")
+        t:eq(editor:repaintScreenBox(5000, 5000, 5100, 5100), false, "off the paper: nothing")
+        editor:shutdown()
+    end)
+
+    t:case("a gray overlay or gray page asks for ui, never fast", function()
+        ctx.reset()
+        local editor = overlayFixture(false)
+        editor:markShown()
+        editor:setOverlayPainter(painter(true))
+        local kinds = {}
+        editor.live_refresh.add = function(_, kind) kinds[#kinds + 1] = kind end
+        local v = editor.controller:activeSession():surface():transform():visibleCanvasRect()
+        editor:repaintScreenBox(v.x + 10, v.y + 10, v.x + 50, v.y + 50)
+        t:eq(kinds[1], "ui", "gray overlay")
+        editor:shutdown()
+        ctx.reset()
+        local editor2 = overlayFixture(true)
+        editor2:markShown()
+        editor2:setOverlayPainter(painter(false))
+        kinds = {}
+        editor2.live_refresh.add = function(_, kind) kinds[#kinds + 1] = kind end
+        v = editor2.controller:activeSession():surface():transform():visibleCanvasRect()
+        editor2:repaintScreenBox(v.x + 10, v.y + 10, v.x + 50, v.y + 50)
+        t:eq(kinds[1], "ui", "gray page")
+        editor2:shutdown()
+    end)
+
+    t:case("paintTo and dirty repairs keep base, overlay order; a closed editor paints nothing", function()
+        ctx.reset()
+        local editor, transform, _, session = overlayFixture(false)
+        local order = {}
+        local surface = session:surface()
+        surface.isReady = function() return true end
+        local cache = surface:cache()
+        cache.paintTo = function() order[#order + 1] = "page" end
+        local p = painter(false)
+        function p:paintOverlay() order[#order + 1] = "overlay" end
+        editor:setOverlayPainter(p)
+        editor:paintTo(ctx.support.newBlitbuffer(1000, 1400), 0, 0)
+        t:eq(table.concat(order, ","), "page,overlay", "paintTo: page, then overlay")
+        editor:markShown()
+        order = {}
+        local Geom = require("ui/geometry")
+        local paper = editor.layout_geometry.paper_rect
+        editor:onDirty(Geom:new{ x = 10, y = paper.y + 10, w = 20, h = 20 }, "repair", session,
+            transform, { x = 10, y = 10, w = 20, h = 20 })
+        t:eq(order[#order], "overlay", "a dirty repair repaints the overlay over the page")
+        local controller = { cleared = nil }
+        function controller:clear(reason) self.cleared = reason end
+        editor.edit_controller = controller
+        editor:shutdown()
+        t:eq(controller.cleared, "close", "closing ends the edit controller")
+        t:eq(editor.overlay_painter, nil, "and drops the painter")
+        t:eq(editor:repaintScreenBox(10, paper.y + 10, 50, paper.y + 50), false, "closed: nothing")
+    end)
 end

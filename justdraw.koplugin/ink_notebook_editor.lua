@@ -1255,6 +1255,13 @@ function Editor:onDirty(screen_box, kind, session, transform, source_box)
     if buffer and Screen.bb and exact_source then
         Screen.bb:blitFrom(buffer, exact_box.x, exact_box.y,
             exact_source.x, exact_source.y, exact_source.w, exact_source.h)
+        -- Same order as paintTo: the page, then what floats above it, only
+        -- inside this box -- otherwise a repair under a lifted selection
+        -- would wipe the selection's pixels until the next move.
+        if self.overlay_painter then
+            self.overlay_painter:paintOverlay(Screen.bb, exact_box)
+            if self.overlay_painter:hasGrayInk() then fast_ok = false end
+        end
         self:_restorePaperChromeIfIntersecting(Screen.bb, exact_box)
     end
 
@@ -1303,6 +1310,63 @@ function Editor:onDirty(screen_box, kind, session, transform, source_box)
     UIManager:setDirty(nil, "partial", refresh_box)
 end
 
+--[[--
+Draw something above the page (§D.3), or stop with nil.
+
+`painter:paintOverlay(bb, clip)` composes the floating layer, its frame and
+its menu into `bb`, never outside `clip`; `painter:hasGrayInk()` says whether
+that needs a grayscale refresh. The editor calls it from `paintTo` and from
+every dirty repaint, always after the page's own pixels -- the painter never
+refreshes anything itself.
+]]
+function Editor:setOverlayPainter(painter)
+    self.overlay_painter = painter
+end
+
+--[[--
+Repaint one screen rectangle of the page, overlay included, and hand it to the
+live refresh accumulator (ADR-43). For moving previews: the caller passes the
+union of where the overlay was and where it is now, so the pixels it left are
+page again and the ones it reached are the overlay. Numbers, not a Geom, and
+one reused clip table: this runs on every drag sample.
+]]
+function Editor:repaintScreenBox(x0, y0, x1, y1)
+    if self.closed or not self.shown then return false end
+    local session = self:_currentSession()
+    local surface = session and session:surface()
+    if not surface or not surface:isReady() then return false end
+    local cache, transform = surface:cache(), surface:transform()
+    local buffer = cache and cache:buffer()
+    if not buffer or not transform or not Screen.bb then return false end
+    if Stack.visualAbove(self) then
+        -- The uncover repaint (paintTo) draws the overlay where it is then.
+        return false
+    end
+    local paper = self.layout_geometry.paper_rect
+    local visible = transform:visibleCanvasRect()
+    local left = math.max(math.floor(x0), paper.x, visible.x)
+    local top = math.max(math.floor(y0), paper.y, visible.y)
+    local right = math.min(math.ceil(x1), paper.x + paper.w, visible.x + visible.w)
+    local bottom = math.min(math.ceil(y1), paper.y + paper.h, visible.y + visible.h)
+    if right <= left or bottom <= top then return false end
+    local sx = math.floor(left - transform.offset_x + 0.5)
+    local sy = math.floor(top - transform.offset_y + 0.5)
+    Screen.bb:blitFrom(buffer, left, top, sx, sy, right - left, bottom - top)
+    local clip = self._overlay_clip
+    if not clip then clip = {}; self._overlay_clip = clip end
+    clip.x, clip.y, clip.w, clip.h = left, top, right - left, bottom - top
+    local gray = cache:hasGrayInk()
+    if self.overlay_painter then
+        self.overlay_painter:paintOverlay(Screen.bb, clip)
+        gray = gray or self.overlay_painter:hasGrayInk()
+    end
+    self:_restorePaperChromeIfIntersecting(Screen.bb, clip)
+    -- Gray never rides the monochrome fast pass (ADR-36), and nothing here
+    -- asks for `partial` while the pen may still be down (ADR-26).
+    self.live_refresh:add(gray and "ui" or "fast", left, top, right, bottom)
+    return true
+end
+
 function Editor:onEditChanged(session)
     if self.closed or session ~= self:_currentSession() then return end
     -- A stroke has just ended: its held tail goes out now rather than waiting
@@ -1312,13 +1376,15 @@ function Editor:onEditChanged(session)
     self:_syncQualitySetting(session)
     self:_qualityContactBoundary(session)
     local previous_can_undo = self.snapshot and self.snapshot.can_undo
+    local previous_can_redo = self.snapshot and self.snapshot.can_redo
     self:_refreshSnapshot()
     -- A completed stroke changes persistence state on every lift, but v1 has
     -- no visible save indicator. Once Undo is already enabled there is
     -- therefore nothing to redraw. Keeping this path empty is important on
     -- e-ink: dirtying Editor would run its full-screen paintTo even with a
     -- regional refresh box.
-    if previous_can_undo == self.snapshot.can_undo then return end
+    if previous_can_undo == self.snapshot.can_undo
+        and previous_can_redo == self.snapshot.can_redo then return end
     self:_rebuildControls()
     if self.shown and not Stack.visualAbove(self) then
         local rail = self.layout_geometry.rail_rect
@@ -1402,7 +1468,14 @@ function Editor:paintTo(bb, x, y)
     bb:paintRect(geometry.rail_rect.x, geometry.rail_rect.y,
         geometry.rail_rect.w, geometry.rail_rect.h, Blitbuffer.COLOR_LIGHT_GRAY)
     local surface = self:_currentSession() and self:_currentSession():surface()
-    if surface and surface:cache() and surface:isReady() then surface:cache():paintTo(bb) end
+    if surface and surface:cache() and surface:isReady() then
+        surface:cache():paintTo(bb)
+        -- Base, then whatever floats above it (§D.3): a selection being
+        -- dragged, a payload being placed, their frame and menu.
+        if self.overlay_painter then
+            self.overlay_painter:paintOverlay(bb, geometry.paper_rect)
+        end
+    end
     local border = Size.border.window
     bb:paintRect(geometry.paper_rect.x, geometry.paper_rect.y,
         geometry.paper_rect.w, border, Blitbuffer.COLOR_BLACK)
@@ -2024,6 +2097,13 @@ end
 
 function Editor:shutdown()
     if self.closed then return true end
+    -- Whatever floats above the page belongs to this window: end it before
+    -- the window goes, so no late callback paints into a closed editor.
+    if self.edit_controller and self.edit_controller.clear then
+        pcall(self.edit_controller.clear, self.edit_controller, "close")
+    end
+    self.edit_controller = nil
+    self.overlay_painter = nil
     self:_clearCoveredRepaint()
     self:_resetQualityRefresh()
     -- The page this was refreshing is going away; a cadence timer holding a
