@@ -891,6 +891,46 @@ return function(ctx)
         t:check(info.text:find("2 cancelled.", 1, true) ~= nil, "and the reader is told")
     end)
 
+    t:case("a bulk export: Cancel on one stops the batch, closing cancels the job in flight", function()
+        ctx.reset()
+        local Dialog = require("ink_export_dialog")
+        local real_run = Dialog.run
+        local runs = {}
+        Dialog.run = function(o)
+            local job = { cancelled = 0 }
+            function job:cancel() self.cancelled = self.cancelled + 1 end
+            o.active_job.job = job
+            runs[#runs + 1] = { opts = o, job = job, built = o.build(nil, o.format) }
+        end
+        local ok, err = pcall(function()
+            local controller = galleryController(function() return mixed(0, 3) end)
+            function controller:exportRepository()
+                return { listPages = function() return {} end }
+            end
+            local library = open(controller)
+            local ExportSource = require("ink_export_source")
+            local real_pages = ExportSource.notebookPages
+            ExportSource.notebookPages = function() return { { id = 1, logical_w = 10, logical_h = 10 } } end
+            local items = { library.cards[1].item, library.cards[2].item, library.cards[3].item }
+            local box = library:exportItems(items)
+            box.ok_callback()
+            t:eq(#runs, 1, "one export at a time")
+            t:eq(runs[1].opts.active_job.job, runs[1].job, "the dialog's Cancel reaches the job")
+            runs[1].built.finish({ status = "cancelled", count = 0 })
+            ctx.env.UIManager:flush()
+            t:eq(#runs, 1, "Cancel on one export stops the batch")
+            t:eq(library.bulk, nil, "the batch is over")
+            -- Again, and close the library while the first export runs.
+            box = library:exportItems(items)
+            box.ok_callback()
+            library:shutdown()
+            t:eq(runs[2].job.cancelled, 1, "closing cancels the export in flight")
+            ExportSource.notebookPages = real_pages
+        end)
+        Dialog.run = real_run
+        t:check(ok, "ran: " .. tostring(err))
+    end)
+
     t:case("suspending or closing cancels a copy in flight", function()
         ctx.reset()
         local jobs = {}

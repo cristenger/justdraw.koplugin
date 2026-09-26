@@ -1581,7 +1581,14 @@ function Library:exportItems(items)
         end
         self:_finishBulk("export", bulk.results)
     end
-    bulk.cancel = function() bulk.cancelled = true; finish() end
+    bulk.cancel = function()
+        if bulk.cancelled then return end
+        bulk.cancelled = true
+        -- Stop the export in flight, not just the ones after it.
+        local job = bulk.active_job and bulk.active_job.job
+        if job and job.cancel then job:cancel() end
+        finish()
+    end
     local step
     step = function()
         if self.bulk ~= bulk or bulk.cancelled then return end
@@ -1597,11 +1604,17 @@ function Library:exportItems(items)
             self.schedule(step)
         end
         local build = Library._exportBuild(self, item, repository, function(result)
-            local status = "failed"
-            if result and result.status == "done" then status = "ok"
-            elseif result and result.status == "cancelled" or result == nil then status = "cancelled" end
-            settle(status)
+            if result and result.status == "cancelled" then
+                -- The reader pressed Cancel on this export: the batch stops.
+                if not settled then
+                    settled = true
+                    bulk.results[index] = { item = item, status = "cancelled" }
+                end
+                return bulk.cancel()
+            end
+            settle(result and result.status == "done" and "ok" or "failed")
         end)
+        bulk.active_job = {}
         local built_once = false
         ExportDialog.run{
             build = function(scope, fmt)
@@ -1611,6 +1624,8 @@ function Library:exportItems(items)
             end,
             format = format, dir = dir,
             xopp_notice_shown = true,
+            -- The progress box's Cancel, and the batch's, reach this job.
+            active_job = bulk.active_job,
             stem = (item.title or "Notebook") .. " " .. os.date("%Y-%m-%d-%H%M%S"),
             -- One message at the end, not one per notebook.
             notify = function(text) logger.info("JustDraw notebooks: export:", text) end,

@@ -163,6 +163,21 @@ check(kept ~= nil, "and they are")
 pressIn(box, "Cancel")
 tick()
 
+-- ------------------------------------------------------------ cancelled mid-export
+
+present = true
+local before = #opened
+nui:sendNotebooks({ notebooks[1], notebooks[2], notebooks[3] }, library)
+tick(5)
+pressIn(top(), "PDF")
+tick(2)   -- the first export has started, not finished
+check(LocalSend.activeFlow() ~= nil, "a send is being prepared")
+LocalSend.cancelActive()   -- what suspend and closing the library do
+tick(400)
+check(#opened == before, "a cancelled send never opens LocalSend")
+check(LocalSend.activeFlow() == nil, "and is over")
+check(not require("ink_export").isRunning(), "with no export left running")
+
 -- ------------------------------------------------------------ sweeping
 
 local report = nui:_sendStaging():sweep{ min_age = 0 }

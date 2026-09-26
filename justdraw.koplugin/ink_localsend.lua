@@ -362,7 +362,8 @@ Export `items` into one staged operation and open LocalSend on the result.
   opts.export_one   function(item, format, dir, stem, done) -- runs one export
                     into `dir` and calls `done(result)` once, where result is
                     the export's { status = "done" | "cancelled" | ..., written }
-                    or nil when it could not start
+                    or nil when it could not start; returns a handle with
+                    `cancel()` for the export in flight
   opts.show_modal, opts.close_modal, opts.notify
   opts.schedule     function(fn), a later tick
   opts.xopp_notice  function() -> what Xournal++ approximates, asked once
@@ -391,6 +392,11 @@ function LocalSend.send(opts)
     function flow.cancel()
         if flow.cancelled or flow.done then return end
         flow.cancelled = true
+        -- The export in flight first, so nothing more is written into the
+        -- folder about to be abandoned.
+        local current = flow.current
+        flow.current = nil
+        if current and current.cancel then pcall(current.cancel) end
         if op then op:abandon() end
         finish()
     end
@@ -479,17 +485,24 @@ function LocalSend.send(opts)
             local ok, err = pcall(opts.export_one, item, format, op.dir, stemFor(item), function(result)
                 if settled then return end
                 settled = true
+                flow.current = nil
                 if flow.cancelled then return end
                 local status = "failed"
                 if result and result.status == "done" then
-                    status = "ok"
-                    for _, path in ipairs(result.written or {}) do op:record(path) end
+                    -- Done means a file of ours in this send's folder; a
+                    -- notebook that recorded none would go missing silently.
+                    local recorded = 0
+                    for _, path in ipairs(result.written or {}) do
+                        if op:record(path) then recorded = recorded + 1 end
+                    end
+                    if recorded > 0 then status = "ok" end
                 elseif result and result.status == "cancelled" then
                     return flow.cancel()
                 end
                 flow.results[#flow.results + 1] = { item = item, status = status }
                 opts.schedule(step)
             end)
+            if ok and not settled and type(err) == "table" then flow.current = err end
             if not ok then
                 logger.warn("JustDraw: send export failed to start:", err)
                 if not settled then

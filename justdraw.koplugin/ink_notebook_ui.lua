@@ -154,7 +154,10 @@ function NotebookUI:sendNotebooks(notebooks, host)
             end
             local build = Library._exportBuild({ controller = controller }, item, repository, done)
             local built_once = false
+            local active_job = {}
             ExportDialog.run{
+                -- The progress box's Cancel, and the send's, reach this job.
+                active_job = active_job,
                 build = function(scope, fmt)
                     local built, err = build(scope, fmt or format)
                     built_once = built ~= nil
@@ -168,6 +171,10 @@ function NotebookUI:sendNotebooks(notebooks, host)
                 close_modal = close,
             }
             if not built_once then done(nil) end
+            return { cancel = function()
+                local job = active_job.job
+                if job and job.cancel then job:cancel() end
+            end }
         end,
         show_modal = show,
         close_modal = close,

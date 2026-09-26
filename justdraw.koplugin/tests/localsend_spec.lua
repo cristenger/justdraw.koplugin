@@ -393,6 +393,51 @@ return function(ctx)
         t:eq(#w3.opened, 0, "and sends nothing")
     end)
 
+    t:case("cancelling mid-export stops that export and never opens LocalSend", function()
+        local w = flowWorld()
+        local pending, cancelled = nil, 0
+        w.opts.export_one = function(item, format, dir, stem, done)
+            w.exports[#w.exports + 1] = { item = item, dir = dir }
+            w.fs.write(dir .. "/" .. stem .. ".pdf.tmp", "partial")
+            pending = done
+            return { cancel = function()
+                cancelled = cancelled + 1
+                w.fs.remove(dir .. "/" .. stem .. ".pdf.tmp")
+                done({ status = "cancelled" })
+            end }
+        end
+        LocalSend.send(w.opts)
+        choose(w, "PDF")
+        t:eq(#w.exports, 1, "the first export is running")
+        LocalSend.cancelActive()
+        t:eq(cancelled, 1, "the running export was cancelled, not left to finish")
+        pending({ status = "done", written = { w.exports[1].dir .. "/Uno.pdf" } })
+        w.sched:drain()
+        t:eq(#w.opened, 0, "LocalSend never opens after a cancel")
+        t:eq(#w.exports, 1, "and nothing else is exported")
+        t:eq(LocalSend.activeFlow(), nil, "the flow is over")
+    end)
+
+    t:case("an export that says done but wrote nothing is a failure, not a silent gap", function()
+        local w = flowWorld()
+        w.opts.export_one = function(item, format, dir, stem, done)
+            w.exports[#w.exports + 1] = item
+            if item.id == 1 then
+                local path = dir .. "/" .. stem .. ".pdf"
+                w.fs.write(path, "x")
+                return done({ status = "done", written = { path } })
+            end
+            done({ status = "done", written = {} })
+        end
+        LocalSend.send(w.opts)
+        choose(w, "PDF")
+        w.sched:drain()
+        t:eq(#w.opened, 0, "one of two is not sent alone")
+        t:check(w.modals[#w.modals].text:find("• Dos", 1, true) ~= nil, "the empty one is named")
+        w.modals[#w.modals].cancel_callback()
+        t:eq(LocalSend.activeFlow(), nil, "stopping ends it")
+    end)
+
     t:case("no LocalSend: nothing starts", function()
         local w = flowWorld()
         w.present.value = false
