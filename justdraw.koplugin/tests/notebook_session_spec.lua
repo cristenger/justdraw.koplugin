@@ -51,6 +51,9 @@ return function(ctx)
             end,
             fit_rect = { x = 0, y = 0, w = 1000, h = 1400 },
             clip_rect = { x = 0, y = 0, w = 1000, h = 1400 },
+            -- Its own pool: the process-wide one is shared with every other
+            -- case's sessions, which never close in a spec.
+            history_pool = require("ink_edit_history").newPool(),
         }
         return session, store, sched, input, function() return aborted end
     end

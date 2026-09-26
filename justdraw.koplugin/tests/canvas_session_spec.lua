@@ -942,4 +942,84 @@ return function(ctx)
         t:eq(session:activeCanvas(), old_canvas, "the source stayed active")
         t:eq(session:overlay(), old_overlay, "and its window stayed alive")
     end)
+
+    -- =================================================================
+    t:describe("ink_canvas_session / sheet histories (ADR-53, ADR-57)")
+
+    local History = require("ink_edit_history")
+
+    t:case("a sheet's history survives visiting another sheet: erase, switch, undo, redo", function()
+        History.resetSharedPool()
+        local session, store, sched = openedSession{
+            canvases = { canvasAt(1, "/p1"), canvasAt(2, "/p2") },
+            pages = { ["/p1"] = 3, ["/p2"] = 4 },
+        }
+        session:openCanvas(session:canvasById(1))
+        sched:drain()
+        session:addStroke({ 10, 10, 60, 10 }, 2, 4, 1)
+        local ctx = session:beginErase()
+        session:eraseAt(35, 10, 40, ctx)
+        session:endErase(ctx)
+        t:eq(#session.surface_session:cache():strokes(), 0, "erased")
+        session:openCanvas(session:canvasById(2))
+        sched:drain()
+        session:addStroke({ 5, 5, 6, 6 }, 2, 4, 1)
+        session:openCanvas(session:canvasById(1))
+        sched:drain()
+        t:eq(session:canUndo(), true, "the first sheet's history came back")
+        t:check(session:undo(), "undo the erase")
+        t:eq(#session.surface_session:cache():strokes(), 1, "the stroke is back")
+        t:eq(session:canRedo(), true, "redo offered")
+        t:check(session:redo(), "redo the erase")
+        t:eq(#session.surface_session:cache():strokes(), 0, "erased again")
+    end)
+
+    t:case("two books with the same canvas id keep separate histories", function()
+        History.resetSharedPool()
+        local a, _, sched_a = openedSession{ canvases = { canvasAt(1, "/p1") }, pages = { ["/p1"] = 3 } }
+        local b, _, sched_b = openedSession{ canvases = { canvasAt(1, "/p1") }, pages = { ["/p1"] = 3 } }
+        a:openCanvas(a:canvasById(1)); sched_a:drain()
+        b:openCanvas(b:canvasById(1)); sched_b:drain()
+        a:addStroke({ 10, 10, 20, 20 }, 2, 4, 1)
+        t:check(a.surface_session.history ~= b.surface_session.history, "two histories")
+        t:eq(b:canUndo(), false, "the other book has nothing to undo")
+        t:eq(a:canUndo(), true, "this one does")
+    end)
+
+    t:case("deleting a sheet and closing the book release their histories", function()
+        History.resetSharedPool()
+        local session, _, sched = openedSession{
+            canvases = { canvasAt(1, "/p1"), canvasAt(2, "/p2") },
+            pages = { ["/p1"] = 3, ["/p2"] = 4 },
+        }
+        session:openCanvas(session:canvasById(1)); sched:drain()
+        session:addStroke({ 10, 10, 20, 20 }, 2, 4, 1)
+        local h = session.surface_session.history
+        session:deleteCanvas(session:canvasById(1))
+        t:eq(h.released, true, "the deleted sheet's history is released")
+        session:openCanvas(session:canvasById(2)); sched:drain()
+        session:addStroke({ 10, 10, 20, 20 }, 2, 4, 1)
+        local pool = History.sharedPool()
+        t:check(pool.points > 0, "the open sheet's history is resident")
+        session:close()
+        t:eq(pool.points, 0, "closing the book releases it")
+    end)
+
+    t:case("a sheet that cannot commit keeps its history and stays open", function()
+        History.resetSharedPool()
+        local session, store, sched = openedSession{
+            canvases = { canvasAt(1, "/p1"), canvasAt(2, "/p2") },
+            pages = { ["/p1"] = 3, ["/p2"] = 4 },
+        }
+        session:openCanvas(session:canvasById(1)); sched:drain()
+        session:addStroke({ 10, 10, 20, 20 }, 2, 4, 1)
+        store.fail_transaction = "commit"
+        local ok = session:openCanvas(session:canvasById(2))
+        t:eq(ok, nil, "the switch is refused")
+        t:eq(session:activeCanvas().id, 1, "still on the first sheet")
+        t:eq(session.surface_session:hasHistory(), true, "with its history")
+        store.fail_transaction = nil
+        t:check(session:retrySave(), "retry")
+        t:check(session:undo(), "and undo still works")
+    end)
 end

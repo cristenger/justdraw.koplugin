@@ -861,6 +861,10 @@ function JustDraw:onDispatcherRegisterActions()
         category = "none", event = "FingerInkUndo", reader = true,
         title = _("JustDraw: undo stroke"),
     })
+    Dispatcher:registerAction("justdraw_redo", {
+        category = "none", event = "JustDrawRedo", reader = true,
+        title = _("JustDraw: redo"),
+    })
     Dispatcher:registerAction("fingerink_bar", {
         category = "none", event = "FingerInkBar", reader = true,
         title = _("JustDraw: toggle toolbar"),
@@ -2087,6 +2091,18 @@ function JustDraw:setShapeOptions(options)
     Compat.saveSetting(G_reader_settings, "shape_size", normalized.size)
     Compat.saveSetting(G_reader_settings, "shape_angle", normalized.angle)
     return normalized
+end
+
+--- End a selection or placement on the open sheet (Phase 7). A no-op until
+--- the sheet's edit controllers exist.
+function JustDraw:clearSheetEditing(reason)
+    for _, controller in ipairs({ self.sheet_selection or false,
+            self.sheet_paste or false, self.sheet_shape or false }) do
+        if controller and controller:isActive() then
+            local ok, err = pcall(controller.clear, controller, reason)
+            if not ok then logger.err("JustDraw: clearing sheet editing failed:", err) end
+        end
+    end
 end
 
 --- The eraser toggle, kept for its many callers. Off means the pen.
@@ -4067,6 +4083,7 @@ function JustDraw:onJustDrawUndo()
             self:notify(canvasAwayMessage(page))
             return true
         end
+        self:clearSheetEditing("undo")
         local box, err = self.session:undo()
         if not box then
             if err == "read_only" then self:notify(_("This sheet is read-only"))
@@ -4100,6 +4117,41 @@ function JustDraw:onJustDrawUndo()
         return true
     end
     self:repaint()
+    return true
+end
+
+--[[--
+Redo on the open sheet (ADR-57). Page ink has no history and keeps its legacy
+undo, so redo there says so instead of doing something else.
+]]
+function JustDraw:onJustDrawRedo()
+    if self.canvas_open then
+        if self.canvas_off_page then
+            local _placement, page = self.session:openCanvasPlacement()
+            self:notify(canvasAwayMessage(page))
+            return true
+        end
+        self:clearSheetEditing("undo")
+        local box, err = self.session:redo()
+        if not box then
+            if err == "read_only" then self:notify(_("This sheet is read-only"))
+            elseif err == "loading" or err == "load_failed" then
+                self:notify(_("This sheet's ink is still loading"))
+            else self:notify(_("Nothing to redo on this sheet")) end
+            return true
+        end
+        local tr = self.session:transform()
+        if type(box) == "table" and tr then
+            self:blitCanvasBox(box, tr)
+        else
+            UIManager:setDirty(self.session:overlay(), "ui")
+        end
+        if self.session:overlay() and self.session:overlay().bar then
+            self.session:overlay().bar:update(true)
+        end
+        return true
+    end
+    self:notify(_("Redo is available on notebooks and sheets"))
     return true
 end
 

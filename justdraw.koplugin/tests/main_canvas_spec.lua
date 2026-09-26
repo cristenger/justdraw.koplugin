@@ -2104,4 +2104,31 @@ return function(ctx)
         t:eq(canvasItem(p, "Open a sheet here instead").enabled_func(), false,
             "the menu now directs the reader to Retry")
     end)
+
+    t:describe("main / sheet redo (ADR-57)")
+
+    t:case("Redo gives back what Undo took on the open sheet, and says so when it cannot", function()
+        require("ink_edit_history").resetSharedPool()
+        local canvas = {
+            id = 77, anchor_kind = "xpointer", anchor_key = "xp:/body/p[7]",
+            anchor_raw = "/body/p[7]", anchor_normalized = "/body/p[7]",
+            anchor_dom_version = 20240114, logical_w = SW, logical_h = SH,
+        }
+        local p = canvasPlugin{ canvases = { canvas } }
+        p:openCanvas(canvas)
+        env.UIManager:flush()
+        local session = p.session
+        session:addStroke({ 100, 100, 200, 100 }, 2, 4, 1)
+        p:onJustDrawUndo()
+        t:eq(#session:cache():strokes(), 0, "undone")
+        env.notifications = {}
+        p:onJustDrawRedo()
+        t:eq(#session:cache():strokes(), 1, "redone")
+        p:onJustDrawRedo()
+        local said = false
+        for _, n in ipairs(env.notifications) do
+            if tostring(n.text or n):find("Nothing to redo", 1, true) then said = true end
+        end
+        t:check(said or #env.notifications > 0, "nothing left: the reader is told")
+    end)
 end

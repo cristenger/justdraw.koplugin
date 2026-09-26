@@ -64,7 +64,7 @@ function Session.new(opts)
         --- Undo histories of the pages visited while this notebook is open
         --- (ADR-53), keyed by page identity and bounded together by one
         --- pool: at most eight pages and one shared memory budget.
-        history_pool = History.newPool(),
+        history_pool = opts.history_pool or History.sharedPool(),
         histories = {},
         opened = false,
         closed = false,

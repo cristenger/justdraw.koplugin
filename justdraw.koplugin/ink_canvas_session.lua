@@ -30,10 +30,17 @@ local Anchor = require("ink_anchor")
 local BookDatabase = require("ink_book_database")
 local Index = require("ink_anchor_index")
 local Overlay = require("ink_canvas_overlay")
+local History = require("ink_edit_history")
 local SurfaceSession = require("ink_surface_session")
 
 local Session = {}
 Session.__index = Session
+
+--- What the reader is told when a sheet's history had to change under them.
+local HISTORY_NOTICES = {
+    history_stale = _("This sheet changed since it was last open, so its undo history was cleared."),
+    erase_limit = _("Erasing stopped here so this erase can still be undone. Lift the pen and erase again."),
+}
 
 local MESSAGES = {
     no_identity = _("Drawing sheets are unavailable for this book"),
@@ -77,6 +84,10 @@ function Session.new(opts)
         can_work = opts.can_work,
         notify = opts.notify or function() end,
         batch = opts.batch,
+        --- Undo histories of the sheets visited in this book (ADR-53, 57),
+        --- in the process-wide pool notebooks use too.
+        history_pool = opts.history_pool or History.sharedPool(),
+        histories = {},
 
         book_id = nil,
         index = nil,
@@ -249,6 +260,12 @@ function Session:close(opts)
     -- opened it or was handed one.
     if self.repository and self.repository.close then self.repository:close() end
     self.repository = nil
+    -- The book is going: its sheets' histories go with it, and their share
+    -- of the process-wide pool with them.
+    for key, h in pairs(self.histories) do
+        h:release()
+        self.histories[key] = nil
+    end
     self.available = false
     self.closed = true
     return canvas_ok, canvas_err
@@ -451,7 +468,15 @@ function Session:openCanvas(canvas, opts)
     self.canvas = canvas
     self:_placeOpenCanvas()
     if not self:isWritable() then self.notify(MESSAGES.read_only) end
+    local history = self:_historyFor(canvas)
     self.surface_session = SurfaceSession.new{
+        history = history,
+        on_history_notice = function(what)
+            local text = HISTORY_NOTICES[what]
+            if text and self.schedule then
+                self.schedule(function() self.notify(text) end)
+            end
+        end,
         repository = self.repository,
         surface = canvas,
         transform = transform,
@@ -524,11 +549,67 @@ function Session:openCanvas(canvas, opts)
     return self.overlay_widget, cache_ok and nil or cache_err
 end
 
+--[[--
+The key a sheet's history is kept under: the repository instance, the book
+row and the canvas row. Canvas ids repeat across books and a reopened
+database is a new repository, so none of the three alone identifies a sheet.
+]]
+function Session:_historyKey(canvas)
+    return tostring(self.repository) .. ":" .. tostring(self.book_id) .. ":" .. tostring(canvas.id)
+end
+
+function Session:_historyFor(canvas)
+    local key = self:_historyKey(canvas)
+    local h = self.histories[key]
+    if not h or h.released then
+        h = History.new{ pool = self.history_pool, identity = key }
+        self.histories[key] = h
+    end
+    self.history_pool:touch(h)
+    for _, evicted in ipairs(self.history_pool:enforceCount(h)) do
+        if evicted.identity and self.histories[evicted.identity] == evicted then
+            self.histories[evicted.identity] = nil
+        end
+    end
+    return h
+end
+
+function Session:_releaseHistory(canvas)
+    local key = self:_historyKey(canvas)
+    local h = self.histories[key]
+    if h then h:release(); self.histories[key] = nil end
+end
+
+--- Give back what undo took on the open sheet (ADR-57).
+function Session:redo()
+    if not self.surface_session then return nil end
+    local box, err = self.surface_session:redo()
+    if box then self.edited = true end
+    return box, err
+end
+
+function Session:canRedo()
+    return self.surface_session ~= nil and self.surface_session:canRedo()
+end
+
+function Session:canUndo()
+    return self.surface_session ~= nil and self.surface_session:canUndo()
+end
+
 function Session:closeCanvas()
     if not self.canvas then return true end
     if self.surface_session then
+        -- The history leaves with its rows: only a committed surface can say
+        -- which row carries which key (D.1.7). A sheet that cannot commit
+        -- stays open, exactly as before.
+        local saved, save_err = self.surface_session:flush()
+        if not saved then return nil, save_err end
+        local history = self.surface_session:detachHistory()
         local ok, err = self.surface_session:close()
-        if not ok then return nil, err end
+        if not ok then
+            if history then self.surface_session:reattachHistory(history) end
+            return nil, err
+        end
     end
     if self.edited or (self.surface_session and self.surface_session.edited) then
         -- This is ordering metadata, not ink durability. Do it only after the
@@ -581,6 +662,7 @@ function Session:deleteCanvas(canvas)
         self.next_seq = nil
         self.edited = false
     end
+    self:_releaseHistory(canvas)
     if self.index then self.index:forget(canvas.id) end
     self.marks_here = {}
     return true

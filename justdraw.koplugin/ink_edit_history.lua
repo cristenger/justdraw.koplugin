@@ -105,6 +105,22 @@ function Pool:fits(points, bytes)
         and self.bytes + bytes <= self.max_bytes
 end
 
+--[[--
+The one pool every owner in this process shares: notebook pages and document
+sheets together. Eight resident histories and one memory budget for all of
+them -- a pool per owner would multiply the budget by the number of owners.
+]]
+local shared_pool
+function History.sharedPool()
+    if not shared_pool then shared_pool = History.newPool() end
+    return shared_pool
+end
+
+--- Tests only: forget the shared pool so a case starts from nothing.
+function History.resetSharedPool()
+    shared_pool = nil
+end
+
 --- Make room for `points`/`bytes` on behalf of `h`, evicting what it must.
 --- Returns true, or nil and "entry_too_large" when not even an empty pool
 --- could hold it -- the caller refuses the edit before changing anything.
