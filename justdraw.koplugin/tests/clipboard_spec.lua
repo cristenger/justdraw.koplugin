@@ -39,9 +39,13 @@ return function(ctx)
     t:case("paint groups keep membership and order, not the old numbers", function()
         Clipboard.set({ stroke(0, 0, 4, 90), stroke(5, 0, 4, 12), stroke(9, 0, 4, 90) }, { scale = 1 })
         local p = Clipboard.payload(1)
-        t:eq(p.strokes[1].group, 2, "the later layer")
-        t:eq(p.strokes[2].group, 1, "the earlier layer")
+        -- Handed out in paint order, whatever order they were gathered in,
+        -- so a preview composes the way the commit stacks.
+        t:eq(p.strokes[1].group, 1, "the earlier layer first")
+        t:eq(p.strokes[1].points[1], 5 - 0, "which is the second stroke copied")
+        t:eq(p.strokes[2].group, 2, "then the later layer")
         t:eq(p.strokes[3].group, 2, "fragments of one highlighter stay one group")
+        t:eq(p.strokes[2].points[1], 0, "in their copied order")
         Clipboard.clear()
     end)
 

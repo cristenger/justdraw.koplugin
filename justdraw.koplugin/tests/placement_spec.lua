@@ -113,6 +113,60 @@ return function(ctx)
         t:eq(pl.state, "idle", "nothing left prepared")
     end)
 
+    t:case("groups stack by their copied paint order, not by where they sit in the list", function()
+        -- The selection gathers strokes in grid order: the upper layer can
+        -- come first. Group 2 was drawn over group 1 and must stay over it.
+        local pl, session, _, sched, contact = fixture{ payload = {
+            strokes = { { points = { 0, 0, 100, 0 }, n = 2, width = 4, tool = 1, group = 2 },
+                { points = { 0, 20, 100, 20 }, n = 2, width = 4, tool = 1, group = 1 },
+                { points = { 0, 40, 100, 40 }, n = 2, width = 4, tool = 1, group = 2 } },
+            w = 100, h = 40 } }
+        pl:prepare()
+        place(pl, contact, 300, 300)
+        sched:advance(0.2)
+        local by_y = {}
+        for _, m in ipairs(session:cache():strokes()) do by_y[math.floor(m.min_y + 0.5) - 280] = m end
+        t:check(by_y[0].paint_seq > by_y[20].paint_seq, "the upper layer is still on top")
+        t:eq(by_y[0].paint_seq, by_y[40].paint_seq, "and its two strokes are still one group")
+    end)
+
+    t:case("a thick nib stays on the paper, and counts toward the size limit", function()
+        local thick = { strokes = { { points = { 0, 0, 100, 0 }, n = 2, width = 40, tool = 1 } },
+            w = 100, h = 0 }
+        for _, c in ipairs({ { -500, -500 }, { 5000, 5000 } }) do
+            local pl, session, _, sched, contact = fixture{ payload = thick }
+            pl:prepare()
+            place(pl, contact, c[1], c[2])
+            sched:advance(0.2)
+            local m = session:cache():strokes()[1]
+            t:check(m.min_x >= 20 - 0.02 and m.min_y >= 20 - 0.02, "half the nib inside, top left")
+            t:check(m.max_x <= 980 + 0.02 and m.max_y <= 1380 + 0.02, "and bottom right")
+        end
+        local pl, _, p = fixture{ payload = {
+            strokes = { { points = { 0, 0, 980, 0 }, n = 2, width = 40, tool = 1 } }, w = 980, h = 0 } }
+        t:eq(select(2, pl:prepare()), "too_large", "fits by its centre line, not by its ink: refused")
+        t:eq(#p.notices, 1, "and said so")
+    end)
+
+    t:case("a malformed payload is refused before anything is shown", function()
+        for label, payload in pairs({
+            nan_width = { strokes = { { points = { 0, 0, 1, 1 }, n = 2, width = 0 / 0, tool = 1 } }, w = 1, h = 1 },
+            inf_size = { strokes = { { points = { 0, 0, 1, 1 }, n = 2, width = 4, tool = 1 } }, w = math.huge, h = 1 },
+        }) do
+            local pl, _, p = fixture{ payload = payload }
+            t:eq(pl:prepare(), nil, label .. " refused")
+            t:eq(pl.state, "idle", label .. ": nothing prepared")
+            t:eq(p.painter, nil, label .. ": no preview")
+        end
+        -- A zero-length line (a dot) is a real payload.
+        local pl, session, _, sched, contact = fixture{ payload = {
+            strokes = { { points = { 0, 0, 0, 0 }, n = 2, width = 4, tool = 1 } }, w = 0, h = 0 } }
+        t:eq(pl:prepare(), true, "a dot prepares")
+        place(pl, contact, 500, 500)
+        sched:advance(0.2)
+        t:eq(#session:cache():strokes(), 1, "and lands")
+    end)
+
     t:case("a stale preview refuses the contact and prepares again after it", function()
         local pl, _, p, sched, contact = fixture()
         pl:prepare()

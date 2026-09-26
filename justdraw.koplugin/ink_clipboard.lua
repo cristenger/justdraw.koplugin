@@ -141,8 +141,14 @@ function Clipboard.payload(dest_scale)
             for p = 1, s.n do pressure[p] = s.pressure[p] end
         end
         strokes[i] = { points = points, n = s.n, width = s.width * k, tool = s.tool,
-            group = s.group, pressure = pressure }
+            group = s.group, pressure = pressure, index = i }
     end
+    -- In paint order, so a preview composes as the commit will stack: the
+    -- selection gathered them in grid order, not paint order.
+    table.sort(strokes, function(a, b)
+        if (a.group or 0) ~= (b.group or 0) then return (a.group or 0) < (b.group or 0) end
+        return a.index < b.index
+    end)
     return { strokes = strokes, w = held.w * k, h = held.h * k, points = held.points }
 end
 

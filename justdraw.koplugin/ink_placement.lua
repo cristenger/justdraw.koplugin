@@ -102,11 +102,21 @@ function Placement:prepare()
     local payload, err = self.source(transform)
     if not payload then return nil, err end
     local surface = session:surface()
+    -- Half the widest nib, reserved on every side: a placement keeps its
+    -- whole stroke on the paper, not just its centre line (§D.9).
+    local pad = 0
+    for i = 1, #(payload.strokes or {}) do
+        local width = payload.strokes[i].width
+        if not finite(width) or width < 0 then return nil, "bad_stroke" end
+        if width / 2 > pad then pad = width / 2 end
+    end
     if not finite(payload.w) or not finite(payload.h)
-        or payload.w > surface.logical_w or payload.h > surface.logical_h then
+        or payload.w + 2 * pad > surface.logical_w
+        or payload.h + 2 * pad > surface.logical_h then
         self.presenter:notify(_("That is too large for this page."))
         return nil, "too_large"
     end
+    self.pad = pad
     local layer, layer_err = FloatLayer.new{
         transform = transform, strokes = payload.strokes, clear = self.layer_clear,
         budget = function(bytes) return self.presenter:budget(bytes) end,
@@ -123,12 +133,14 @@ function Placement:prepare()
     return true
 end
 
---- Clamp the payload's corner so all of it stays on the page.
+--- Clamp the payload's corner so all of it, nib included, stays on the page.
 function Placement:_clamp(x, y)
     local surface = self.presenter:session():surface()
-    local maxx, maxy = surface.logical_w - self.payload.w, surface.logical_h - self.payload.h
-    if x < 0 then x = 0 elseif x > maxx then x = maxx end
-    if y < 0 then y = 0 elseif y > maxy then y = maxy end
+    local pad = self.pad or 0
+    local maxx = surface.logical_w - self.payload.w - pad
+    local maxy = surface.logical_h - self.payload.h - pad
+    if x < pad then x = pad elseif x > maxx then x = maxx end
+    if y < pad then y = pad elseif y > maxy then y = maxy end
     return x, y
 end
 
@@ -200,16 +212,17 @@ function Placement:_hide()
 end
 
 --- Specs for the payload at the current offset, with paint orders placed
---- above every stroke on the page and groups kept together (§D.7).
+--- above every stroke on the page and groups kept together (§D.7). A
+--- stroke's group is its rank in the copied paint order (ink_clipboard), so
+--- the paste stacks as the original did whatever order the strokes arrive
+--- in; a payload without groups (a shape) stacks in array order.
 function Placement:_specs(session)
     local surface = session:surface()
     local base = session:nextSeq()
-    local first_of_group = {}
     local specs = {}
     for i = 1, #self.payload.strokes do
         local s = self.payload.strokes[i]
         local group = s.group or i
-        if not first_of_group[group] then first_of_group[group] = i end
         local moved = {}
         for p = 1, s.n do
             moved[p * 2 - 1] = s.points[p * 2 - 1] + self.dx
@@ -218,7 +231,7 @@ function Placement:_specs(session)
         local snapped, err = Codec.snap(moved, s.n, surface.logical_w, surface.logical_h)
         if not snapped then return nil, err end
         specs[i] = { points = snapped, n = s.n, width = s.width, tool = s.tool,
-            paint_seq = base + first_of_group[group] - 1 }
+            paint_seq = base + group - 1 }
     end
     return specs
 end
