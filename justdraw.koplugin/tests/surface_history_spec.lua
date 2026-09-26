@@ -440,4 +440,31 @@ return function(ctx)
         t:eq(res, nil, "no replacement without a history")
         t:eq(err, "no_history", "named")
     end)
+
+    t:case("scrubbing one stroke in one contact reserves exactly what its entry keeps", function()
+        local session, _, sched, history = fixture()
+        local pts = {}
+        for i = 0, 60 do pts[#pts + 1] = 100 + i * 10; pts[#pts + 1] = 500 end
+        draw(session, pts)
+        sched:drain()
+        local ctx = session:beginErase()
+        -- Left to right, cutting the fragment the previous cut left behind.
+        for x = 130, 640, 30 do session:eraseAt(x, 500, 6, ctx) end
+        local g = ctx.group
+        local live_after, live_before = {}, {}
+        for i = 1, #g.after do if g.after[i] and g.after_at[g.after[i].key] == i then live_after[#live_after + 1] = g.after[i] end end
+        for i = 1, #g.before do if g.before[i] and g.before_at[g.before[i].key] == i then live_before[#live_before + 1] = g.before[i] end end
+        t:eq(g.after_count, #live_after, "the live fragment count is kept, not recounted")
+        t:eq(g.before_count, #live_before, "and the originals'")
+        local ap, ab = History.costOf(live_after)
+        local bp, bb = History.costOf(live_before)
+        t:eq(g.after_points, ap, "the group counts only fragments still alive")
+        t:eq(g.after_bytes, ab, "in bytes too")
+        t:eq(history.open_points, ap + bp, "and reserves exactly that many points")
+        t:eq(g.limited, false, "so scrubbing does not hit the limit early")
+        session:endErase(ctx)
+        t:eq(history.open_points, 0, "the reservation is handed to the entry")
+        t:check(session:undo(), "one undo")
+        t:eq(#session:cache():strokes(), 1, "brings the whole stroke back")
+    end)
 end

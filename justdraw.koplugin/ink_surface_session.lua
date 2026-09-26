@@ -387,6 +387,9 @@ function SurfaceSession:beginErase()
             before = {}, before_at = {}, after = {}, after_at = {},
             before_points = 0, before_bytes = 0,
             after_points = 0, after_bytes = 0,
+            -- Live counts, kept as cuts land: counting the lists on every
+            -- cut made one contact's cost grow with the square of its cuts.
+            before_count = 0, after_count = 0,
             limited = false,
         }
     end
@@ -1027,11 +1030,15 @@ function SurfaceSession:_applySplitRecorded(hit, group)
     local bp, bb = 0, 0
     if before_snap then bp, bb = History.costOf({ before_snap }) end
     -- The inverse batches, as they would be after this cut.
-    local before_count = #groupList(group.before, group.before_at) + (before_snap and 1 or 0)
-    local after_count = #groupList(group.after, group.after_at) + #frags
-        - (intermediate and 1 or 0)
+    -- Re-cutting one of this contact's own fragments replaces it: its cost
+    -- leaves the group, and so does its share of the open reservation.
+    local gone = intermediate and group.after[group.after_at[m.key]] or nil
+    local gone_points, gone_bytes = 0, 0
+    if gone then gone_points, gone_bytes = History.costOf({ gone }) end
+    local before_count = group.before_count + (before_snap and 1 or 0)
+    local after_count = group.after_count + #frags - (intermediate and 1 or 0)
     local before_bytes = group.before_bytes + bb
-    local after_bytes = group.after_bytes + frag_bytes
+    local after_bytes = group.after_bytes + frag_bytes - gone_bytes
     local q = self.queue
     if before_count + after_count > q.hard_ops
         or before_bytes > q.hard_bytes or after_bytes > q.hard_bytes then
@@ -1064,11 +1071,16 @@ function SurfaceSession:_applySplitRecorded(hit, group)
 
     if intermediate then
         group.after_at[m.key] = nil
+        group.after_count = group.after_count - 1
+        group.after_points = group.after_points - gone_points
+        group.after_bytes = group.after_bytes - gone_bytes
+        self.history:unreserveOpen(gone_points, gone_bytes)
     else
         group.before[#group.before + 1] = before_snap
         group.before_at[m.key] = #group.before
         group.before_points = group.before_points + bp
         group.before_bytes = group.before_bytes + bb
+        group.before_count = group.before_count + 1
     end
     for f = 1, #metas do
         local snap = frag_snaps[f]
@@ -1076,6 +1088,7 @@ function SurfaceSession:_applySplitRecorded(hit, group)
         group.after[#group.after + 1] = snap
         group.after_at[snap.key] = #group.after
     end
+    group.after_count = group.after_count + #metas
     group.after_points = group.after_points + frag_points
     group.after_bytes = group.after_bytes + frag_bytes
 
