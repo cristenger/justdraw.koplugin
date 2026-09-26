@@ -11,6 +11,7 @@ local Errors = require("ink_notebook_errors")
 local NotebookLayout = require("ink_notebook_layout")
 local Editor = require("ink_notebook_editor")
 local Library = require("ink_notebook_library")
+local LocalSend = require("ink_localsend")
 
 local NotebookUI = {}
 NotebookUI.__index = NotebookUI
@@ -22,6 +23,9 @@ function NotebookUI.new(opts)
         controller = assert(opts.controller),
         library_factory = opts.library_factory or Library,
         thumbnail_factory = opts.thumbnail_factory,
+        find_localsend = opts.find_localsend,
+        send_root = opts.send_root,
+        send_fs = opts.send_fs,
         editor_factory = opts.editor_factory or Editor,
         library = nil,
         editor = nil,
@@ -53,6 +57,8 @@ function NotebookUI:openLibrary()
         is_covered = function() return self.editor ~= nil end,
         on_open = function(item) self:openNotebook(item) end,
         on_close = function() self:closeLibrary() end,
+        can_send = function() return self:findLocalSend() ~= nil end,
+        send_items = function(items, host) return self:sendNotebooks(items, host) end,
         thumbnail_factory = self.thumbnail_factory ~= false
             and (self.thumbnail_factory or function() return self:_newThumbnails() end)
             or nil,
@@ -91,8 +97,85 @@ function NotebookUI:_newThumbnails()
 end
 
 function NotebookUI:onSuspend()
+    LocalSend.cancelActive()
     if self.library then self.library:onSuspend() end
     return true
+end
+
+--- LocalSend, looked up now: never kept, since it is recreated with the
+--- reader (ADR-60). `opts.find_localsend` replaces the lookup in tests.
+function NotebookUI:findLocalSend()
+    if self.find_localsend then return self.find_localsend() end
+    local ok, loader = pcall(require, "pluginloader")
+    return LocalSend.find(self.plugin.ui, ok and loader or nil)
+end
+
+--- The staging area, made on first use; the first use in a process also
+--- sweeps what earlier processes left (conservatively: see ink_localsend).
+function NotebookUI:_sendStaging()
+    if self.send_staging then return self.send_staging end
+    local root = self.send_root
+    if not root then
+        local DataStorage = require("datastorage")
+        local cache = DataStorage:getDataDir() .. "/cache"
+        LocalSend.nativeFs().mkdir(cache)
+        root = cache .. "/" .. LocalSend.ROOT_NAME
+    end
+    self.send_staging = LocalSend.staging{ root = root, fs = self.send_fs }
+    local ok, report = pcall(self.send_staging.sweep, self.send_staging)
+    if not ok then logger.warn("JustDraw: send sweep failed:", report) end
+    return self.send_staging
+end
+
+--[[--
+Export `notebooks` and open LocalSend on them. `host` is the window asking
+(library or editor): its modals carry the questions and its messages the
+answers.
+]]
+function NotebookUI:sendNotebooks(notebooks, host)
+    local controller = self.controller
+    local ExportDialog = require("ink_export_dialog")
+    -- The editor's modals go through its contact-aware seam; the library's
+    -- through its own.
+    local function show(widget)
+        if host.showModalSafely then return host:showModalSafely(widget) end
+        return host:_showModal(widget)
+    end
+    local function close(widget) return host:_closeModal(widget) end
+    return LocalSend.send{
+        items = notebooks,
+        find = function() return self:findLocalSend() end,
+        staging = self:_sendStaging(),
+        export_one = function(item, format, dir, stem, done)
+            local repository, repo_err = controller:exportRepository()
+            if not repository then
+                logger.warn("JustDraw: send export has no repository:", repo_err)
+                return done(nil)
+            end
+            local build = Library._exportBuild({ controller = controller }, item, repository, done)
+            local built_once = false
+            ExportDialog.run{
+                build = function(scope, fmt)
+                    local built, err = build(scope, fmt or format)
+                    built_once = built ~= nil
+                    return built, err
+                end,
+                format = format, dir = dir, stem = stem,
+                -- The send asked about Xournal++'s limits once, for all.
+                xopp_notice_shown = true,
+                notify = function(text) logger.info("JustDraw: send export:", text) end,
+                show_modal = show,
+                close_modal = close,
+            }
+            if not built_once then done(nil) end
+        end,
+        show_modal = show,
+        close_modal = close,
+        xopp_notice = function() return ExportDialog.xoppNotice() end,
+        toast = function(text) UIManager:show(Notification:new{ text = text }) end,
+        notify = function(text) return host:_showInfo(text) end,
+        schedule = function(fn) UIManager:nextTick(fn) end,
+    }
 end
 
 function NotebookUI:closeLibrary()
@@ -241,6 +324,8 @@ function NotebookUI:openNotebook(item)
         set_shape_options = function(o) return self.plugin:setShapeOptions(o) end,
         get_previous_tool = function() return self.plugin.previous_tool end,
         clipboard_has_content = function() return Clipboard.hasContent() end,
+        can_send = function() return self:findLocalSend() ~= nil end,
+        send_notebook = function(notebook, host) return self:sendNotebooks({ notebook }, host) end,
         get_input_mode = function() return self.plugin.input_mode end,
         set_input_mode = function(value) return self.plugin:setInputMode(value) end,
         get_pen_width = function() return self.plugin.pen_width end,
@@ -360,6 +445,8 @@ end
 function NotebookUI:shutdown()
     if self.closed then return true end
     self.closed = true
+    -- A send being prepared stops; one already handed to LocalSend is its.
+    LocalSend.cancelActive()
     self.editor_generation = self.editor_generation + 1
     local first_error
     if self.editor then

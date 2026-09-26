@@ -78,6 +78,8 @@ return function(ctx)
             partial_blocks_input = overrides.partial_blocks_input,
             show_host_message = overrides.show_host_message,
             show_stylus_diagnostics = overrides.show_stylus_diagnostics,
+            can_send = overrides.can_send,
+            send_notebook = overrides.send_notebook,
             on_close = function() closed = closed + 1 end,
         }
         return editor, controller, snapshot, function() return closed end, session,
@@ -251,6 +253,32 @@ return function(ctx)
         diagnostic.callback()
         t:eq(calls, 1, "shared diagnostics callback invoked once")
         t:eq(uncovered, true, "More closed before the privacy flow begins")
+    end)
+
+    t:case("Send… is in More only while LocalSend is there, and sends this notebook", function()
+        ctx.reset()
+        local present, sent = false, nil
+        local editor = newEditor{
+            can_send = function() return present end,
+            send_notebook = function(notebook, host) sent = { notebook = notebook, host = host } end,
+        }
+        local function row(dialog, text)
+            for i = 1, #dialog.buttons do
+                if dialog.buttons[i][1].text == text then return dialog.buttons[i][1] end
+            end
+        end
+        local more = editor:showMore()
+        t:eq(row(more, "Send…"), nil, "absent without LocalSend, not disabled")
+        t:check(row(more, "Export…") ~= nil and row(more, "Rename") ~= nil, "the rest is unchanged")
+        editor:_closeModal(more)
+        present = true
+        more = editor:showMore()
+        local send = row(more, "Send…")
+        t:check(send ~= nil, "present with LocalSend")
+        send.callback()
+        t:eq(sent.notebook.id, 1, "this notebook")
+        t:eq(sent.host, editor, "asked from the editor")
+        t:eq(editor.modal_widgets[more], nil, "More closed first")
     end)
 
     t:case("Drawing refresh changes the open notebook without replacing its accumulator", function()

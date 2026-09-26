@@ -317,4 +317,22 @@ return function(ctx)
         t:eq(#ctx.env.UIManager._window_stack, shown + 1, "the reader is told why")
         ui:shutdown()
     end)
+
+    t:case("LocalSend is looked up on the current reader every time", function()
+        ctx.reset()
+        local NotebookUI = require("ink_notebook_ui")
+        local first = { showFileSendFlow = function() end }
+        local plugin = { ui = { LocalSend = first },
+            configureNotebookInteraction = function() return true end }
+        local ui = NotebookUI.new{ plugin = plugin, controller = { shutdown = function() return true end } }
+        t:eq(ui:findLocalSend(), first, "on the reader")
+        local second = { showFileSendFlow = function() end }
+        plugin.ui = { LocalSend = second }
+        t:eq(ui:findLocalSend(), second, "a recreated reader's, never a remembered one")
+        plugin.ui = { LocalSend = { recovery_mode = true, showFileSendFlow = function() end } }
+        t:eq(ui:findLocalSend(), nil, "not in recovery mode")
+        plugin.ui = {}
+        t:eq(ui:findLocalSend(), nil, "absent")
+        ui:shutdown()
+    end)
 end

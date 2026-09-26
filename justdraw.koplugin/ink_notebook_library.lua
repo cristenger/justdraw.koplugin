@@ -679,15 +679,24 @@ function Library:_headerAction(id)
         done = { _("Done"), function() return true end,
             function() self:setSelecting(false) end },
     }
-    for id_, extra in pairs(self.extra_actions or {}) do actions[id_] = extra end
+    if self.send_items then
+        -- LocalSend (ADR-60): whole notebooks only, like Export.
+        actions.send = { _("Send"), notebooks, function()
+            local items = self:selectedItems("notebook")
+            self:setSelecting(false)
+            self.send_items(items, self)
+        end }
+    end
     return actions[id]
 end
 
 function Library:_headerRow(width, height)
     local min_w = NotebookLayout.physicalPixels(20) or 120
     local extra = {}
-    for id in pairs(self.extra_actions or {}) do extra[#extra + 1] = id end
-    table.sort(extra)
+    -- Send is there only while LocalSend is, looked up now (ADR-60).
+    if self.selecting and self.send_items and self.can_send and self.can_send() then
+        extra[1] = "send"
+    end
     local ids, more = Library.headerButtons(width, min_w, self.selecting, extra)
     self.header_more = more
     local buttons = {}
@@ -986,6 +995,7 @@ end
 
 function Library:onSuspend()
     self.suspended = true
+    require("ink_localsend").cancelActive()
     if self.thumbnails then self.thumbnails:cancelAll() end
     self:_cancelBulk()
 end
@@ -1600,6 +1610,7 @@ function Library:exportItems(items)
                 return built, err
             end,
             format = format, dir = dir,
+            xopp_notice_shown = true,
             stem = (item.title or "Notebook") .. " " .. os.date("%Y-%m-%d-%H%M%S"),
             -- One message at the end, not one per notebook.
             notify = function(text) logger.info("JustDraw notebooks: export:", text) end,
@@ -1609,9 +1620,14 @@ function Library:exportItems(items)
         if not built_once then settle("failed") end
     end
     local box
+    local question = T(N_("Export %1 notebook as %2 to:\n%3", "Export %1 notebooks as %2 to:\n%3", #items),
+        #items, format == "xopp" and "Xournal++" or tostring(format):upper(), dir)
+    if format == "xopp" then
+        -- Once for the whole batch, not once per notebook.
+        question = question .. "\n\n" .. ExportDialog.xoppNotice()
+    end
     box = ConfirmBox:new{
-        text = T(N_("Export %1 notebook as %2 to:\n%3", "Export %1 notebooks as %2 to:\n%3", #items),
-            #items, tostring(format):upper(), dir),
+        text = question,
         ok_text = _("Export"),
         ok_callback = function()
             self.bulk = bulk
@@ -1730,6 +1746,7 @@ end
 function Library:shutdown()
     if self.closed then return true end
     self:_cancelBulk()
+    require("ink_localsend").cancelActive()
     self.closed = true
     self.shown = false
     self.thumb_action = nil

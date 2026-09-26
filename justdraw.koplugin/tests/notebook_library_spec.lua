@@ -821,6 +821,29 @@ return function(ctx)
         t:check(info.text:find("Notebook 3", 1, true) ~= nil, "the failure is named")
     end)
 
+    t:case("Send appears in selection only while LocalSend is there, for notebooks", function()
+        ctx.reset()
+        local present, sent = false, nil
+        local library = open(galleryController(function() return mixed(1, 2) end), {
+            can_send = function() return present end,
+            send_items = function(items, host) sent = { items = items, host = host } end,
+        })
+        library:setSelecting(true)
+        local function has(id)
+            for _, b in ipairs(library.header_buttons) do if b.action_id == id then return b end end
+            for _, m in ipairs(library.header_more or {}) do if m == id then return true end end
+        end
+        t:eq(has("send"), nil, "no Send without LocalSend")
+        present = true
+        library:_rebuild()
+        t:check(has("send") ~= nil, "Send with LocalSend")
+        for _, card in ipairs(library.cards) do library:activateCard(card) end
+        library:_headerAction("send")[3]()
+        t:eq(#sent.items, 2, "only the notebooks")
+        t:eq(sent.host, library, "asked from the library")
+        t:eq(library.selecting, false, "selection ends")
+    end)
+
     t:case("summaries never call a partial run done", function()
         local text, ok, failed, cancelled = Library.summarize("duplicate", {
             { item = { title = "A" }, status = "ok" },

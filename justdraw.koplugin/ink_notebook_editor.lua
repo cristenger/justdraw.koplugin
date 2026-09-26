@@ -85,6 +85,8 @@ function Editor:init()
     self.set_shape_options = self.set_shape_options or function(o) return o end
     self.get_previous_tool = self.get_previous_tool or function() return "pen" end
     self.clipboard_has_content = self.clipboard_has_content or function() return false end
+    -- LocalSend (ADR-60): looked up when More opens, never remembered.
+    self.can_send = self.can_send or function() return false end
     self.get_input_mode = self.get_input_mode or function() return "auto" end
     self.set_input_mode = self.set_input_mode or function() return true end
     self.get_pen_width = self.get_pen_width or function() return 4 end
@@ -2150,9 +2152,26 @@ end
 function Editor:showMore()
     local dialog
     local writable = self.snapshot.writable and self.snapshot.can_navigate
+    -- Send exists only while LocalSend is installed and usable; the row is
+    -- absent, not disabled, without it.
+    local send_row
+    if self.send_notebook and self.can_send() then
+        send_row = {{ text = _("Send…"), enabled = self.snapshot.state ~= "loading",
+            callback = function()
+                self:_closeModal(dialog)
+                self.send_notebook(self.notebook, self)
+            end }}
+    end
+    local function present(rows)
+        local out = {}
+        for i = 1, table.maxn(rows) do
+            if rows[i] then out[#out + 1] = rows[i] end
+        end
+        return out
+    end
     dialog = ButtonDialog:new{
         title = _("More"),
-        buttons = {
+        buttons = present{
             {{ text = _("Go to page…"), enabled = self.snapshot.can_navigate,
                 callback = function() self:_closeModal(dialog); self:showGoToPage() end }},
             {{ text = _("Add page at end"),
@@ -2166,6 +2185,7 @@ function Editor:showMore()
             end }},
             {{ text = _("Export…"), enabled = self.snapshot.state ~= "loading",
                 callback = function() self:_closeModal(dialog); self:showExport() end }},
+            send_row or false,
             {{ text = _("Rename"), enabled = writable, callback = function()
                 self:_closeModal(dialog); self:showRename()
             end }},

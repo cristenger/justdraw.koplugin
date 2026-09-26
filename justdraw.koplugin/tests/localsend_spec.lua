@@ -287,6 +287,27 @@ return function(ctx)
         t:eq(LocalSend.activeFlow(), nil, "the flow is over")
     end)
 
+    t:case("Xournal++'s limits are asked once for the whole send", function()
+        local w = flowWorld()
+        local asked = 0
+        w.opts.xopp_notice = function() asked = asked + 1; return "limits" end
+        LocalSend.send(w.opts)
+        choose(w, "Xournal++")
+        t:eq(asked, 1, "one question")
+        t:eq(#w.exports, 0, "before any export")
+        w.modals[#w.modals].ok_callback()
+        w.sched:drain()
+        t:eq(#w.exports, 2, "then every notebook, with no further question")
+        t:eq(asked, 1, "still one")
+        local w2 = flowWorld()
+        w2.opts.xopp_notice = function() return "limits" end
+        LocalSend.send(w2.opts)
+        choose(w2, "Xournal++")
+        w2.modals[#w2.modals].cancel_callback()
+        t:eq(LocalSend.activeFlow(), nil, "declining ends the send")
+        t:eq(#w2.exports, 0, "with nothing exported")
+    end)
+
     t:case("one notebook: LocalSend gets the file", function()
         local w = flowWorld{ items = { { id = 1, title = "Solo" } } }
         LocalSend.send(w.opts)

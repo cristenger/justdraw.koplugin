@@ -365,6 +365,8 @@ Export `items` into one staged operation and open LocalSend on the result.
                     or nil when it could not start
   opts.show_modal, opts.close_modal, opts.notify
   opts.schedule     function(fn), a later tick
+  opts.xopp_notice  function() -> what Xournal++ approximates, asked once
+  opts.toast        function(text), a message that covers nothing
 
 One flow at a time. Returns the flow ({ cancel = fn }) or nil and a reason.
 ]]
@@ -415,7 +417,10 @@ function LocalSend.send(opts)
         finish()
         if opened then
             -- LocalSend owns the transfer and its outcome from here.
-            opts.notify(_("LocalSend is open. It shows the transfer and its result."))
+            -- A toast, not a box: LocalSend's picker is on screen now, and
+            -- nothing of ours may cover it.
+            local toast = opts.toast or opts.notify
+            toast(_("LocalSend is open. It shows the transfer and its result."))
         else
             opts.notify(T(_("Couldn’t open LocalSend. The files are kept in:\n%1"), op.dir))
         end
@@ -545,7 +550,17 @@ function LocalSend.send(opts)
             {{ text = _("Xournal++"), callback = function()
                 flow.chosen = true
                 opts.close_modal(dialog)
-                start("xopp")
+                -- What Xournal++ approximates, once for the whole send.
+                local notice = opts.xopp_notice and opts.xopp_notice()
+                if not notice then return start("xopp") end
+                local box
+                box = ConfirmBox:new{
+                    text = notice,
+                    ok_text = _("Send"),
+                    ok_callback = function() start("xopp") end,
+                    cancel_callback = function() flow.cancel() end,
+                }
+                opts.show_modal(box)
             end }},
             {{ text = _("Cancel"), callback = function()
                 opts.close_modal(dialog)

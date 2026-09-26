@@ -463,7 +463,9 @@ function Dialog.run(opts)
     local warning = built.confirm_warning
     -- Xournal++ approximates some ink (Xopp.limitations); the reader hears
     -- which before choosing it over the faithful picture, in the same box.
-    if opts.format == "xopp" then
+    -- A batch (several notebooks, or a send) asks once, up front, and says
+    -- so with `xopp_notice_shown`.
+    if opts.format == "xopp" and not opts.xopp_notice_shown then
         local notice = Dialog.xoppNotice()
         if type(warning) == "string" and warning ~= "" then
             warning = notice .. "\n\n" .. warning
