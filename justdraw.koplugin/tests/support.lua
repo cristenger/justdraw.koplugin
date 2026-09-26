@@ -2367,6 +2367,15 @@ function support.install()
     package.preload["ui/widget/notification"] = function() return Notification end
     package.preload["ui/widget/confirmbox"] = function() return ConfirmBox end
     package.preload["ui/widget/buttondialog"] = function() return ButtonDialog end
+    -- A scrolling text with buttons; the library's long delete confirmation.
+    local TextViewer = {}
+    function TextViewer:new(o)
+        o = o or {}
+        env.dialogs[#env.dialogs + 1] = o
+        o.handleEvent = function() return true end
+        return o
+    end
+    package.preload["ui/widget/textviewer"] = function() return TextViewer end
     package.preload["dispatcher"] = function() return Dispatcher end
 
     -- The real toolbar, not a stub.

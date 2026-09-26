@@ -301,6 +301,20 @@ if lang == "es" then
     paint(library)
 end
 
+-- A long delete confirmation: every title, in a list that scrolls, with its
+-- buttons on the screen however many items there are.
+do
+    local many = {}
+    for i = 1, 40 do many[i] = { kind = "notebook", id = 1000 + i, title = "Cuaderno " .. i, page_count = 1 } end
+    local box = library:confirmDeleteItems(many)
+    check(box and box.buttons_table ~= nil, "forty items get a scrolling list")
+    box:paintTo(bb, 0, 0)
+    local frame = box.dimen or (box[1] and box[1].dimen)
+    check(frame and frame.y >= 0 and frame.y + frame.h <= H, "and it fits the screen")
+    library:_closeModal(box)
+    paint(library)
+end
+
 -- ------------------------------------------------------------ thumbnails
 
 drain()

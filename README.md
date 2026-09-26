@@ -234,7 +234,9 @@ there is no Send button.
 
 Files prepared for sending are kept under KOReader's cache in
 `justdraw-send`, and removed only after a day, by a later session, and only the
-ones JustDraw itself wrote.
+ones JustDraw itself wrote. If that folder fills up, JustDraw asks before
+deleting the sends of earlier sessions to make room — never one from the
+current session.
 
 ## Language
 

@@ -791,6 +791,25 @@ return function(ctx)
         t:eq(library.selecting, false, "and selection mode ends")
     end)
 
+    t:case("a long choice is confirmed in a list that scrolls, still naming every item", function()
+        ctx.reset()
+        local deleted = 0
+        local controller = galleryController(function() return mixed(0, 9) end)
+        function controller:deleteNotebook() deleted = deleted + 1; return true end
+        local items = {}
+        for i = 1, 9 do items[i] = { kind = "notebook", id = i, title = "Notebook " .. i, page_count = 1 } end
+        local library = open(controller)
+        local box = library:confirmDeleteItems(items)
+        t:check(box.buttons_table ~= nil, "a scrolling viewer with its own buttons")
+        for i = 1, 9 do
+            t:check(box.text:find("• Notebook " .. i, 1, true) ~= nil, "notebook " .. i .. " named")
+        end
+        box.buttons_table[1][2].callback()
+        ctx.env.UIManager:flush()
+        t:eq(deleted, 9, "Delete deletes all nine")
+        t:eq(library.modal_widgets[box], nil, "and closes the list")
+    end)
+
     t:case("a single folder delete explains its notebooks survive", function()
         ctx.reset()
         local library = open(galleryController(function() return mixed(1, 0) end))

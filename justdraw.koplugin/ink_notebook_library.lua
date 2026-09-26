@@ -1700,48 +1700,64 @@ function Library:confirmDeleteItems(items)
         text = table.concat(lines, "\n")
     end
     local box
-    box = ConfirmBox:new{
-        text = text,
-        ok_text = _("Delete"),
-        keep_dialog_open = true,
-        -- No cancel_callback: ConfirmBox closes itself on Cancel and on
-        -- onClose, and the chained onCloseWidget does the bookkeeping.
-        -- Closing it here as well made a second close of a widget already
-        -- off the window stack, which refreshes with nothing repainting
-        -- behind it (ADR-28).
-        ok_callback = function()
-            local results = {}
-            for _, item in ipairs(items) do
-                local ok, err
-                if itemKind(item) == "folder" then
-                    ok, err = self.controller:deleteFolder(item.id)
-                else
-                    ok, err = self.controller:deleteNotebook(item.id)
-                end
-                if not ok then logger.warn("JustDraw notebooks: delete failed:", itemKey(item), err) end
-                results[#results + 1] = { item = item, status = ok and "ok" or "failed" }
+    local function delete()
+        local results = {}
+        for _, item in ipairs(items) do
+            local ok, err
+            if itemKind(item) == "folder" then
+                ok, err = self.controller:deleteFolder(item.id)
+            else
+                ok, err = self.controller:deleteNotebook(item.id)
             end
-            self:_closeModal(box)
-            if self.folder then
-                for _, r in ipairs(results) do
-                    if r.status == "ok" and itemKind(r.item) == "folder"
-                        and r.item.id == self.folder.id then
-                        self.folder = nil
-                    end
+            if not ok then logger.warn("JustDraw notebooks: delete failed:", itemKey(item), err) end
+            results[#results + 1] = { item = item, status = ok and "ok" or "failed" }
+        end
+        self:_closeModal(box)
+        if self.folder then
+            for _, r in ipairs(results) do
+                if r.status == "ok" and itemKind(r.item) == "folder"
+                    and r.item.id == self.folder.id then
+                    self.folder = nil
                 end
             end
-            if #items == 1 then
-                self:clearSelection()
-                if results[1].status ~= "ok" then
-                    self:_showInfo(folders == 1 and _("Couldn’t delete this folder. Try again.")
-                        or _("Couldn’t delete this notebook. Try again."))
-                end
-                self:reload()
-                return
+        end
+        if #items == 1 then
+            self:clearSelection()
+            if results[1].status ~= "ok" then
+                self:_showInfo(folders == 1 and _("Couldn’t delete this folder. Try again.")
+                    or _("Couldn’t delete this notebook. Try again."))
             end
-            self:_finishBulk("delete", results)
-        end,
-    }
+            self:reload()
+            return
+        end
+        self:_finishBulk("delete", results)
+    end
+    if #items > Library.CONFIRM_LIST_MAX then
+        -- Every chosen item is named, so a long choice needs a list that
+        -- scrolls: a ConfirmBox only shrinks its font, and past a point its
+        -- buttons leave the screen.
+        local TextViewer = require("ui/widget/textviewer")
+        box = TextViewer:new{
+            title = _("Delete"),
+            text = text,
+            buttons_table = {{
+                { text = _("Cancel"), callback = function() self:_closeModal(box) end },
+                { text = _("Delete"), callback = delete },
+            }},
+        }
+    else
+        box = ConfirmBox:new{
+            text = text,
+            ok_text = _("Delete"),
+            keep_dialog_open = true,
+            -- No cancel_callback: ConfirmBox closes itself on Cancel and on
+            -- onClose, and the chained onCloseWidget does the bookkeeping.
+            -- Closing it here as well made a second close of a widget already
+            -- off the window stack, which refreshes with nothing repainting
+            -- behind it (ADR-28).
+            ok_callback = delete,
+        }
+    end
     self:_showModal(box)
     return box
 end
@@ -1795,6 +1811,8 @@ Library.validTitle = validTitle
 Library.itemKey = itemKey
 Library.shortTitle = shortTitle
 Library.SORTS = SORTS
+--- Past this many items the delete confirmation is a scrolling list.
+Library.CONFIRM_LIST_MAX = 6
 Library.SORT_KEYS = { recent = true, oldest = true, title_asc = true, title_desc = true }
 
 return Library
