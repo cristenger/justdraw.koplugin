@@ -177,6 +177,11 @@ function Thumbs:want(req, callback)
     return nil, "pending", key
 end
 
+--- Whether the file for `key` is there now (an LRU may have removed it).
+function Thumbs:has(key)
+    return type(key) == "string" and self.fs.exists(self:pathFor(key)) or false
+end
+
 --- Forget a failure so the next `want` tries again (the card's Retry).
 function Thumbs:retry(req)
     local key = Thumbs.key(req)
@@ -195,6 +200,14 @@ function Thumbs:retain(keys)
         if keys[item.key] then kept[#kept + 1] = item else self.queued[item.key] = nil end
     end
     self.queue = kept
+    -- A request waiting out its retry delay is queued too, in spirit: if its
+    -- card went away, the retry is dropped rather than rendered for nobody.
+    for key, item in pairs(self.queued) do
+        if not keys[key] and item ~= self.active then
+            if item.retry_action then self.unschedule(item.retry_action) end
+            self.queued[key] = nil
+        end
+    end
     if self.active and not keys[self.active.key] then self:_cancelActive() end
 end
 

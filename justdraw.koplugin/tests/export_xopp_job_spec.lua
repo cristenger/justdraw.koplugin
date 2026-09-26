@@ -766,6 +766,15 @@ return function(ctx)
         failedWith(r, "notebook_changed", "erased mid-read")
     end)
 
+    t:case("a new content revision is a change even when the stroke counts match", function()
+        -- Erase the newest stroke, purge it, draw another: count, max seq and
+        -- max id can come back the same. The page's revision cannot.
+        local r = run{ spec = notebook(2, 1, 3) }
+        reach(r, "compress")
+        r.repo.rows[1].revision = (r.repo.rows[1].revision or 1) + 1
+        failedWith(r, "notebook_changed", "revision")
+    end)
+
     t:case("new paper, a new page, or a removed page are all changes", function()
         local paper = run{ spec = notebook(2, 1, 3) }
         reach(paper, "compress")

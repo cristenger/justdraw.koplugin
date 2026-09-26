@@ -130,8 +130,9 @@ Where every card goes, from the grid's box and the device's real density.
   o.landscape         four columns rather than three
   o.aspect            picture height / width
 
-Three columns in portrait, four in landscape, two when those would make a
-card narrower than `min_card`, and one only on a screen too small for two.
+Three columns in portrait, four in landscape, and one fewer at a time while
+a card would be narrower than `min_card` (in practice two on a 6" screen),
+down to one only on a screen too small for two.
 At least one row, even if the picture has to shrink to fit it; two when two
 rows of cards at least `min_card` tall fit. Pure: the
 native test calls it with a Scribe's numbers and a Kindle's.
@@ -140,8 +141,8 @@ function Library.gridMetrics(o)
     local gap, pad = o.gap, o.pad
     local cols = o.landscape and 4 or 3
     local function cell(c) return math.floor((o.width - gap * (c + 1)) / c) end
-    if cell(cols) < o.min_card then cols = 2 end
-    if cell(cols) < o.min_card then cols = 1 end
+    -- Fewer columns, one at a time, until a card is `min_card` wide.
+    while cols > 1 and cell(cols) < o.min_card do cols = cols - 1 end
     local card_w = math.max(1, cell(cols))
     local thumb_w = math.max(1, card_w - 2 * pad)
     local natural_h = math.floor(thumb_w * (o.aspect or 4 / 3)) + o.text_h + 2 * pad
@@ -756,7 +757,16 @@ function Library:_cardFor(item, rel, m)
         failed_text = _("No preview"),
     }
     card.key = itemKey(item)
-    local known = self.card_images[card.key]
+    -- A picture remembered from an earlier screen, shown at once -- but only
+    -- while its file is still there (the LRU may have taken it), and keyed by
+    -- the notebook's identity, not its row id, which can be reused.
+    card.image_key = item.uid and ("uid:" .. item.uid) or card.key
+    local known = self.card_images[card.image_key]
+    if known and self.thumbnails and self.thumbnails.has
+        and not self.thumbnails:has(known.key) and known.path then
+        self.card_images[card.image_key] = nil
+        known = nil
+    end
     if known then
         card.thumb_key = known.key
         card:setImage(known.path, known.state)
@@ -965,7 +975,7 @@ function Library:_requestThumbnails()
 end
 
 function Library:_setCardImage(card, key, path, state)
-    self.card_images[card.key] = { key = key, path = path, state = state }
+    self.card_images[card.image_key or card.key] = { key = key, path = path, state = state }
     if card:setImage(path, state) then self:_repaintCard(card) end
 end
 
@@ -987,7 +997,7 @@ end
 function Library:retryThumbnail(card)
     if not self.thumbnails or not card or not card.thumb_req then return end
     self.thumbnails:retry(card.thumb_req)
-    self.card_images[card.key] = nil
+    self.card_images[card.image_key or card.key] = nil
     card:setImage(nil, "pending")
     self:_repaintCard(card)
     self:_scheduleThumbnails()

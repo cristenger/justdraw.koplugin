@@ -407,10 +407,14 @@ local function sameRevision(a, b)
 end
 
 --- The page row fields that change what is exported, compared by value.
+--- `revision` is the page's transactional content revision (schema v3,
+--- ADR-58): bumped in the same transaction as every committed edit, so it
+--- catches what a stroke count and a one-second `updated_at` can miss --
+--- an erase, a purge and a new stroke landing on the same numbers.
 local function samePage(a, b)
     return a and b and a.id == b.id and a.logical_w == b.logical_w
         and a.logical_h == b.logical_h and a.template_kind == b.template_kind
-        and a.updated_at == b.updated_at
+        and a.updated_at == b.updated_at and a.revision == b.revision
 end
 
 --- A read that answered nothing: gone is a change, anything else a failure.

@@ -594,6 +594,10 @@ return function(ctx)
         t:eq(kindle.rows, 2, "and two rows of cards still 30 mm tall")
         t:check(kindle.card_h >= 354, "tall enough to hit")
         t:check(noOverlap(kindle, ko))
+        -- On its side but narrow: three still fit, so three, not two.
+        local mid = metrics{ width = 1300, height = 900, min_card = 354, gap = 24, pad = 18,
+            text_h = 98, landscape = true }
+        t:eq(mid.cols, 3, "one fewer at a time: four do not fit, three do")
         local tiny = metrics{ width = 300, height = 200, min_card = 354 }
         t:eq(tiny.cols, 1, "one column only when two cannot fit")
         t:eq(tiny.rows, 1, "at least one row")
