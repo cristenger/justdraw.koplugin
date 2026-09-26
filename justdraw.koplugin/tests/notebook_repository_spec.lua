@@ -279,4 +279,87 @@ return function(ctx)
         t:check(err ~= nil, "the SQLite error is propagated")
         t:check(driver.last():saw("ROLLBACK"), "partial maintenance is rolled back")
     end)
+
+    t:describe("ink_notebook_repository / v3 gallery schema (ADR-58)")
+
+    t:case("a v2 library migrates in one transaction, after a backup, and a failing DDL rolls back", function()
+        local backups = {}
+        for _, failing in ipairs({ false, "CREATE TABLE library_meta", "ALTER TABLE notebooks ADD COLUMN uid",
+                "ALTER TABLE notebook_pages ADD COLUMN revision", "CREATE INDEX notebooks_all_title" }) do
+            local driver = support.newSqlDriver{
+                fail_on = failing or nil,
+                on_open = function(conn)
+                    conn:answer("PRAGMA user_version", { { 2 } })
+                end,
+            }
+            local repo, err = Repository.open{ path = PATH, driver = driver,
+                backup = function(from, to) backups[#backups + 1] = to; return true end }
+            local conn = driver.last()
+            if not failing then
+                t:check(repo ~= nil, "migrated")
+                t:check(conn:saw("PRAGMA user_version=3"), "stamped v3")
+                t:check(conn:indexOf("BEGIN") < conn:indexOf("CREATE TABLE library_meta"), "inside the transaction")
+                t:check(conn:indexOf("CREATE TABLE library_meta") < conn:indexOf("COMMIT"), "committed after")
+                t:check(conn:saw("PRAGMA foreign_key_check"), "foreign keys checked before committing")
+            else
+                t:eq(repo, nil, failing .. ": refused")
+                t:eq(err, "migration_failed", failing .. ": as a failed migration")
+                t:check(conn:saw("ROLLBACK"), failing .. ": rolled back")
+                t:eq(conn:saw("PRAGMA user_version=3"), false, failing .. ": not stamped")
+            end
+        end
+        t:check(#backups >= 1 and backups[1]:find("backup%-v2") ~= nil, "a backup named for v2 first")
+    end)
+
+    t:case("a new library is created as the migrated one: base schema then the same migration", function()
+        local driver = support.newSqlDriver{ on_open = function(conn)
+            conn:answer("PRAGMA user_version", { { 0 } })
+        end }
+        local repo = Repository.open{ path = PATH, driver = driver }
+        t:check(repo ~= nil, "created")
+        local conn = driver.last()
+        t:check(conn:indexOf("CREATE TABLE notebooks") < conn:indexOf("CREATE TABLE library_meta"),
+            "v3 is replayed on the v2 base")
+        t:check(conn:saw("PRAGMA user_version=3"), "stamped v3")
+    end)
+
+    t:case("gallery pages validate scope, sort and cursors before any SQL", function()
+        local repo, driver = openRepo()
+        local conn = driver.last()
+        local before = #conn.log
+        local cases = {
+            { { scope = "shelf" }, "bad_scope" },
+            { { sort = "size" }, "bad_sort" },
+            { { scope = "folder" }, "bad_id" },
+            { { cursor = "x" }, "bad_cursor" },
+            { { cursor = { v = 2, scope = "all", sort = "recent", key = 1, id = 1 } }, "bad_cursor" },
+            { { cursor = { v = 1, scope = "root", sort = "recent", key = 1, id = 1 } }, "bad_cursor" },
+            { { sort = "title_asc", cursor = { v = 1, scope = "all", sort = "title_asc", key = 5, id = 1 } }, "bad_cursor" },
+            { { cursor = { v = 1, scope = "all", sort = "recent", key = 0 / 0, id = 1 } }, "bad_cursor" },
+        }
+        for _, c in ipairs(cases) do
+            local rows, err = repo:listNotebookPage(c[1])
+            t:eq(rows, nil, c[2] .. " refused")
+            t:eq(err, c[2], "named " .. c[2])
+        end
+        t:eq(#conn.log, before, "none of them reached SQL")
+        repo:listNotebookPage{ sort = "title_desc", scope = "root",
+            cursor = { v = 1, scope = "root", sort = "title_desc", key = "O'Brien; DROP", id = 3 } }
+        local sql = conn:statement("ORDER BY title COLLATE NOCASE DESC")
+        t:check(sql ~= nil and not sql:find("O'Brien", 1, true), "a title cursor is bound, never interpolated")
+        t:check(sql:find("folder_id IS NULL", 1, true) ~= nil, "root means no folder")
+        t:check(sql:find("copy_state IS NULL", 1, true) ~= nil, "copies in progress are never listed")
+    end)
+
+    t:case("the legacy list keeps rows, err and hides copies in progress", function()
+        local repo, driver = openRepo{ answers = function(conn)
+            conn:answer("FROM notebooks", { { 1, "A", 1, 2048, 1, 1, nil, nil, nil, "abc", nil } })
+        end }
+        local rows, err = repo:listNotebooks{}
+        t:eq(err, nil, "no error")
+        t:eq(#rows, 1, "rows")
+        t:eq(rows[1].uid, "abc", "with the new identity")
+        t:check(driver.last():statement("ORDER BY updated_at DESC"):find("copy_state IS NULL", 1, true) ~= nil,
+            "copies in progress are not listed")
+    end)
 end

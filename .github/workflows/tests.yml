@@ -82,6 +82,23 @@ jobs:
             | tee "$RUNNER_TEMP/buttons.txt" | grep -E '^(OK|FAIL|SKIP|SUMMARY|BUTTONS)|^       '
           grep -q '^BUTTONS_NATIVE_OK' "$RUNNER_TEMP/buttons.txt"
 
+      # The floating layer against the real blitter, and the notebook
+      # repository's v3 schema against the real SQLite (ADR-53..58). The query
+      # plans are read with Python's sqlite3: KOReader's binding returns no rows
+      # for EXPLAIN QUERY PLAN.
+      - name: Floating layer and notebook repository
+        run: |
+          set -o pipefail
+          cd "$RUNNER_TEMP/ko/lib/koreader"
+          TMPDIR="$RUNNER_TEMP" ./luajit "$GITHUB_WORKSPACE/justdraw.koplugin/tests/float_layer_native.lua" "$RUNNER_TEMP" \
+            | tee "$RUNNER_TEMP/float.txt"
+          grep -q '^FLOAT_LAYER_NATIVE_OK' "$RUNNER_TEMP/float.txt"
+          JUSTDRAW_KEEP_DB=1 TMPDIR="$RUNNER_TEMP" ./luajit "$GITHUB_WORKSPACE/justdraw.koplugin/tests/notebook_repository_native.lua" \
+            | tee "$RUNNER_TEMP/repo.txt"
+          grep -q '^NOTEBOOK_REPOSITORY_NATIVE_OK' "$RUNNER_TEMP/repo.txt"
+          python3 "$GITHUB_WORKSPACE/justdraw.koplugin/tests/notebook_query_plans.py" \
+            "$(sed -n 's/^DB //p' "$RUNNER_TEMP/repo.txt")"
+
       - name: Toolbar geometry
         run: |
           set -o pipefail
