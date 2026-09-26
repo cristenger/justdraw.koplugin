@@ -213,7 +213,53 @@ function Cache.new(opts)
         --- Bumped by every rebuild and by close, so a batch in flight from an
         --- earlier geometry does nothing.
         generation = 0,
+        --- Strokes lifted off the page while a selection is dragged, by meta
+        --- token (ADR-55). Their metadata, index entries and pending ids stay
+        --- exactly where they are -- only painting skips them -- so a COMMIT
+        --- can still re-key them and a rebuild still knows them.
+        hidden = {},
+        hidden_count = 0,
     }, Cache)
+end
+
+--[[--
+Lift strokes off the painted page, or put them back (`hidden` false). Returns
+the stroke-shaped canvas box that must be repaired for the change to show,
+or nil when nothing changed. The caller repairs: a mask flip changes no
+stored state, only what `_paintStroke` paints.
+]]
+function Cache:setHidden(metas, hidden)
+    local box
+    for i = 1, #metas do
+        local m = metas[i]
+        if m.token and self.by_id[m.id] == m and (self.hidden[m.token] == true) ~= hidden then
+            self.hidden[m.token] = hidden or nil
+            self.hidden_count = self.hidden_count + (hidden and 1 or -1)
+            local w = tonumber(m.width) or 0
+            if not box then
+                box = { min_x = m.min_x, min_y = m.min_y, max_x = m.max_x,
+                    max_y = m.max_y, width = w }
+            else
+                if m.min_x < box.min_x then box.min_x = m.min_x end
+                if m.min_y < box.min_y then box.min_y = m.min_y end
+                if m.max_x > box.max_x then box.max_x = m.max_x end
+                if m.max_y > box.max_y then box.max_y = m.max_y end
+                if w > box.width then box.width = w end
+            end
+        end
+    end
+    return box
+end
+
+--- Put every lifted stroke back, without repainting. For teardown and for
+--- a reload that is about to replace every meta anyway.
+function Cache:clearHidden()
+    self.hidden = {}
+    self.hidden_count = 0
+end
+
+function Cache:isHidden(m)
+    return self.hidden_count > 0 and m ~= nil and self.hidden[m.token] == true
 end
 
 --- Read the canvas's stroke metadata -- no points -- and start rasterising.
@@ -226,6 +272,7 @@ function Cache:open()
     end
     self.meta = list
     self.by_id = {}
+    self:clearHidden()
     local last_seq
     for i = 1, #list do
         local valid, validation_err = validMetadata(list[i])
@@ -1125,6 +1172,7 @@ function Cache:_indexLiveChunks(m, points, n)
 end
 
 function Cache:_paintStroke(m, points, n, target, ox, oy)
+    if self.hidden_count > 0 and self.hidden[m.token] then return false end
     local tr = self.transform
     -- Every persisted-stroke paint funnels through here -- build replay,
     -- repair, fragment repaint -- so this is where gray content is noticed.

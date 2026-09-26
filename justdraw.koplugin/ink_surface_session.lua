@@ -224,9 +224,34 @@ function SurfaceSession:open()
     return ok, err
 end
 
+--[[--
+Hear about a rebuild before it happens: a rotation, a new paper, a reload.
+The selection has to put lifted strokes back while the old raster still
+exists (§D.6.6) -- after `_build` there is nothing left to repair. Returns a
+function that stops listening.
+]]
+function SurfaceSession:onBeforeRebuild(fn)
+    self.rebuild_listeners = self.rebuild_listeners or {}
+    local list = self.rebuild_listeners
+    list[#list + 1] = fn
+    return function()
+        for i = #list, 1, -1 do if list[i] == fn then table.remove(list, i) end end
+    end
+end
+
+function SurfaceSession:_beforeRebuild(reason)
+    local list = self.rebuild_listeners
+    if not list then return end
+    for i = #list, 1, -1 do
+        local ok, err = pcall(list[i], reason, self)
+        if not ok then logger.err("JustDraw: rebuild listener failed:", err) end
+    end
+end
+
 function SurfaceSession:setTransform(transform)
     if not transform or self.closed then return nil, "closed" end
     local rebuild = self.cache_obj and self.cache_obj:needsRebuild(transform)
+    if rebuild then self:_beforeRebuild("transform") end
     if rebuild and self.on_will_rebuild then self.on_will_rebuild(self) end
     self.transform_obj = transform
     if not self.cache_obj then return true end
@@ -247,6 +272,7 @@ function SurfaceSession:setPaper(kind)
     if self.closed then return nil, "closed" end
     if not self.cache_obj then return true end
     if not self.cache_obj:needsPaperRebuild(kind) then return true end
+    self:_beforeRebuild("paper")
     if self.on_will_rebuild then self.on_will_rebuild(self) end
     local ok, err = self.cache_obj:setPaper(kind)
     notifyState(self)
@@ -640,6 +666,34 @@ function SurfaceSession:detachHistory()
     self.history = nil
     self.by_key = {}
     return history
+end
+
+--[[--
+Lift the strokes carrying `keys` off the painted page, or put them back
+(ADR-55). Metadata, index entries and pending ids are untouched, so the queue
+can still commit and re-key them while they are lifted. Returns the dirty
+cache box, true when nothing changed, or nil and a reason.
+]]
+function SurfaceSession:setStrokesHidden(keys, hidden)
+    if not self.cache_obj or not self.cache_obj:isReady() then return nil, "not_ready" end
+    local metas = {}
+    for i = 1, #keys do
+        local m = self:metaByKey(keys[i])
+        if m then metas[#metas + 1] = m end
+    end
+    local box = self.cache_obj:setHidden(metas, hidden and true or false)
+    if not box then return true end
+    local painted, err = self.cache_obj:repair(box)
+    if not painted then return nil, err end
+    return painted
+end
+
+function SurfaceSession:hideStrokes(keys)
+    return self:setStrokesHidden(keys, true)
+end
+
+function SurfaceSession:showStrokes(keys)
+    return self:setStrokesHidden(keys, false)
 end
 
 --- Take a history back after a detach whose close then failed. The metas
@@ -1164,6 +1218,7 @@ end
 
 function SurfaceSession:retryLoad()
     if not self.cache_obj then return nil, "closed" end
+    self:_beforeRebuild("reload")
     if self.queue and self.queue:pendingCount() > 0 then
         local saved, save_err = self.queue:flush()
         if not saved then notifyState(self); return nil, save_err end
