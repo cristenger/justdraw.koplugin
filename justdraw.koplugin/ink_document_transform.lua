@@ -55,6 +55,18 @@ local function finite(v)
         and v ~= math.huge and v ~= -math.huge
 end
 
+--- Classify only the KOPT setting that moves content inside the native page.
+--- KOReader normally stores a number, but settings imported from older builds
+--- may carry false or a stringified zero. Those all mean disabled; anything
+--- else unfamiliar fails closed instead of guessing at page geometry.
+local function straighteningReason(value)
+    if value == nil or value == false then return nil end
+    local number = tonumber(value)
+    if not finite(number) or number < 0 then return "unsupported_optimizing" end
+    if number > 0 then return "unsupported_straightening" end
+    return nil
+end
+
 --- The pixel budget for one page raster on this screen. A screen that cannot
 --- say how big it is has no budget at all rather than an infinite one.
 function DocumentTransform.maxCachePixels(screen_w, screen_h)
@@ -127,7 +139,8 @@ end
 
 Returns an `ink_canvas_transform` for this page at this zoom and pan, or nil
 plus one of `no_view`, `unsupported_document`, `unsupported_mode`,
-`unsupported_rotation`, `unsupported_reflow`, `unsupported_optimizing`,
+`unsupported_rotation`, `unsupported_reflow`, `unsupported_straightening`,
+`unsupported_optimizing`,
 `bad_geometry`, `zoom_too_large` -- checked in that order, so the reason a
 reader is shown is the first thing wrong rather than the last.
 
@@ -185,12 +198,17 @@ function DocumentTransform.fromView(ui, view, surface, opts)
         return nil, "unsupported_reflow"
     end
     local kopt = document.koptinterface
-    if type(kopt) == "table" and type(kopt.is_optimizing_page) == "function" then
-        -- `is_optimizing_page` reads three `configurable` fields and raises
-        -- for a document that has none. Not being able to tell is not the
-        -- same as a plain page, so it refuses the same way a yes does.
-        local answered, optimizing = pcall(kopt.is_optimizing_page, kopt, document)
-        if not answered or optimizing then return nil, "unsupported_optimizing" end
+    if type(kopt) == "table" then
+        -- KOPT's old `is_optimizing_page` groups pixel filters with geometric
+        -- changes. Dewatermark (`page_opt`) and white threshold keep every
+        -- native point in place and are safe for page ink; Auto Straighten
+        -- rotates the content inside that frame and is not. Classify the one
+        -- geometric setting explicitly instead of rejecting all three.
+        if type(configurable) ~= "table" then
+            return nil, "unsupported_optimizing"
+        end
+        local reason = straighteningReason(configurable.auto_straighten)
+        if reason then return nil, reason end
     end
 
     local logical_w = type(surface) == "table" and tonumber(surface.logical_w) or nil

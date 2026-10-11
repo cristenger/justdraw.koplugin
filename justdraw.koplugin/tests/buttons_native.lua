@@ -840,6 +840,73 @@ else
         if plugin.bar then
             local function bar() return plugin.bar end
 
+            case("PDF fallback: prompt closes, consent is remembered, direct ink still wins", function()
+                local document = reader.document
+                document.configurable.text_wrap = 1
+                plugin:refreshDocumentView()
+                expect(plugin.document_session:viewReason() == "unsupported_reflow",
+                    "Reflow did not refuse direct annotations")
+
+                local before = stack()[1]
+                tap(bar().draw_btn)
+                local prompt = opened(before, "drawing-page prompt")
+                expect(prompt.text == "Direct annotations not available",
+                    "fallback prompt reads %q", tostring(prompt.text))
+                expect(findButton(prompt, "Open drawing page"), "no concise accept button")
+                press("Open drawing page", prompt)
+                expect(not onStack(prompt),
+                    "the confirmation stayed above the drawing page (stack: %s)", describeStack())
+                expect(plugin.canvas_open, "accepting did not open the drawing page")
+                expect(plugin.page_sheet_fallback_accepted,
+                    "a successfully opened drawing page was not remembered")
+                tap(plugin.session:overlay().bar.draw_btn)
+                tap(plugin.session:overlay().bar.hide_btn)
+                expect(not plugin.canvas_open, "the first drawing page did not close")
+
+                before = stack()[1]
+                tap(bar().draw_btn)
+                expect(plugin.canvas_open, "remembered fallback did not reopen the drawing page")
+                expect(stack()[1] ~= prompt and not onStack(prompt),
+                    "remembered fallback displayed the old confirmation")
+                expect(wait(2, function()
+                    local cache = plugin.session:cache()
+                    return cache and cache:isReady()
+                end), "the remembered drawing page did not finish loading")
+                plugin:setDrawing(false)
+                local closed, close_err = plugin:closeCanvas()
+                expect(closed, "the remembered drawing page could not close: %s",
+                    tostring(close_err))
+                document.configurable.text_wrap = 0
+                plugin:refreshDocumentView()
+                tick(3)
+                expect(not plugin.canvas_open, "the remembered drawing page did not close")
+                tap(bar().draw_btn)
+                expect(plugin.drawing and not plugin.canvas_open,
+                    "compatible geometry did not return to direct annotations")
+                tap(bar().draw_btn)
+
+                document.configurable.text_wrap = 1
+                plugin:refreshDocumentView()
+                before = stack()[1]
+                tap(bar().more_btn)
+                local more = opened(before, "More")
+                press("Reset options for this document", more)
+                dropToasts()
+                expect(not plugin.page_sheet_fallback_accepted,
+                    "reset kept the document acknowledgement")
+                before = stack()[1]
+                tap(bar().draw_btn)
+                prompt = opened(before, "drawing-page prompt after reset")
+                press("Cancel", prompt)
+                expect(not plugin.canvas_open and not plugin.drawing,
+                    "Cancel opened a drawing surface")
+
+                document.configurable.text_wrap = 0
+                plugin:refreshDocumentView()
+                baseline = stack()
+                settled("drawing-page fallback")
+            end)
+
             case("PDF toolbar: Draw turns drawing on and the button says so", function()
                 tap(bar().draw_btn)
                 expect(plugin.drawing, "Draw did not turn drawing on")

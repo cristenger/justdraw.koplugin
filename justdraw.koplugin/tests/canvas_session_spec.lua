@@ -63,7 +63,9 @@ return function(ctx)
             identity = opts.identity == false and {} or IDENTITY,
             file = "/mnt/us/documents/book.epub",
             dom_version = 20240114,
+            anchor_mode = opts.anchor_mode,
             repository = repository,
+            borrow_repository = opts.borrow_repository,
             plugin = { drawing = false, eraser = false, pen_width = 4,
                        effectiveStyle = function() return 1 end,
                        setDrawing = function() end, setEraser = function() end,
@@ -89,6 +91,14 @@ return function(ctx)
             anchor_dom_version = 20240114,
             logical_w = Screen.w,
             logical_h = Screen.h,
+        }
+    end
+
+    local function pageSheet(id, page)
+        return {
+            id = id, anchor_kind = "page", anchor_key = "page-sheet:" .. id,
+            fixed_page = page, surface_role = "sheet", coordinate_space = "surface",
+            logical_w = Screen.w, logical_h = Screen.h,
         }
     end
 
@@ -159,6 +169,42 @@ return function(ctx)
         session:open()
         t:eq(#session:canvasesHere(1), 0, "none here")
         t:eq(store.calls.stroke_list, 0, "and no canvas was opened behind our back")
+    end)
+
+    t:case("a fixed-page index lists only PDF sheets in page order", function()
+        local ink = pageSheet(8, 1); ink.surface_role = "page_ink"
+        ink.coordinate_space = "native_page"
+        local session, _, sched = fixture{ anchor_mode = "page", canvases = {
+            canvasAt(1, "/p1"), pageSheet(5, 4), pageSheet(3, 2), ink,
+        } }
+        t:eq(session:open(), true, "opened")
+        sched:drain()
+        t:eq(session.index:count(), 2, "EPUB sheets and direct ink are excluded")
+        t:eq(session.index:pageOf(3), 2, "the first fixed sheet is indexed")
+        t:eq(session.index:pageOf(5), 4, "and the next page is indexed")
+        local rows = session:allCanvases()
+        t:eq(rows[1].id, 3, "listing is ordered by page")
+        t:eq(rows[2].id, 5, "then by the following page")
+    end)
+
+    t:case("a fixed-page sheet becomes read-only away from its page", function()
+        local session, _, sched = fixture{ anchor_mode = "page",
+            canvases = { pageSheet(3, 2) } }
+        session:open(); sched:drain(); session:setPage(2)
+        session:openCanvas(session:canvasById(3)); sched:drain()
+        t:eq(session:openCanvasPlacement(), "here", "editable on its own page")
+        session:setPage(5)
+        local placement, page = session:openCanvasPlacement()
+        t:eq(placement, "away", "not editable while reading elsewhere")
+        t:eq(page, 2, "the return destination is retained")
+        t:eq(session:openCanvasDestination().page, 2, "navigation uses the fixed page")
+    end)
+
+    t:case("a borrowed page-ink repository outlives the sheet session", function()
+        local session, store, sched = fixture{ anchor_mode = "page",
+            borrow_repository = true }
+        session:open(); sched:drain(); session:close()
+        t:eq(store.closed, false, "the direct-ink owner still owns the connection")
     end)
 
     t:case("a canvas listing failure is unavailable, not an empty book", function()

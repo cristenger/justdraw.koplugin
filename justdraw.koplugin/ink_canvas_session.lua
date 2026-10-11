@@ -29,6 +29,7 @@ local _ = require("gettext")
 local Anchor = require("ink_anchor")
 local BookDatabase = require("ink_book_database")
 local Index = require("ink_anchor_index")
+local PageIndex = require("ink_page_index")
 local Overlay = require("ink_canvas_overlay")
 local SurfaceSession = require("ink_surface_session")
 
@@ -68,7 +69,9 @@ function Session.new(opts)
         identity = opts.identity or {},
         file = opts.file,
         dom_version = opts.dom_version,
+        anchor_mode = opts.anchor_mode == "page" and "page" or "xpointer",
         repository = opts.repository,
+        borrow_repository = opts.borrow_repository == true,
         plugin = opts.plugin,
         ui = opts.ui,
         schedule = opts.schedule,
@@ -119,7 +122,8 @@ function Session:open()
     local book_id = handle.book_id
     local empty_read_only = handle.empty_read_only
     self.book_id = book_id
-    self.index = Index.new{
+    local IndexClass = self.anchor_mode == "page" and PageIndex or Index
+    self.index = IndexClass.new{
         repository = self.repository,
         document = self.document,
         book_id = book_id,
@@ -174,6 +178,9 @@ function Session:_indexFailed(reason)
     self:_placeOpenCanvas()
     if self.plugin and self.plugin.refreshCanvasPlacement then
         self.plugin:refreshCanvasPlacement()
+    end
+    if self.plugin and self.plugin.onCanvasIndexFailed then
+        self.plugin:onCanvasIndexFailed(reason)
     end
     self:_closeOwnedRepository()
     self.notify(MESSAGES.list_failed)
@@ -245,9 +252,15 @@ function Session:close(opts)
         self.index:cancel()
         self.index = nil
     end
-    -- The repository's lifetime is the document's, whether this session
-    -- opened it or was handed one.
-    if self.repository and self.repository.close then self.repository:close() end
+    -- Close only the connection this session owns. Historically an injected
+    -- repository was a standalone session dependency and was closed here;
+    -- fixed-page sheets explicitly mark the document-ink connection borrowed.
+    if self.owns_repository then
+        self:_closeOwnedRepository()
+    elseif not self.borrow_repository and self.repository
+        and type(self.repository.close) == "function" then
+        self.repository:close()
+    end
     self.repository = nil
     self.available = false
     self.closed = true
@@ -306,13 +319,19 @@ function Session:setPage(page)
     self:_placeOpenCanvas()
     if not self:isAvailable() then return end
 
-    for _, canvas in ipairs(self:canvasesHere(page)) do
-        local xp = Anchor.resolve(self.document, canvas)
-        if xp and self.document.getScreenPositionFromXPointer then
+    for i, canvas in ipairs(self:canvasesHere(page)) do
+        if self.anchor_mode == "page" then
+            -- Fixed sheets have no line in the document to point at. Stack
+            -- their flags near the top margin in stable index order.
+            self.marks_here[#self.marks_here + 1] = { canvas = canvas, y = 24 * i }
+        else
+            local xp = Anchor.resolve(self.document, canvas)
+            if xp and self.document.getScreenPositionFromXPointer then
             -- y first, x second: the same order CreDocument returns them in.
-            local y = self.document:getScreenPositionFromXPointer(xp)
-            if y then
-                self.marks_here[#self.marks_here + 1] = { canvas = canvas, y = y }
+                local y = self.document:getScreenPositionFromXPointer(xp)
+                if y then
+                    self.marks_here[#self.marks_here + 1] = { canvas = canvas, y = y }
+                end
             end
         end
     end
@@ -350,8 +369,18 @@ end
 --- The open sheet's anchor as an xpointer today's document understands, or
 --- nil. What "Go to this sheet's page" navigates to.
 function Session:openCanvasAnchor()
-    if not (self.canvas and self:isAvailable()) then return nil end
+    if self.anchor_mode == "page" or not (self.canvas and self:isAvailable()) then return nil end
     return Anchor.resolve(self.document, self.canvas)
+end
+
+--- A navigation destination independent of the anchor family.
+function Session:openCanvasDestination()
+    if not (self.canvas and self:isAvailable()) then return nil end
+    if self.anchor_mode == "page" then
+        return { page = tonumber(self.canvas.fixed_page) }
+    end
+    local xp = Anchor.resolve(self.document, self.canvas)
+    return xp and { xpointer = xp } or nil
 end
 
 --[[--
@@ -369,6 +398,17 @@ function Session:_placeOpenCanvas()
     local canvas = self.canvas
     if not canvas or not self:isAvailable() then
         self.open_placement, self.open_placement_page = nil, nil
+        return
+    end
+    if self.anchor_mode == "page" then
+        local fixed = tonumber(canvas.fixed_page)
+        if not fixed then
+            self.open_placement, self.open_placement_page = "lost", nil
+        elseif fixed == tonumber(self.page) then
+            self.open_placement, self.open_placement_page = "here", nil
+        else
+            self.open_placement, self.open_placement_page = "away", fixed
+        end
         return
     end
     local xp = Anchor.resolve(self.document, canvas)
@@ -402,14 +442,20 @@ function Session:createHere(page)
         return nil, "indexing"
     end
 
-    local spec, err = Anchor.forCurrentPosition(self.document, self.dom_version)
+    local target_page = tonumber(page or self.page or 1)
+    local spec, err
+    if self.anchor_mode == "page" then
+        spec = Anchor.forPage(target_page)
+    else
+        spec, err = Anchor.forCurrentPosition(self.document, self.dom_version)
+    end
     if not spec then return nil, err end
 
     -- An existing sheet at this exact anchor is the one the reader means.
-    for _, canvas in ipairs(self:canvasesHere(page or self.page or 1)) do
-        if canvas.anchor_key == spec.anchor_key then
-            return canvas
-        end
+    local here = self:canvasesHere(target_page)
+    if self.anchor_mode == "page" and here[1] then return here[1] end
+    for _, canvas in ipairs(here) do
+        if canvas.anchor_key == spec.anchor_key then return canvas end
     end
 
     -- The paper under the sheet's header, not the screen: a screen-shaped
@@ -418,7 +464,7 @@ function Session:createHere(page)
     local canvas, cerr = self.repository:createCanvas(self.book_id, spec)
     if not canvas then return nil, cerr end
 
-    self.index:add(canvas, page or self.page)
+    self.index:add(canvas, target_page)
     return canvas
 end
 
@@ -608,6 +654,18 @@ end
 --- page; an export of the whole book needs all of them, orphans included.
 function Session:allCanvases()
     if not self:isAvailable() then return nil, "unavailable" end
+    if self.anchor_mode == "page" then
+        local rows, out, after_page, after_id = nil, {}, nil, nil
+        repeat
+            rows = self.repository:listPageSheets(self.book_id, {
+                after_page = after_page, after_id = after_id, limit = 500 })
+            if not rows then return nil, "list_failed" end
+            for _, row in ipairs(rows) do out[#out + 1] = row end
+            local last = rows[#rows]
+            if last then after_page, after_id = last.fixed_page, last.id end
+        until #rows < 500
+        return out
+    end
     return self.repository:listCanvases(self.book_id)
 end
 

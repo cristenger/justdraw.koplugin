@@ -58,10 +58,8 @@ function Anchor.forCurrentPosition(document, dom_version)
 end
 
 --[[--
-An anchor spec for a fixed-layout page.
-
-Reserved: v1 does not put canvases on PDFs. The column and the key shape exist
-so the schema does not have to change when it does.
+An anchor spec for a fixed-layout page. PDF drawing sheets and direct page ink
+share the anchor family while their surface roles keep them separate.
 ]]
 function Anchor.forPage(page)
     return {

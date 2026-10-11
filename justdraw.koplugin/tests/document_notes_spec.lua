@@ -169,6 +169,23 @@ return function(ctx)
         t:eq(#assert(Full.items(2,{},false)),2,"empty notes still export whole document")
         t:eq(select(2,Full.items(2,{},true)),"empty","empty context is explicit")
     end)
+    t:case("fixed-page sheets follow their source PDF page", function()
+        local ink = Note.new{kind="page_ink",page=2,surface={id=20}}
+        local first = Note.new{kind="sheet",page=2,surface={id=21}}
+        local second = Note.new{kind="sheet",page=2,surface={id=22}}
+        local appendix = Note.new{kind="legacy_page",page=2}
+        local all = assert(Full.items(3, { ink, first, second, appendix }, false))
+        t:eq(#all, 6, "three PDF pages, two inserted sheets and one appendix")
+        t:eq(all[2].kind, "document_page", "the annotated source page comes first")
+        t:eq(all[2].note, ink, "with direct ink composed over it")
+        t:eq(all[3], first, "the first logical sheet follows immediately")
+        t:eq(all[4], second, "then the next sheet in logical order")
+        t:eq(all[6], appendix, "legacy ink remains an appendix")
+        local selected = assert(Full.items(3, { first, second }, true))
+        t:eq(selected[1].kind, "document_page", "context still includes the PDF page")
+        t:eq(selected[2], first, "followed by its selected sheets")
+        t:eq(selected[3], second, "without scanning unrelated pages")
+    end)
     t:case("invalid pages and oversized exports are never silently truncated", function()
         t:eq(select(2,Full.items(5001,{},false)),"too_many_pages","full page limit")
         t:eq(select(2,Full.items(0,{},false)),"bad_geometry","invalid source")

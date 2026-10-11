@@ -86,6 +86,7 @@ Session.MESSAGES = {
     suspended = _("Turn off continuous scrolling to draw page notes."),
     unsupported_reflow = _("Turn off reflow to draw page notes."),
     unsupported_optimizing = _("Turn off page optimisation to draw page notes."),
+    unsupported_straightening = _("Turn off Auto Straighten to draw directly on this page."),
     unsupported_rotation = _("Page notes need the page unrotated."),
     zoom_too_large = _("Zoom out to see and draw page notes."),
     no_view = _("Page notes can't be placed on this view."),

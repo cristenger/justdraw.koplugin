@@ -141,6 +141,19 @@ local function documentMessage(reason)
     return DOCUMENT_ERRORS[reason] or DocumentInkSession.FALLBACK_MESSAGE
 end
 
+local PAGE_SHEET_FALLBACK = {
+    unsupported_mode = true,
+    unsupported_reflow = true,
+    unsupported_rotation = true,
+    unsupported_straightening = true,
+    unsupported_optimizing = true,
+    zoom_too_large = true,
+}
+
+local PAGE_SHEET_ACCEPTED_SETTING = "page_sheet_fallback_accepted"
+local PAGE_SHEET_PROMPT = _("Direct annotations not available")
+local PAGE_SHEET_RESET_NOTICE = _("The drawing-page confirmation will be shown again for this document.")
+
 --[[--
 Why a sheet the reader has read away from will not take ink.
 
@@ -638,6 +651,12 @@ function JustDraw:init()
     --- Whether a failed write, and not the reader, is what stopped Draw. A
     --- retry gives it back only to somebody who had it.
     self.document_drawing_suspended = false
+    self.page_sheet_offer = nil
+    self.page_sheet_pending = nil
+    self.page_sheet_offer_generation = 0
+    self.page_sheet_fallback_accepted = not self.is_docless
+        and Compat.readSetting(self.ui.doc_settings,
+            PAGE_SHEET_ACCEPTED_SETTING, false) == true
     --- What the "Delete all page notes" entry reads, cached: `enabled_func`
     --- runs on every paint of the menu and a COUNT per paint is exactly the
     --- query `canExport` exists not to make. Invalidated by everything that
@@ -912,8 +931,14 @@ function JustDraw:onReaderReady(config)
     -- (readerui.lua:473 @ v2026.07). Statistics reads it the same way.
     local settings = config or self.ui.doc_settings
 
-    if self.ui.rolling then return self:openCanvasSession(settings) end
-    if self.ui.paging then return self:openDocumentSession(settings) end
+    if self.ui.rolling then return self:openCanvasSession(settings, "xpointer") end
+    if self.ui.paging then
+        local document = self:openDocumentSession(settings)
+        if document then
+            self:openCanvasSession(settings, "page", document.repository)
+        end
+        return document
+    end
 end
 
 --[[--
@@ -973,7 +998,7 @@ function JustDraw:openDocumentSession(settings)
     return session
 end
 
-function JustDraw:openCanvasSession(settings)
+function JustDraw:openCanvasSession(settings, anchor_mode, repository)
     if self.session then return end
 
     self.session = CanvasSession.new{
@@ -984,7 +1009,9 @@ function JustDraw:openCanvasSession(settings)
         },
         file = self.ui.document.file,
         dom_version = settings:readSetting("cre_dom_version"),
-        repository = self.canvas_repository,
+        anchor_mode = anchor_mode or "xpointer",
+        repository = repository or self.canvas_repository,
+        borrow_repository = anchor_mode == "page" and repository ~= nil,
         plugin = self,
         ui = self.ui,
         schedule = function(fn) UIManager:nextTick(fn) end,
@@ -1056,6 +1083,7 @@ function JustDraw:teardown()
     self.note_context = nil
     self.canvas_intent, self.canvas_intent_id = nil, nil
     self.document_drawing_suspended = false
+    self:cancelPageSheetOffer()
     -- Closing the document takes its repository with it, and a raster still
     -- replaying through that connection would be reading a closed one.
     Export.cancelRunning()
@@ -1244,6 +1272,7 @@ end
 
 --- A page turn. Only the marks are recomputed; the index answers from memory.
 function JustDraw:onPageUpdate(page)
+    self:cancelPageSheetOffer()
     if self.session then
         self.session:setPage(page or self:currentPage())
         self:refreshCanvasPlacement()
@@ -1332,6 +1361,11 @@ function JustDraw:onCanvasIndexReady()
     -- number to show may have one now.
     self:refreshCanvasPlacement()
     if self.session then UIManager:setDirty(self.ui, "ui") end
+    self:completePendingPageSheet()
+end
+
+function JustDraw:onCanvasIndexFailed()
+    self:cancelPageSheetOffer()
 end
 
 --[[--
@@ -1384,7 +1418,9 @@ end
 function JustDraw:refreshDocumentView()
     local session = self.document_session
     if not session then return end
-    return session:refreshView()
+    local ok, err = session:refreshView()
+    if ok then self:cancelPageSheetOffer() end
+    return ok, err
 end
 
 --[[--
@@ -1441,7 +1477,7 @@ function JustDraw:continueDocumentInk()
     if reason == "loading" then return true end
     if self.drawing then
         self:setDrawing(false)
-        self:notify(documentMessage(reason))
+        if not self:offerPageSheet(reason) then self:notify(documentMessage(reason)) end
     end
     return nil, reason
 end
@@ -1483,7 +1519,9 @@ function JustDraw:onSetScrollMode(page_scroll)
                 return
             end
             if was_drawing then
-                self:notify(documentMessage("unsupported_mode"))
+                if not self:offerPageSheet("unsupported_mode") then
+                    self:notify(documentMessage("unsupported_mode"))
+                end
             end
         else
             local ok, err = session:resume()
@@ -1564,7 +1602,133 @@ end
 function JustDraw:onDocumentInkViewRefused(reason)
     if not self.drawing then return end
     self:setDrawing(false)
-    self:notify(documentMessage(reason))
+    if not self:offerPageSheet(reason) then self:notify(documentMessage(reason)) end
+end
+
+-- ------------------------------------------------ PDF page-sheet fallback
+
+function JustDraw:cancelPageSheetOffer()
+    self.page_sheet_offer_generation = (self.page_sheet_offer_generation or 0) + 1
+    local offer = self.page_sheet_offer
+    self.page_sheet_offer = nil
+    self.page_sheet_pending = nil
+    if offer and offer.dialog then UIManager:close(offer.dialog) end
+end
+
+function JustDraw:completePendingPageSheet()
+    local pending = self.page_sheet_pending
+    if not pending then return end
+    local session = self.session
+    if not session or not session:isAvailable() or session:isIndexing() then return end
+    self.page_sheet_pending = nil
+    if self.reader_closed or self.reader_suspended
+        or self.ui.document ~= pending.document
+        or self:currentPage() ~= pending.page
+        or self.page_sheet_offer_generation ~= pending.generation then return end
+    local reason = self.document_session and self.document_session:viewReason()
+    if not PAGE_SHEET_FALLBACK[reason] then return end
+    local opened, err = self:openPageSheetHere()
+    if opened then
+        self.page_sheet_fallback_accepted = true
+        Compat.saveSetting(self.ui.doc_settings,
+            PAGE_SHEET_ACCEPTED_SETTING, true)
+    elseif err ~= "indexing" then
+        self:notify(_("Could not open a drawing sheet on this page."))
+    end
+end
+
+function JustDraw:resetPageSheetPrompt()
+    if not self.page_sheet_fallback_accepted then return false end
+    self.page_sheet_fallback_accepted = false
+    Compat.delSetting(self.ui.doc_settings, PAGE_SHEET_ACCEPTED_SETTING)
+    self:notify(PAGE_SHEET_RESET_NOTICE)
+    return true
+end
+
+function JustDraw:pageSheetResetMenuItem()
+    return {
+        text = _("Reset options for this document"),
+        enabled_func = function() return self.page_sheet_fallback_accepted end,
+        callback = function() self:resetPageSheetPrompt() end,
+    }
+end
+
+--- Open the first fixed-page sheet, or create the base sheet for this page.
+--- Kept separate from the ordinary picker: fallback has already asked the
+--- reader one question and must not answer Yes with a second modal.
+function JustDraw:openPageSheetHere()
+    local session = self.session
+    if not (self.ui.paging and session and session:isAvailable()) then
+        return nil, "unavailable"
+    end
+    local here = session:canvasesHere(self:currentPage())
+    local canvas, err = here[1]
+    if not canvas then canvas, err = session:createHere(self:currentPage()) end
+    if not canvas then return nil, err end
+    return self:openCanvas(canvas, { mode = "edit" })
+end
+
+--- Ask before changing from ink over the PDF to separate paper.
+function JustDraw:offerPageSheet(reason)
+    if not PAGE_SHEET_FALLBACK[reason] or not self.ui.paging then return false end
+    local session = self.session
+    if not (session and session:isAvailable() and session:isWritable()) then return false end
+    if session:saveFailed() then return false end
+
+    local page, document = self:currentPage(), self.ui.document
+    local pending = self.page_sheet_pending
+    if pending and pending.document == document and pending.page == page
+        and pending.reason == reason then return true end
+    local current = self.page_sheet_offer
+    if current and current.document == document and current.page == page
+        and current.reason == reason then return true end
+    self:cancelPageSheetOffer()
+    local generation = self.page_sheet_offer_generation
+    local offer = { document = document, page = page, reason = reason,
+        generation = generation }
+    local function accept()
+        self.page_sheet_pending = offer
+        -- This runs only after an on-screen confirmation has been explicitly
+        -- removed (or immediately for an acknowledgement already stored for
+        -- this PDF).  Do not leave the first opening to `nextTick`: the macOS
+        -- SDL loop may sleep after dismissing a modal until the next physical
+        -- click, making Open drawing page appear to need pressing twice.
+        self:completePendingPageSheet()
+    end
+    if self.page_sheet_fallback_accepted then
+        accept()
+        return true
+    end
+    local dialog
+    local function clear()
+        if self.page_sheet_offer == offer then self.page_sheet_offer = nil end
+    end
+    local function close()
+        clear()
+        if dialog then UIManager:close(dialog) end
+    end
+    dialog = ConfirmBox:new{
+        text = PAGE_SHEET_PROMPT,
+        ok_text = _("Open drawing page"),
+        cancel_text = _("Cancel"),
+        -- Own dismissal so the sheet can be opened only after the
+        -- confirmation is no longer on the window stack.  ConfirmBox normally
+        -- closes itself after its callback, which is too late for that order.
+        keep_dialog_open = true,
+        dismissable = false,
+        cancel_callback = close,
+        ok_callback = function()
+            close()
+            if self.reader_closed or self.reader_suspended
+                or self.ui.document ~= document or self:currentPage() ~= page
+                or self.page_sheet_offer_generation ~= generation then return end
+            accept()
+        end,
+    }
+    offer.dialog = dialog
+    self.page_sheet_offer = offer
+    UIManager:show(dialog)
+    return true
 end
 
 -- ----------------------------------------------------------------- toolbar
@@ -1868,14 +2032,19 @@ function JustDraw:setDrawing(on, preserve_intent)
         end
         return
     end
-    if on and self.document_session then
+    -- A PDF drawing page has its own surface.  Its embedded Draw button must
+    -- not re-run the PDF page-geometry gate behind the overlay (which is the
+    -- very gate that selected the drawing page).
+    if on and not self.canvas_open and self.document_session then
         -- Before the lease, always: acquiring capture and then discovering
         -- there is nowhere to put the ink leaves the reader drawing into
         -- nothing, and creating the row is a transaction no contact may be
         -- live for.
         local ready, reason = self:prepareDocumentInk()
         if not ready then
-            self:notify(documentMessage(reason))
+            if not self:offerPageSheet(reason) then
+                self:notify(documentMessage(reason))
+            end
             return
         end
     end
@@ -3052,6 +3221,7 @@ meaning "the toolbar the reader can see" everywhere else in this file.
 ]]
 function JustDraw:openCanvas(canvas, opts)
     opts = opts or {}
+    self:cancelPageSheetOffer()
     local mode = opts.mode or "edit"
     if mode ~= "view" and mode ~= "edit" then return nil, "invalid_mode" end
     if not (self.session and canvas) then return nil, "no_canvas" end
@@ -3281,6 +3451,7 @@ function JustDraw:rememberNoteContext(canvas, group_id, height, restore_bar)
     if restore_bar == nil then restore_bar = self:ordinaryBarShown() end
     self.note_context = {document=self.ui.document, session=self.session,
         surface_id=canvas.id, anchor_key=canvas.anchor_key, anchor_raw=canvas.anchor_raw,
+        fixed_page=canvas.fixed_page,
         group_id=group_id, height_pct=height, bar_restore=restore_bar, dismissed=false}
     self:refreshNoteContextPlacement()
 end
@@ -3290,7 +3461,8 @@ function JustDraw:contextCanvas()
     if not c or c.document ~= self.ui.document or c.session ~= self.session
         or not self.session or not self.session:isAvailable() then return end
     local row = self.session.index and self.session.index:get(c.surface_id)
-    if row and row.anchor_key == c.anchor_key and row.anchor_raw == c.anchor_raw then return row end
+    if row and row.anchor_key == c.anchor_key and row.anchor_raw == c.anchor_raw
+        and tonumber(row.fixed_page) == tonumber(c.fixed_page) then return row end
 end
 
 function JustDraw:refreshNoteContextPlacement()
@@ -3303,6 +3475,11 @@ function JustDraw:refreshNoteContextPlacement()
         if active and active.id == canvas.id then
             -- The session already places its visible sheet once per view event.
             placement, page = self.session:openCanvasPlacement()
+        elseif canvas.anchor_kind == "page" then
+            page = tonumber(canvas.fixed_page)
+            if page then
+                placement = self:currentPage() == page and "here" or "away"
+            end
         else
             local ok, xp = pcall(require("ink_anchor").resolve, self.ui.document, canvas)
             if ok and xp then
@@ -3423,12 +3600,17 @@ Reached only from a menu callback, so there is no live contact and this is a
 lifecycle tick (ADR-26).
 ]]
 function JustDraw:goToCanvasAnchor()
-    local xp = self.session and self.session:openCanvasAnchor()
-    if not xp then
+    local destination = self.session and self.session:openCanvasDestination()
+    if not destination or not destination.xpointer and not destination.page then
         self:notify(_("This sheet's place in the book is missing"))
         return nil, "lost"
     end
-    self.ui:handleEvent(Event:new("GotoXPointer", xp, xp))
+    if destination.xpointer then
+        self.ui:handleEvent(Event:new("GotoXPointer", destination.xpointer,
+            destination.xpointer))
+    else
+        self.ui:handleEvent(Event:new("GotoPage", destination.page))
+    end
     return true
 end
 
@@ -4282,6 +4464,11 @@ function JustDraw:showBarMenu()
                 self:setBarSide(self.bar_side == "left" and "right" or "left")
             end) } }
     end
+    if self.ui.paging then
+        rows[#rows + 1] = { { text = _("Reset options for this document"),
+            enabled = self.page_sheet_fallback_accepted,
+            callback = pick(function() self:resetPageSheetPrompt() end) } }
+    end
     rows[#rows + 1] = { { text = _("Close"),
         callback = function() self:closeReaderModal(dialog) end } }
     dialog = ButtonDialog:new{ title = _("JustDraw"), buttons = rows }
@@ -4783,7 +4970,7 @@ function JustDraw:addToMainMenu(menu_items)
         enabled_func = function()
             return self.session ~= nil and self.session:isAvailable()
         end,
-        help_text = _([[Blank sheets anchored to a position in a reflowable book. Not available in PDFs and other fixed layouts, where drawing goes straight onto the page instead.]]),
+        help_text = _([[Separate paper sheets anchored to a place in an EPUB or to a page in a PDF. In PDFs, direct page annotations remain the default and a sheet is offered when the current view cannot place them safely.]]),
         sub_item_table_func = function() return self:canvasMenu() end,
     }
     menu_items.justdraw = {
@@ -4891,6 +5078,11 @@ function JustDraw:addToMainMenu(menu_items)
     }
     local sub = menu_items.justdraw.sub_item_table
     self:addPageNotesMenuItem(sub, sheet_item)
+    if self.ui.paging then
+        local reset_prompt = self:pageSheetResetMenuItem()
+        reset_prompt.separator = true
+        sub[#sub + 1] = reset_prompt
+    end
     local clear_page, clear_all = self:legacyInkItems()
     sub[#sub + 1] = clear_page
     sub[#sub + 1] = clear_all

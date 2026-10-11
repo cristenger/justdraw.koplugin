@@ -15,7 +15,7 @@ function Full.items(page_count, notes, annotated_only)
         return nil, "bad_geometry"
     end
     if not annotated_only and page_count > Source.MAX_PAGES then return nil, "too_many_pages" end
-    local by_page, extras, items, wanted = {}, {}, {}, {}
+    local by_page, sheets_by_page, extras, items, wanted = {}, {}, {}, {}, {}
     for _, note in ipairs(notes) do
         if note.kind == "page_ink" then
             if not note.page or note.page < 1 or note.page > page_count
@@ -23,20 +23,30 @@ function Full.items(page_count, notes, annotated_only)
             if by_page[note.page] then return nil, "bad_surface" end
             by_page[note.page] = note
             wanted[note.page]=true
+        elseif note.kind == "sheet" and note.page ~= nil then
+            if note.page < 1 or note.page > page_count
+                or note.page ~= math.floor(note.page) then return nil, "bad_geometry" end
+            sheets_by_page[note.page] = sheets_by_page[note.page] or {}
+            sheets_by_page[note.page][#sheets_by_page[note.page] + 1] = note
+            wanted[note.page] = true
         else
             extras[#extras + 1] = note
             if note.native and note.page and note.page>=1 and note.page<=page_count then wanted[note.page]=true end
         end
     end
+    local function appendPage(page)
+        items[#items + 1] = { kind = "document_page", page = page, note = by_page[page] }
+        for _, sheet in ipairs(sheets_by_page[page] or {}) do
+            items[#items + 1] = sheet
+        end
+    end
     if annotated_only then
-        for page in pairs(wanted) do
-            items[#items + 1] = {kind = "document_page", page = page, note = by_page[page]}
-        end
-        table.sort(items, function(a,b) return a.page < b.page end)
+        local pages = {}
+        for page in pairs(wanted) do pages[#pages + 1] = page end
+        table.sort(pages)
+        for _, page in ipairs(pages) do appendPage(page) end
     else
-        for page = 1, page_count do
-            items[#items + 1] = { kind = "document_page", page = page, note = by_page[page] }
-        end
+        for page = 1, page_count do appendPage(page) end
     end
     for _, item in ipairs(extras) do items[#items + 1] = item end
     if #items > Source.MAX_PAGES then return nil, "too_many_pages" end

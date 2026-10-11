@@ -195,7 +195,9 @@ assert(notes:navigate(item,"view"))
 pump(function() return not notes.pending_navigation
     and host.document_session:cache() and host.document_session:cache():isReady() end)
 assert(host:currentPage() == ink_page and not host.drawing,"PDF view did not stay in reading mode")
-assert(not host.canvas_open and not host.session,"PDF view created an EPUB panel/session")
+assert(not host.canvas_open and host.session and host.session.anchor_mode == "page",
+    "PDF view did not retain its fixed-page sheet session")
+assert(not host.session:activeCanvas(), "viewing direct ink opened a page sheet")
 assert(host.document_session:surface().id == surface.id,"PDF view opened a different surface")
 assert(host:onShowDocumentNotes())
 pump(function() return notes.catalog.state == "ready" and not notes.catalog.busy end)
@@ -212,7 +214,13 @@ assert(#notes.catalog.items == 0 and next(notes.catalog.opts) == nil,"catalogue 
 print("PASS PDF notes: real reader, portrait/landscape menus, detail, zoom, selection, full PDF, cancellation, return, cleanup")
 reader:onClose(false)
 
-doc = assert(require("document/documentregistry"):openDocument(ffiutil.realpath("../../test/juliet.epub")))
+local epub_path = arg[2] or "../../test/juliet.epub"
+if not lfs.attributes(epub_path) then
+    print("SKIP EPUB notes: fixture not found: " .. epub_path)
+    print("Artifacts: " .. home)
+    return
+end
+doc = assert(require("document/documentregistry"):openDocument(ffiutil.realpath(epub_path)))
 reader = require("apps/reader/readerui"):new{dimen=Device.screen:getSize(),document=doc}
 UI:show(reader)
 host = assert(reader.justdraw or require("pluginloader"):getPluginInstance("justdraw"))

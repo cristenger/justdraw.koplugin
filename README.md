@@ -22,15 +22,17 @@ JustDraw gives you three places to write, and one place to find them all again.
 - **Page notes** — a transparent layer over one page of a fixed-layout document
   (PDF, DjVu, comics). The ink is stored in the page's own coordinates, so it
   stays where you put it under zoom and pan.
-- **Drawing sheets** — a panel over a reflowable book (EPUB). A sheet is
-  anchored to a passage rather than to a page number, so it stays with the text
-  when the font or margins change.
+- **Drawing sheets** — a separate-paper panel over a book. In an EPUB it is
+  anchored to a passage; in a PDF it is associated with a fixed page when the
+  current view cannot safely place ink over the PDF itself.
 - **Document notes** — one list of everything in the book you are reading: your
   sheets and page notes, plus KOReader's own highlights, bookmarks and typed
   notes. From here you can read, filter, export and jump back to any of them.
 
-You do not choose between page notes and sheets: the plugin picks one from the
-document you have open.
+Direct page notes remain the default in PDFs. The first time a PDF's current
+view needs separate paper, JustDraw asks before opening a drawing page. After
+one successful opening that PDF remembers the choice; compatible views still
+return to direct page notes.
 
 ## Requirements
 
@@ -78,10 +80,17 @@ the menu, KOReader's Gesture Manager lists the plugin's actions under
 **In a PDF or other fixed-layout document,** your ink goes on the current page
 and stays with it: turn the page and you get that page's own layer. Manage them
 under **JustDraw → Page notes**, which offers *Delete this page note* and
-*Delete all page notes*.
+*Delete all page notes*. Dewatermark, white threshold, background cleanup,
+crop, margins and colour/contrast effects remain compatible with direct ink.
+Reflow, Auto Straighten, continuous scrolling, rotation, or a zoom too large
+for the page raster cannot be mapped safely. If a page sheet can be used,
+JustDraw asks whether to open one or cancel. A successful opening remembers
+the choice for this PDF, so later incompatible views open their page sheet
+directly. **Reset drawing-page prompt** makes this PDF ask again.
 
-**In an EPUB,** open a panel first: **JustDraw → Drawing sheet → Open sheet
-here**. The sheet is anchored to the passage you were reading. Its controls sit
+**For a separate sheet,** use **JustDraw → Drawing sheet → Open sheet here**.
+In an EPUB it is anchored to the passage you were reading; in a PDF it stays
+with the page where it was created. Its controls sit
 across its top, above the paper, so neither hand rests on them:
 **Draw** and a ✕ that puts the sheet away, with the current pen between them,
 then icons for **Pen · Eraser · Undo · Document notes · More** and the sheet's
@@ -166,7 +175,9 @@ the document notes list.
 Depending on where you start it, you can export the page you are on, one sheet,
 one notebook or one page of it, or every note in the book. For PDFs the notes
 list also offers **Annotated pages as images…** and **Complete document as
-images…**; for EPUB, **Complete EPUB with notes appendix…**.
+images…**. A PDF page is rendered with its direct ink, then that page's drawing
+sheets are inserted immediately after it. For EPUB, the list offers
+**Complete EPUB with notes appendix…**.
 
 Output is a picture of your ink, not editable vectors. If the folder looks too
 full you are asked before anything is written, and leftovers from an interrupted
@@ -192,11 +203,13 @@ the pen, the kernel throws input away. JustDraw ends the stroke there rather
 than joining it to what comes next, so you lose the rest of one stroke instead
 of getting a line across the page.
 
-**"Turn off continuous scrolling / reflow / page optimisation to draw page
-notes".** Page notes work only in single-page mode on an unmodified page. With
-those settings on, what is on screen is no longer the page the notes were drawn
-on, so they are hidden rather than shown in the wrong place. Nothing is lost —
-turn the setting off and they come back.
+**"Turn off continuous scrolling / reflow / Auto Straighten".** Those modes
+change page geometry, so direct ink would no longer line up. JustDraw can open
+a separate drawing page after you confirm once for that PDF; cancel leaves
+drawing stopped and creates nothing. Pixel-only effects such as Dewatermark,
+White Threshold and Background Cleanup do not require a sheet. Nothing is lost
+when a view becomes incompatible—restore a compatible view and direct ink
+returns. Use **Reset drawing-page prompt** if you want the PDF to ask again.
 
 ### Reporting a problem
 

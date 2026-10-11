@@ -48,11 +48,17 @@ function Catalog:_fail(reason)
 end
 
 function Catalog:_append(row, kind)
+    local is_sheet = kind == "sheet"
+    local page
+    if kind == "page_ink" or is_sheet and row.anchor_kind == "page" then
+        page = tonumber(row.fixed_page)
+    end
     local note = Note.new {
         kind = kind,
         surface = row,
-        repository = self.opts.repository,
-        page = kind == "page_ink" and tonumber(row.fixed_page) or nil,
+        repository = is_sheet and (self.opts.sheet_repository or self.opts.repository)
+            or self.opts.repository,
+        page = page,
         logical_w = row.logical_w,
         logical_h = row.logical_h,
         units = kind == "page_ink" and self.opts.units or "px",
@@ -60,7 +66,7 @@ function Catalog:_append(row, kind)
     if self.by_id[note.id] then
         return
     end
-    note.locating = kind == "sheet"
+    note.locating = is_sheet and page == nil
     self.items[#self.items + 1] = note
     self.by_id[note.id] = note
 end
@@ -70,7 +76,7 @@ function Catalog:start()
     self.items, self.by_id, self.result, self.selected = {}, {}, {}, {}
     self.closed, self.state, self.error = false, "loading", nil
     self.busy = false
-    self.offset, self.cursor = 0, nil
+    self.offset, self.cursor, self.sheet_done = 0, nil, false
     self:_changed()
     self:_defer(function()
         self:_load()
@@ -84,7 +90,7 @@ function Catalog:_load()
             self:_load()
         end, 0.1)
     end
-    if opts.rolling and opts.index then
+    if opts.index and not self.sheet_done then
         if opts.index:phase() == "cancelled" then
             return self:_fail("index_incomplete")
         end
@@ -101,7 +107,9 @@ function Catalog:_load()
                 self:_load()
             end, #rows == 0 and 0.2 or nil)
         end
-    elseif not opts.rolling and opts.repository and opts.book_id then
+        self.sheet_done = true
+    end
+    if not opts.rolling and opts.repository and opts.book_id then
         local cursor = self.cursor or {}
         local rows, err = opts.repository:listPageInkSurfaces(opts.book_id, {
             limit = Catalog.BATCH,
@@ -187,7 +195,7 @@ function Catalog:_enrich()
     local last = math.min(#self.items, self.enrich_offset + Catalog.BATCH)
     for i = self.enrich_offset + 1, last do
         local item = self.items[i]
-        if item.kind == "sheet" then
+        if item.kind == "sheet" and item.page == nil then
             item.page = self.opts.index:pageOf(item.surface.id)
         end
         item.locating = nil

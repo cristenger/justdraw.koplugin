@@ -15,8 +15,8 @@ and nothing that is *taken off* it can be un-painted by copying: erase and undo
 have to repaint the page through the view.
 
 The third is that the reader is told why, in words, whenever drawing is
-refused. Continuous scrolling, reflow, page optimisation, a zoom whose raster
-would not fit: each is a sentence naming the thing to change.
+refused. Geometry-changing views offer a separate page sheet; transient or
+invalid state keeps its specific error and does not suggest one.
 ]]
 
 return function(ctx)
@@ -59,6 +59,14 @@ return function(ctx)
         }
     end
 
+    local function fixedSheetRow(id, page)
+        return {
+            id = id, anchor_kind = "page", anchor_key = "pdf-sheet:" .. id,
+            fixed_page = page, surface_role = "sheet", coordinate_space = "surface",
+            logical_w = 600, logical_h = 800,
+        }
+    end
+
     local function bar_stroke()
         return { width = 8, tool = 1, n = 3,
                  points = { 100, 100, 200, 100, 300, 100 } }
@@ -89,6 +97,7 @@ return function(ctx)
         end
         local p = support.newPlugin(ctx.JustDraw, env, {
             paging = true, view = opts.view, page = opts.page,
+            doc_settings = opts.doc_settings,
         })
         p.canvas_repository = store
         p.document_cache_opts = { clear = support.recordingClear() }
@@ -172,6 +181,16 @@ return function(ctx)
     --- The last widget UIManager was shown, which is where a ConfirmBox lands.
     local function lastShown()
         return env.UIManager.shown[#env.UIManager.shown]
+    end
+
+    local function checkSheetOffer()
+        local box = lastShown()
+        t:check(box and box.ok_callback ~= nil, "a confirmation box is shown")
+        t:eq(box and box.ok_text, "Open drawing page", "the affirmative choice is explicit")
+        t:eq(box and box.cancel_text, "Cancel", "the reader can leave drawing stopped")
+        t:eq(box and box.text, "Direct annotations not available",
+            "the fallback prompt stays concise")
+        return box
     end
 
     -- =================================================================
@@ -753,9 +772,8 @@ return function(ctx)
         p:onPageUpdate(2)
         env.UIManager:flush()
         t:eq(p.drawing, false, "drawing stopped")
-        t:eq(#env.notifications, 1, "with one sentence, not two")
-        t:eq(env.notifications[1], "Zoom out to see and draw page notes.",
-            "naming the thing to change")
+        t:eq(#env.notifications, 0, "the confirmation replaces a notification")
+        checkSheetOffer()
         t:eq(store:findPageInkSurface(12, 2), nil,
             "and a refused view creates no row")
     end)
@@ -863,9 +881,7 @@ return function(ctx)
         env.UIManager:flush()
         t:eq(p.drawing, false, "drawing was turned off")
         t:eq(p.document_session:stateName(), "suspended", "and the surface put away")
-        t:eq(env.notifications[#env.notifications],
-            "Turn off continuous scrolling to draw page notes.",
-            "the reader is told which setting to change")
+        checkSheetOffer("Direct annotations are unavailable in continuous scrolling.")
         p.view.page_scroll = false
         p:onSetScrollMode(false)
         env.UIManager:flush()
@@ -902,19 +918,20 @@ return function(ctx)
 
     local REFUSALS = {
         { name = "continuous scrolling", view = { page_scroll = true },
-          message = "Turn off continuous scrolling to draw page notes." },
+          message = "Direct annotations are unavailable in continuous scrolling." },
         { name = "reflow", view = { configurable = { text_wrap = 1 } },
-          message = "Turn off reflow to draw page notes." },
-        { name = "page optimisation",
-          view = { koptinterface = { is_optimizing_page = function() return true end } },
-          message = "Turn off page optimisation to draw page notes." },
+          message = "Direct annotations cannot be aligned while Reflow is enabled." },
+        { name = "Auto Straighten",
+          view = { koptinterface = { is_optimizing_page = function() return true end },
+            configurable = { text_wrap = 0, auto_straighten = 1 } },
+          message = "Direct annotations cannot be aligned while Auto Straighten is enabled." },
         { name = "a rotated page state", view = { state = { rotation = 1 } },
-          message = "Page notes need the page unrotated." },
+          message = "Direct annotations cannot be aligned while the page is rotated." },
         { name = "a zoom past the raster budget", view = { state = { zoom = 4 } },
-          message = "Zoom out to see and draw page notes." },
+          message = "Direct annotations need more page-raster memory at this zoom." },
         { name = "a view before its first recalculate",
           view = { state = { offset = false } },
-          message = "Page notes can't be placed on this view." },
+          message = "Page notes can't be placed on this view.", no_sheet = true },
     }
 
     for _, refusal in ipairs(REFUSALS) do
@@ -922,11 +939,175 @@ return function(ctx)
             local p, store = documentPlugin{ view = refusal.view }
             p:setDrawing(true)
             t:eq(p.drawing, false, "drawing did not start")
-            t:eq(env.notifications[#env.notifications], refusal.message,
-                "and the refusal names the thing to change")
+            if refusal.no_sheet then
+                t:eq(env.notifications[#env.notifications], refusal.message,
+                    "the transient refusal keeps its existing message")
+            else
+                t:eq(#env.notifications, 0, "a usable sheet is offered instead")
+                checkSheetOffer().cancel_callback()
+            end
             t:eq(#store.canvases, 0, "a refused view creates no row")
         end)
     end
+
+    t:case("dewatermark remains compatible with direct page ink", function()
+        local p, store = documentPlugin{ view = {
+            koptinterface = { is_optimizing_page = function() return true end },
+            configurable = { text_wrap = 0, page_opt = 1, white_threshold = 20,
+                auto_straighten = 0 },
+        } }
+        p:setDrawing(true)
+        t:eq(p.drawing, true, "direct drawing starts")
+        t:check(store:findPageInkSurface(12, 1) ~= nil, "the direct page surface is used")
+        t:eq(p.page_sheet_offer, nil, "no sheet is suggested")
+    end)
+
+    t:case("accepting the fallback creates and opens one fixed-page sheet", function()
+        local settings = {}
+        local p, store = documentPlugin{
+            view = { configurable = { text_wrap = 1 } }, doc_settings = settings,
+        }
+        p:setDrawing(true)
+        local box = checkSheetOffer()
+        box.ok_callback()
+        t:eq(p.canvas_open, true, "one acceptance opens the sheet immediately")
+        env.UIManager:flush()
+        t:eq(p.session:activeCanvas().anchor_kind, "page", "it is page anchored")
+        t:eq(p.session:activeCanvas().fixed_page, 1, "to the current PDF page")
+        t:eq(#store:listPageSheets(12, { limit = 10 }), 1, "only one sheet was created")
+        t:eq(settings.justdraw_page_sheet_fallback_accepted, true,
+            "successful opening remembers fallback for this PDF")
+    end)
+
+    t:case("remembered fallback covers other blockers but never replaces direct ink", function()
+        local settings = { justdraw_page_sheet_fallback_accepted = true }
+        local p, store = documentPlugin{
+            view = { state = { rotation = 1 } }, doc_settings = settings,
+        }
+        p:setDrawing(true)
+        env.UIManager:flush()
+        t:eq(p.page_sheet_offer, nil, "an acknowledged PDF shows no second prompt")
+        t:eq(p.canvas_open, true, "another geometry blocker opens a drawing page")
+
+        p:closeCanvas()
+        p.view.state.rotation = 0
+        p:refreshDocumentView()
+        p:setDrawing(true)
+        t:eq(p.drawing, true, "compatible geometry returns to direct annotation")
+        t:eq(p.canvas_open, false, "remembering fallback does not force the old sheet")
+        t:check(store:findPageInkSurface(12, 1) ~= nil,
+            "the compatible page uses its direct-ink surface")
+    end)
+
+    t:case("fallback acknowledgement is document-local and resettable", function()
+        local accepted = { justdraw_page_sheet_fallback_accepted = true }
+        local p = documentPlugin{
+            view = { configurable = { text_wrap = 1 } }, doc_settings = accepted,
+        }
+        t:eq(p.page_sheet_fallback_accepted, true, "the PDF restores its acknowledgement")
+        local reset = ctx.menuItem(p, "Reset options for this document")
+        t:check(reset and reset.enabled_func(), "the reset action is enabled")
+        reset.callback()
+        t:eq(accepted.justdraw_page_sheet_fallback_accepted, nil,
+            "reset clears only the document preference")
+        t:eq(env.notifications[#env.notifications],
+            "The drawing-page confirmation will be shown again for this document.",
+            "reset explains its scope")
+        p:setDrawing(true)
+        checkSheetOffer().cancel_callback()
+
+        local other = {}
+        local q = documentPlugin{
+            view = { configurable = { text_wrap = 1 } }, doc_settings = other,
+        }
+        q:setDrawing(true)
+        checkSheetOffer().cancel_callback()
+        t:eq(other.justdraw_page_sheet_fallback_accepted, nil,
+            "another PDF still requires acceptance")
+    end)
+
+    t:case("the fallback can be accepted while PDF sheets are indexing", function()
+        local p, store = documentPlugin{ view = { configurable = { text_wrap = 1 } } }
+        p.session.index.state = "metadata"
+        local shown = #env.UIManager.shown
+        p:setDrawing(true)
+        local box = checkSheetOffer()
+        box.ok_callback()
+        t:check(p.page_sheet_pending ~= nil, "the accepted page request is retained")
+        t:eq(#store:listPageSheets(12, { limit = 10 }), 0,
+            "nothing is created from a partial index")
+        p:setDrawing(true)
+        t:eq(#env.UIManager.shown, shown + 1,
+            "pressing Draw again does not duplicate the accepted request")
+        p.session.index.state = "ready"
+        p:onCanvasIndexReady()
+        env.UIManager:flush()
+        t:eq(p.page_sheet_pending, nil, "the delayed request was consumed")
+        t:eq(p.canvas_open, true, "the accepted sheet opens when indexing completes")
+        t:eq(#store:listPageSheets(12, { limit = 10 }), 1,
+            "and only then is its row created")
+    end)
+
+    t:case("a page turn cancels an accepted indexing fallback", function()
+        local p, store = documentPlugin{ view = { configurable = { text_wrap = 1 } } }
+        p.session.index.state = "metadata"
+        p:setDrawing(true)
+        checkSheetOffer().ok_callback()
+        p.view.state.page = 2
+        p:onPageUpdate(2)
+        p.session.index.state = "ready"
+        p:onCanvasIndexReady()
+        env.UIManager:flush()
+        t:eq(p.canvas_open, false, "no stale sheet is opened")
+        t:eq(#store:listPageSheets(12, { limit = 10 }), 0,
+            "and no row is created for either page")
+    end)
+
+    t:case("a sheet-index failure clears accepted fallback state", function()
+        local p, store = documentPlugin{ view = { configurable = { text_wrap = 1 } } }
+        p.session.index.state = "metadata"
+        p:setDrawing(true)
+        checkSheetOffer().ok_callback()
+        p.session:_indexFailed("database is locked")
+        t:eq(p.page_sheet_pending, nil, "the delayed request is discarded")
+        t:eq(p.page_sheet_fallback_accepted, false,
+            "a failed opening is not remembered")
+        t:eq(#store:listPageSheets(12, { limit = 10 }), 0, "nothing was created")
+        t:check(env.notifications[#env.notifications]:find("Could not list", 1, true) ~= nil,
+            "the database error keeps the sheet session's specific message")
+    end)
+
+    t:case("fallback prompts are deduplicated and stale acceptance is inert", function()
+        local p, store = documentPlugin()
+        startDrawing(p)
+        local shown = #env.UIManager.shown
+        p.view.state.zoom = 4
+        p:onZoomUpdate(4)
+        p:onViewRecalculate()
+        env.UIManager:flush()
+        t:eq(#env.UIManager.shown, shown + 1, "repeated recalculation shows one box")
+        local accept = checkSheetOffer().ok_callback
+        p.view.state.page = 2
+        p:onPageUpdate(2)
+        env.UIManager:flush()
+        accept()
+        env.UIManager:flush()
+        t:eq(#store:listPageSheets(12, { limit = 10 }), 0,
+            "the old callback cannot create a sheet on the new page")
+    end)
+
+    t:case("restoring compatible geometry closes the pending fallback", function()
+        local p, store = documentPlugin{ view = { state = { zoom = 4 } } }
+        p:setDrawing(true)
+        local accept = checkSheetOffer().ok_callback
+        p.view.state.zoom = 0.5
+        p:onZoomUpdate(0.5)
+        env.UIManager:flush()
+        t:eq(p.page_sheet_offer, nil, "the stale box is no longer coordinated")
+        accept(); env.UIManager:flush()
+        t:eq(#store:listPageSheets(12, { limit = 10 }), 0,
+            "its delayed callback cannot switch surfaces")
+    end)
 
     t:case("a zoom past the budget paints nothing", function()
         local p = documentPlugin{
@@ -938,8 +1119,7 @@ return function(ctx)
         p:onZoomUpdate(4)
         env.UIManager:flush()
         t:eq(p.drawing, false, "drawing stopped")
-        t:eq(env.notifications[#env.notifications],
-            "Zoom out to see and draw page notes.", "and said why")
+        checkSheetOffer()
         local bb = support.newBlitbuffer(600, 800)
         p:paintTo(bb, 0, 0)
         t:eq(#bb.blits, 0, "a refused view puts nothing on the page")
@@ -1249,6 +1429,19 @@ return function(ctx)
         t:check(type(built.cancel) == "function", "and when the reader cancels")
         t:eq(built.flush(), true, "the flush answers for both surfaces")
         t:check(built.pixels > 0, "and it can say how much this will weigh")
+    end)
+
+    t:case("PDF sheets and direct page ink share one dossier", function()
+        local p = documentPlugin{
+            canvases = { fixedSheetRow(1, 2), pageRow(2, 2) },
+            strokes = { [1] = { bar_stroke() }, [2] = { bar_stroke() } },
+        }
+        local built, err = p:buildExport("notes")
+        t:check(built ~= nil, "built: " .. tostring(err))
+        t:eq(#built.items, 2, "both fixed-page note surfaces are present")
+        t:eq(built.items[1].kind, "sheet", "the page sheet is included")
+        t:eq(built.items[1].page, 2, "with its fixed-page destination")
+        t:eq(built.items[2].kind, "page_ink", "alongside direct ink")
     end)
 
     t:case("a dossier with legacy ink asks before it reads anything", function()

@@ -219,11 +219,27 @@ return function(ctx)
             "text_wrap 0 is the ordinary page")
     end)
 
-    t:case("an optimised page is not the page either", function()
-        local _, reason = from(reader{ koptinterface = kopt(true) })
-        t:eq(reason, "unsupported_optimizing")
-        t:check(from(reader{ koptinterface = kopt(false) }) ~= nil,
-            "a koptinterface that says no is fine")
+    t:case("pixel-only KOPT effects preserve the page geometry", function()
+        local tr = from(reader{ koptinterface = kopt(true), configurable = {
+            text_wrap = 0, page_opt = 1, white_threshold = 20,
+            auto_straighten = 0,
+        } })
+        t:check(tr ~= nil, "dewatermark and white threshold allow direct ink")
+        t:check(from(reader{ koptinterface = kopt(true), configurable = {
+            text_wrap = 0, page_opt = 1, auto_straighten = false,
+        } }) ~= nil, "an imported false value still means disabled")
+        t:check(from(reader{ koptinterface = kopt(true), configurable = {
+            text_wrap = 0, white_threshold = 20, auto_straighten = "0",
+        } }) ~= nil, "a stringified zero still means disabled")
+        local _, straight = from(reader{ koptinterface = kopt(true),
+            configurable = { text_wrap = 0, auto_straighten = 1 } })
+        t:eq(straight, "unsupported_straightening", "straightening moves page content")
+        local _, unknown = from(reader{ koptinterface = kopt(true),
+            configurable = { text_wrap = 0, auto_straighten = "unknown" } })
+        t:eq(unknown, "unsupported_optimizing", "unknown KOPT geometry fails closed")
+        local _, negative = from(reader{ koptinterface = kopt(true),
+            configurable = { text_wrap = 0, auto_straighten = -1 } })
+        t:eq(negative, "unsupported_optimizing", "an invalid negative value fails closed")
     end)
 
     t:case("a document with neither configurable nor koptinterface passes", function()
@@ -258,7 +274,7 @@ return function(ctx)
             paging = false,
             page_scroll = true,
             state = { rotation = 90, offset = false },
-            configurable = { text_wrap = 1 },
+            configurable = { text_wrap = 1, auto_straighten = 1 },
             koptinterface = kopt(true),
         }
         local function reason()
@@ -275,7 +291,7 @@ return function(ctx)
         rv.view.state.rotation = 0
         t:eq(reason(), "unsupported_reflow", "then reflow")
         rv.view.document.configurable.text_wrap = 0
-        t:eq(reason(), "unsupported_optimizing", "then optimisation")
+        t:eq(reason(), "unsupported_straightening", "then straightening")
         rv.view.document.koptinterface = nil
         rv.view.state.zoom = 0
         t:eq(reason(), "bad_geometry", "then the geometry")

@@ -128,23 +128,23 @@ function Controller:notesScope()
     local legacy = self.legacy and self.legacy()
     local has_legacy = legacy ~= nil and not legacy:isEmpty()
     local has_native = self.ui.annotation and #self.ui.annotation.annotations > 0
+    local document = self.document_session and self.document_session()
+    local direct = 0
+    if document and document:isAvailable() then
+        direct = document:countSurfaces()
+    end
     local session = self.session()
     if session and session:isAvailable() then
         local _repository, index = session:exportSources()
         local sheets = (index and index:count()) or 0
-        if sheets == 0 and not has_legacy and not has_native then return nil end
+        if sheets + direct == 0 and not has_legacy and not has_native then return nil end
         if not index or not index:isComplete() then
             return { value = "notes", label = _("Document notes"),
                 enabled = false, reason = "index_incomplete" }
         end
         return { value = "notes", label = _("Document notes") }
     end
-    local document = self.document_session and self.document_session()
-    local notes = 0
-    if document and document:isAvailable() then
-        notes = document:countSurfaces()
-    end
-    if notes == 0 and not has_legacy and not has_native then return nil end
+    if direct == 0 and not has_legacy and not has_native then return nil end
     return { value = "notes", label = _("Document notes") }
 end
 
@@ -167,10 +167,13 @@ function Controller:canExport()
     local legacy = self.legacy and self.legacy()
     if legacy and not legacy:isEmpty() then return true end
     local session = self.session()
-    if not session or not session:isAvailable() then return false end
-    if self.canvas_open() and session:activeCanvas() then return true end
-    local _repository, index = session:exportSources()
-    return index ~= nil and index:isComplete() and index:count() > 0
+    if session and session:isAvailable() then
+        if self.canvas_open() and session:activeCanvas() then return true end
+        local _repository, index = session:exportSources()
+        if index ~= nil and index:isComplete() and index:count() > 0 then return true end
+    end
+    local document = self.document_session and self.document_session()
+    return document ~= nil and document:isAvailable() and document:countSurfaces() > 0
 end
 
 --[[--
@@ -271,15 +274,9 @@ function Controller:notesSource()
         legacy = self.legacy and self.legacy(),
         screen = self:screenSize(),
     }
-    if self.ui and self.ui.rolling then
-        spec.rolling = true
-        local session = self.session()
-        if not session or not session:isAvailable() then
-            -- No sheet session: an unidentified book, or a runtime without
-            -- the new surfaces. Whatever it has is in the sidecar.
-            spec.canvases = {}
-            return spec
-        end
+    spec.rolling = self.ui and self.ui.rolling ~= nil or false
+    local session = self.session()
+    if session and session:isAvailable() then
         local repository, index = session:exportSources()
         if not repository then return nil, index or "unavailable" end
         if not index or not index:isComplete() then
@@ -287,14 +284,21 @@ function Controller:notesSource()
         end
         local canvases, list_err = session:allCanvases()
         if not canvases then return nil, list_err or "list_failed" end
-        spec.repository, spec.index, spec.canvases = repository, index, canvases
+        spec.sheet_repository, spec.index, spec.canvases = repository, index, canvases
         if repository._select and session.book_id then
             local memberships,err=require("ink_note_repository").new(repository):memberships(session.book_id)
             if not memberships then return nil,err end
             spec.memberships=memberships
         end
+    elseif session then
+        return nil, "unavailable"
+    elseif spec.rolling then
+        -- No sheet session: an unidentified book, or a runtime without
+        -- the new surfaces. Whatever it has is in the sidecar.
+        spec.canvases = {}
         return spec
     end
+    if spec.rolling then return spec end
     local document = self.document_session and self.document_session()
     if document and document:isAvailable() then
         local repository, book_id = document:exportSources()

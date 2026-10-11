@@ -986,6 +986,13 @@ CREATE INDEX strokes_by_canvas ON strokes(canvas_id, seq);
         { "a sheet in native page coordinates", {
             anchor_key = "k", logical_w = 10, logical_h = 10,
             surface_role = "sheet", coordinate_space = "native_page" } },
+        { "a page sheet with no page", {
+            anchor_kind = "page", anchor_key = "page-sheet:missing",
+            logical_w = 10, logical_h = 10, surface_role = "sheet" } },
+        { "a page sheet carrying an xpointer", {
+            anchor_kind = "page", anchor_key = "page-sheet:3", fixed_page = 3,
+            anchor_raw = "/body/p[1]", logical_w = 10, logical_h = 10,
+            surface_role = "sheet" } },
         { "page ink in surface coordinates", {
             anchor_kind = "page", anchor_key = "page-ink:3", fixed_page = 3,
             logical_w = 10, logical_h = 10,
@@ -1053,6 +1060,19 @@ CREATE INDEX strokes_by_canvas ON strokes(canvas_id, seq);
         t:eq(binds[8], "page_ink", "with the role")
     end)
 
+    t:case("a fixed-page sheet remains in surface coordinates", function()
+        local repo = openRepo{
+            answers = function(conn) conn:answer("last_insert_rowid", { { 33 } }) end,
+        }
+        local c = repo:createCanvas(12, {
+            anchor_kind = "page", anchor_key = "page-sheet:7", fixed_page = 7,
+            surface_role = "sheet", logical_w = 600, logical_h = 800,
+        })
+        t:check(c ~= nil, "created without a schema migration")
+        t:eq(c.coordinate_space, "surface", "the separate paper keeps sheet units")
+        t:eq(c.fixed_page, 7, "and keeps its PDF page")
+    end)
+
     t:case("every surface rule the schema states is refused before the insert", function()
         for i = 1, #BAD_SURFACES do
             local repo, driver = openRepo{
@@ -1111,6 +1131,28 @@ CREATE INDEX strokes_by_canvas ON strokes(canvas_id, seq);
         local sql = driver.last():statement("FROM canvases")
         t:check(sql:find("surface_role = 'sheet'", 1, true) ~= nil,
             "page ink never reaches the anchor index")
+    end)
+
+    t:case("fixed-page sheet queries are bounded and exclude EPUB sheets", function()
+        local repo, driver = pageInkRepo{
+            { 7, "page", "page-sheet:7", nil, nil, nil, 4,
+              600, 800, 4242, "sheet", "surface" },
+        }
+        local rows = repo:listPageSheets(12, { after_page = 3, after_id = 6, limit = 20 })
+        t:eq(rows[1].id, 7, "a fixed sheet is mapped")
+        local sql = driver.last():statement("FROM canvases")
+        t:check(sql:find("surface_role = 'sheet'", 1, true) ~= nil, "sheets only")
+        t:check(sql:find("anchor_kind = 'page'", 1, true) ~= nil, "fixed anchors only")
+        t:check(sql:find("ORDER BY fixed_page, id", 1, true) ~= nil, "stable page order")
+        local binds = driver.last():bindsFor("FROM canvases")
+        t:eq(binds[2], 3, "the page cursor is bound")
+        t:eq(binds[3], 6, "with its id tie-breaker")
+        t:eq(binds[4], 20, "and a bounded limit")
+        local counted, count_driver = pageInkRepo()
+        t:eq(counted:countPageSheets(12), 3, "counted without loading rows")
+        local count_sql = count_driver.last():statement("count")
+        t:check(count_sql:find("anchor_kind = 'page'", 1, true) ~= nil,
+            "the count cannot include EPUB sheets")
     end)
 
     t:case("sheets are counted without their rows", function()

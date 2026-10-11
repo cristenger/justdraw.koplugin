@@ -927,6 +927,7 @@ function support.newCanvasStore(canvases)
     --- the way the column's DEFAULT reads back for every row written before
     --- schema v2 -- so a fixture built as a bare table is still a sheet here.
     local function roleOf(canvas) return canvas.surface_role or "sheet" end
+    local function kindOf(canvas) return canvas.anchor_kind or "xpointer" end
 
     function store:listCanvases()
         self.calls.list = self.calls.list + 1
@@ -937,7 +938,7 @@ function support.newCanvasStore(canvases)
         -- Sheets only, like `listCanvases`: page ink has no anchor to resolve.
         local out = {}
         for i = 1, #self.canvases do
-            if roleOf(self.canvases[i]) == "sheet" then
+            if roleOf(self.canvases[i]) == "sheet" and kindOf(self.canvases[i]) == "xpointer" then
                 out[#out + 1] = self.canvases[i]
             end
         end
@@ -1195,6 +1196,18 @@ function support.newCanvasStore(canvases)
         if role == "sheet" then
             if space == nil then space = "surface" end
             if space ~= "surface" then return nil end
+            if kind == "page" then
+                local page = spec.fixed_page
+                if type(page) ~= "number" or page ~= page
+                    or page == math.huge or page == -math.huge
+                    or page < 1 or page ~= math.floor(page) then
+                    return nil
+                end
+                if spec.anchor_raw ~= nil or spec.anchor_normalized ~= nil
+                    or spec.anchor_dom_version ~= nil then
+                    return nil
+                end
+            end
         elseif role == "page_ink" then
             if space == nil then space = "native_page" end
             if space ~= "native_page" then return nil end
@@ -1257,7 +1270,8 @@ function support.newCanvasStore(canvases)
         if self.fail_count_canvases then return nil, self.fail_count_canvases end
         local n = 0
         for i = 1, #self.canvases do
-            if roleOf(self.canvases[i]) == "sheet" then n = n + 1 end
+            if roleOf(self.canvases[i]) == "sheet"
+                and kindOf(self.canvases[i]) == "xpointer" then n = n + 1 end
         end
         return n
     end
@@ -1274,11 +1288,47 @@ function support.newCanvasStore(canvases)
         local rows = {}
         for i = 1, #self.canvases do
             local c = self.canvases[i]
-            if roleOf(c) == "sheet" and (not after_id or c.id > after_id) then
+            if roleOf(c) == "sheet" and kindOf(c) == "xpointer"
+                and (not after_id or c.id > after_id) then
                 rows[#rows + 1] = c
             end
         end
         table.sort(rows, function(a, b) return a.id < b.id end)
+        local out = {}
+        for i = 1, math.min(#rows, limit) do out[i] = rows[i] end
+        return out
+    end
+
+    function store:countPageSheets()
+        if self.fail_count_page_sheets then return nil, self.fail_count_page_sheets end
+        local n = 0
+        for i = 1, #self.canvases do
+            local c = self.canvases[i]
+            if roleOf(c) == "sheet" and kindOf(c) == "page" then n = n + 1 end
+        end
+        return n
+    end
+
+    function store:listPageSheets(_, opts)
+        self.calls.list = self.calls.list + 1
+        if self.fail_list_page_sheets then return nil, self.fail_list_page_sheets end
+        opts = opts or {}
+        local limit = batchLimit(opts.limit, 100)
+        local after_page = tonumber(opts.after_page)
+        local after_id = after_page and (tonumber(opts.after_id) or 0) or nil
+        local rows = {}
+        for i = 1, #self.canvases do
+            local c = self.canvases[i]
+            if roleOf(c) == "sheet" and kindOf(c) == "page"
+                and (not after_page or c.fixed_page > after_page
+                    or (c.fixed_page == after_page and c.id > after_id)) then
+                rows[#rows + 1] = c
+            end
+        end
+        table.sort(rows, function(a, b)
+            if a.fixed_page ~= b.fixed_page then return a.fixed_page < b.fixed_page end
+            return a.id < b.id
+        end)
         local out = {}
         for i = 1, math.min(#rows, limit) do out[i] = rows[i] end
         return out

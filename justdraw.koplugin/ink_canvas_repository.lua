@@ -675,7 +675,7 @@ function Repository:listCanvases(book_id)
     if not ready then return nil, reason end
     return self:_select(
         CANVAS_COLUMNS .. [[
-         WHERE book_id = ?1 AND surface_role = 'sheet'
+         WHERE book_id = ?1 AND surface_role = 'sheet' AND anchor_kind = 'xpointer'
          ORDER BY updated_at DESC, id;]],
         { book_id }, canvasRow)
 end
@@ -686,7 +686,7 @@ function Repository:countCanvases(book_id)
     if not ready then return nil, reason end
     local rows, err = self:_select([[
         SELECT count(*) FROM canvases
-         WHERE book_id = ?1 AND surface_role = 'sheet';]],
+         WHERE book_id = ?1 AND surface_role = 'sheet' AND anchor_kind = 'xpointer';]],
         { book_id }, function(row) return num(row[1]) or 0 end)
     if not rows then return nil, err end
     return rows[1] or 0
@@ -712,12 +712,13 @@ function Repository:listCanvasesBatch(book_id, opts)
     local after_id = tonumber(opts.after_id)
     if after_id then
         return self:_select(CANVAS_COLUMNS .. [[
-             WHERE book_id = ?1 AND surface_role = 'sheet' AND id > ?2
+             WHERE book_id = ?1 AND surface_role = 'sheet'
+               AND anchor_kind = 'xpointer' AND id > ?2
              ORDER BY id LIMIT ?3;]],
             { book_id, after_id, limit }, canvasRow)
     end
     return self:_select(CANVAS_COLUMNS .. [[
-         WHERE book_id = ?1 AND surface_role = 'sheet'
+         WHERE book_id = ?1 AND surface_role = 'sheet' AND anchor_kind = 'xpointer'
          ORDER BY id LIMIT ?2;]],
         { book_id, limit }, canvasRow)
 end
@@ -740,6 +741,14 @@ local function surfaceOf(spec, kind)
     if role == "sheet" then
         if space == nil then space = "surface" end
         if space ~= "surface" then return nil end
+        if kind == "page" then
+            local page = spec.fixed_page
+            if not finite(page) or page < 1 or page ~= math.floor(page) then return nil end
+            if spec.anchor_raw ~= nil or spec.anchor_normalized ~= nil
+                or spec.anchor_dom_version ~= nil then
+                return nil
+            end
+        end
     elseif role == "page_ink" then
         if space == nil then space = "native_page" end
         if space ~= "native_page" then return nil end
@@ -754,6 +763,42 @@ local function surfaceOf(spec, kind)
         return nil
     end
     return role, space
+end
+
+-- ---------------------------------------------------------------- page sheets
+
+--- Fixed-page drawing sheets, in stable page/id order. These deliberately do
+--- not share the xpointer listing above: a paging document has no CREngine
+--- anchor to resolve, while an EPUB index must never be handed a page row.
+function Repository:listPageSheets(book_id, opts)
+    local ready, reason = self:_ready(false)
+    if not ready then return nil, reason end
+    opts = opts or {}
+    local limit = batchLimit(opts.limit, 100)
+    local after_page = tonumber(opts.after_page)
+    if after_page then
+        local after_id = tonumber(opts.after_id) or 0
+        return self:_select(CANVAS_COLUMNS .. [[
+             WHERE book_id = ?1 AND surface_role = 'sheet' AND anchor_kind = 'page'
+               AND (fixed_page > ?2 OR (fixed_page = ?2 AND id > ?3))
+             ORDER BY fixed_page, id LIMIT ?4;]],
+            { book_id, after_page, after_id, limit }, canvasRow)
+    end
+    return self:_select(CANVAS_COLUMNS .. [[
+         WHERE book_id = ?1 AND surface_role = 'sheet' AND anchor_kind = 'page'
+         ORDER BY fixed_page, id LIMIT ?2;]],
+        { book_id, limit }, canvasRow)
+end
+
+function Repository:countPageSheets(book_id)
+    local ready, reason = self:_ready(false)
+    if not ready then return nil, reason end
+    local rows, err = self:_select([[
+        SELECT count(*) FROM canvases
+         WHERE book_id = ?1 AND surface_role = 'sheet' AND anchor_kind = 'page';]],
+        { book_id }, function(row) return num(row[1]) or 0 end)
+    if not rows then return nil, err end
+    return rows[1] or 0
 end
 
 --[[--

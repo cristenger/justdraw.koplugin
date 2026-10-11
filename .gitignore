@@ -15,3 +15,6 @@
 # listed to make it explicit that neither is ever committed)
 /scribe-log-analysis-2026-08-28.md
 /scribe-input-integrity-remediation-plan-2026-08-28.md
+
+# MacOS artifacts
+.DS_Store
