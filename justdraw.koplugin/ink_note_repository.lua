@@ -5,6 +5,9 @@ function Groups.new(repository)
     return setmetatable({ repository = repository }, Groups)
 end
 function Groups:memberships(book)
+    if type(self.repository.listNoteMemberships) == "function" then
+        return self.repository:listNoteMemberships(book)
+    end
     return self.repository:_select(
         [[SELECT s.canvas_id,s.note_id,s.position
         FROM document_note_sheets s JOIN document_notes n ON n.id=s.note_id WHERE n.book_id=?1;]],
@@ -14,8 +17,52 @@ function Groups:memberships(book)
         end
     )
 end
+
+--- Ordered pages in the logical note that owns `surface`.  A sheet that has
+--- never had a second page has no membership row yet; presenting it as a
+--- one-page note keeps the UI honest without creating bookkeeping merely to
+--- paint a header.
+function Groups:sequence(book, surface)
+    if not surface or tonumber(surface.book_id) ~= tonumber(book) then
+        return nil, "bad_surface"
+    end
+    local members, err = self:memberships(book)
+    if not members then return nil, err end
+    local note_id
+    for _, member in ipairs(members) do
+        if tonumber(member.canvas_id) == tonumber(surface.id) then
+            note_id = member.note_id
+            break
+        end
+    end
+    if not note_id then
+        return {{ canvas_id = surface.id, position = 1 }}, 1
+    end
+    local pages = {}
+    for _, member in ipairs(members) do
+        if tonumber(member.note_id) == tonumber(note_id) then
+            pages[#pages + 1] = member
+        end
+    end
+    table.sort(pages, function(a, b)
+        if a.position ~= b.position then return a.position < b.position end
+        return a.canvas_id < b.canvas_id
+    end)
+    local current
+    for i, member in ipairs(pages) do
+        if tonumber(member.canvas_id) == tonumber(surface.id) then current = i end
+    end
+    if not current then return nil, "bad_surface" end
+    return pages, current, note_id
+end
 function Groups:append(book, surface)
     local r = self.repository
+    -- Interface-level stores used by the unit suite can provide the compound
+    -- mutation directly; SQLite repositories intentionally exercise the SQL
+    -- transaction below.
+    if type(r.appendNoteSheet) == "function" then
+        return r:appendNoteSheet(book, surface)
+    end
     return r:transaction(function()
         local rows, err = r:_select(
             "SELECT id FROM canvases WHERE id=?1 AND book_id=?2 AND surface_role='sheet';",

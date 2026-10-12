@@ -966,6 +966,8 @@ function support.newCanvasStore(canvases)
     --- promise -- that a repaint decodes nothing -- is that counter staying
     --- still.
     store.strokes = {}          -- [canvas_id] = { { meta..., points = {}, n = } }
+    store.images = {}           -- [canvas_id] = immutable canvas image rows
+    store.next_image_id = 1
     store.next_stroke_id = 1
     store.calls.stroke_list = 0
     store.calls.stroke_read = 0
@@ -1148,6 +1150,26 @@ function support.newCanvasStore(canvases)
         return self:putStroke(canvas.id, stroke)
     end
 
+    function store:listCanvasImages(canvas_id)
+        local out = {}
+        for i, image in ipairs(self.images[canvas_id] or {}) do
+            local copy = {}; for k, v in pairs(image) do copy[k] = v end
+            out[i] = copy
+        end
+        return out
+    end
+
+    function store:addCanvasImage(canvas, image)
+        if self.fail_add_image then return nil, self.fail_add_image end
+        local list = self.images[canvas.id] or {}
+        self.images[canvas.id] = list
+        local row = {}; for k, v in pairs(image) do row[k] = v end
+        row.id, row.canvas_id, row.position = self.next_image_id, canvas.id, #list + 1
+        self.next_image_id = self.next_image_id + 1
+        list[#list + 1] = row
+        return row
+    end
+
     function store:deleteStroke(stroke_id)
         self.deleted[#self.deleted + 1] = stroke_id
         for _, list in pairs(self.strokes) do
@@ -1169,8 +1191,28 @@ function support.newCanvasStore(canvases)
     --- The rest of the repository interface the session drives.
     store.calls.book = 0
     store.next_canvas_id = 100
+    store.note_memberships = {}
+    store.next_note_id = 1
     store.closed = false
     store.identity = nil
+
+    function store:listNoteMemberships(book_id)
+        local rows = {}
+        for _, member in ipairs(self.note_memberships) do
+            local canvas
+            for _, candidate in ipairs(self.canvases) do
+                if candidate.id == member.canvas_id then canvas = candidate; break end
+            end
+            if canvas and tonumber(canvas.book_id) == tonumber(book_id) then
+                rows[#rows + 1] = {
+                    canvas_id = member.canvas_id,
+                    note_id = member.note_id,
+                    position = member.position,
+                }
+            end
+        end
+        return rows
+    end
 
     function store:bookId(partial_md5, file_size, last_path)
         self.calls.book = self.calls.book + 1
@@ -1263,6 +1305,32 @@ function support.newCanvasStore(canvases)
             logical_h = spec.logical_h,
         }
         self.canvases[#self.canvases + 1] = canvas
+        return canvas
+    end
+
+    function store:appendNoteSheet(book_id, surface)
+        if self.fail_create then return nil, self.fail_create end
+        local note_id
+        for _, member in ipairs(self.note_memberships) do
+            if member.canvas_id == surface.id then note_id = member.note_id end
+        end
+        if not note_id then
+            note_id = self.next_note_id; self.next_note_id = self.next_note_id + 1
+            self.note_memberships[#self.note_memberships + 1] = {
+                canvas_id=surface.id, note_id=note_id, position=1,
+            }
+        end
+        local position = 1
+        for _, member in ipairs(self.note_memberships) do
+            if member.note_id == note_id then position = math.max(position, member.position) end
+        end
+        local spec = {}; for k,v in pairs(surface) do spec[k]=v end
+        spec.anchor_key = "justdraw-note:" .. note_id .. ":" .. (self.next_canvas_id + 1)
+        local canvas, err = self:createCanvas(book_id, spec)
+        if not canvas then return nil, err end
+        self.note_memberships[#self.note_memberships + 1] = {
+            canvas_id=canvas.id, note_id=note_id, position=position+1,
+        }
         return canvas
     end
 
@@ -1398,6 +1466,7 @@ function support.newCanvasStore(canvases)
             local c = self.canvases[i]
             if roleOf(c) == "page_ink" and c.fixed_page == fixed_page then
                 self.strokes[c.id] = nil
+                self.images[c.id] = nil
                 table.remove(self.canvases, i)
             end
         end
@@ -1410,6 +1479,7 @@ function support.newCanvasStore(canvases)
             local c = self.canvases[i]
             if roleOf(c) == "page_ink" then
                 self.strokes[c.id] = nil
+                self.images[c.id] = nil
                 table.remove(self.canvases, i)
             end
         end
@@ -1422,7 +1492,30 @@ function support.newCanvasStore(canvases)
             if self.canvases[i].id == canvas_id then table.remove(self.canvases, i) end
         end
         self.strokes[canvas_id] = nil
+        self.images[canvas_id] = nil
         return true
+    end
+
+    function store:deleteBookCanvases(book_id, ids)
+        if self.fail_delete_canvas then return nil, self.fail_delete_canvas end
+        local wanted = {}; for _, id in ipairs(ids or {}) do wanted[id] = true end
+        for id in pairs(wanted) do
+            local owned
+            for _, c in ipairs(self.canvases) do
+                if c.id == id and (c.book_id == nil or c.book_id == book_id) then owned = true end
+            end
+            if not owned then return nil, "foreign_canvas" end
+        end
+        return self:transaction(function()
+            for i = #self.canvases, 1, -1 do
+                local id = self.canvases[i].id
+                if wanted[id] then
+                    table.remove(self.canvases, i)
+                    self.strokes[id], self.images[id] = nil, nil
+                end
+            end
+            return true
+        end)
     end
 
     function store:touchCanvas()
@@ -1442,6 +1535,13 @@ function support.newCanvasStore(canvases)
             before[cid] = {}
             for i = 1, #list do before[cid][i] = list[i] end
         end
+        local before_canvases = {}
+        for i, canvas in ipairs(self.canvases) do before_canvases[i] = canvas end
+        local before_images = {}
+        for cid, list in pairs(self.images) do
+            before_images[cid] = {}
+            for i, image in ipairs(list) do before_images[cid][i] = image end
+        end
         local next_id = self.next_stroke_id
         local deleted_count = #self.deleted
         local ok, res, err = pcall(fn, self)
@@ -1450,6 +1550,8 @@ function support.newCanvasStore(canvases)
         end
         if not ok or res == nil then
             self.strokes = before
+            self.canvases = before_canvases
+            self.images = before_images
             self.next_stroke_id = next_id
             for i = #self.deleted, deleted_count + 1, -1 do
                 table.remove(self.deleted, i)
@@ -2500,6 +2602,19 @@ function support.install()
         return o
     end
     package.preload["ui/widget/radiobuttontable"] = function() return RadioButtonTable end
+
+    local CheckButton = {}
+    function CheckButton:new(o)
+        o = o or {}
+        function o:getSize() return { w = self.width or 400, h = 40 } end
+        function o:toggleCheck() self.checked = not self.checked end
+        function o:tap()
+            self:toggleCheck()
+            if self.callback then self.callback() end
+        end
+        return o
+    end
+    package.preload["ui/widget/checkbutton"] = function() return CheckButton end
 
     local Event = {}
     function Event:new(name, ...)

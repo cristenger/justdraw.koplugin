@@ -38,7 +38,7 @@ Rules every row also has to meet:
 | Pen settings | Opens the pen grid; Close closes it | Auto |
 | Drawing refresh | Opens the intervals; a pick applies and closes | Auto |
 | Input mode | Modes are disabled while drawing; with drawing off a pick applies and closes | Auto |
-| Export… | Opens the export form; Cancel closes it | Auto |
+| Export… | Opens the export form; fixed-layout PDFs also show an unchecked Include source pages option; Cancel closes it | Auto |
 | Toolbar side | Closes More, then moves the toolbar to the other side | Auto (was stuck: More stayed open under the rebuilt toolbar) |
 | Close | Closes More | Auto |
 | A tap outside More | Closes More | Auto |
@@ -57,33 +57,35 @@ cell, refusals, stale dialogs).
 |---|---|---|
 | Show toolbar | Toggles the toolbar; the menu stays open | Auto |
 | Start drawing | Turns drawing on with the toolbar up, closes the menu | Auto |
+| Open page sheet | Always visible on fixed-layout documents; creates, opens, or offers grouped drawing notes independently of page ink | Auto |
 | Toolbar side → Left / Right | Moves the toolbar | Auto |
 | Input mode → each | Applies (disabled while drawing) | Auto |
 | Pen style / Pen width → each | Applies | Auto |
 | Drawing refresh | Opens its chooser, closes the menu | Auto |
 | Fast refresh while drawing | Toggles | Auto |
 | Stylus diagnostics | Asks first; Cancel starts nothing | Auto; Device: Start logs for 60 s |
-| Export… | Opens the export form | Auto |
 | Document notes | Opens the browser | Auto |
 | Notebooks | Opens the library | Auto |
-| Page notes → Delete this page note / Delete all page notes | Asks; Cancel goes back to the menu and keeps the ink; Delete removes it | Auto |
+| Page notes → Delete this page note / Delete all page notes / Export… | Delete asks and affects page notes only; Export opens the form | Auto |
+| Export… | Standalone only where Page notes is unavailable | Auto |
 | Clear legacy ink entries | Only with ink from older versions | Device |
 
 ## Drawing sheet (EPUB and other reflowable books)
 
 | Control | Must do | Checked |
 |---|---|---|
-| Draw / Stop | Turns drawing on/off | Auto |
+| Add page | Appends a blank page to the current logical note, opens it, and keeps drawing active | Auto |
+| Previous / Next | Stay inside the logical note; grey at boundaries and both grey for a one-page note | Auto |
+| Header status | Omits Page 1 of 1; shows Page X of Y only for multi-page notes alongside pen/loading/error state; tapping it chooses a page within the current note | Auto |
 | ✕ | Puts the sheet away, drawing off; the page turns again | Auto |
 | Pen / Eraser / Undo icons | As on the side toolbar, pressed with the pen | Auto |
 | Document notes icon | Opens the browser | Auto |
-| More icon | Same dialog as the reader's, plus Close sheet and Delete sheet (asks; Cancel keeps it) | Auto |
+| More icon | Same dialog as the reader's; an open sheet also adds Close sheet, retry actions and Delete note (one page) or Delete page (multiple pages) | Auto |
 | 40 % · 70 % · 100 % | Steps the height and relabels | Auto |
 | A pen stroke on the sheet | Ink on the sheet; Undo removes it | Auto |
 | Hold on any icon | Toast with its name | Auto (handler) |
 | Dragging the strip above the controls | Resizes | Device |
-| Drawing sheet → Open sheet here / Close sheet | Reopens the same sheet here; closes it | Auto |
-| Go to this sheet's page / Open a sheet here instead | Only after reading on with a sheet open | Device |
+| Start drawing | Creates or reopens the sheet with drawing off; Pen or Eraser starts capture | Auto |
 
 ## Notebooks
 
@@ -126,8 +128,9 @@ cell, refusals, stale dialogs).
 | Filter → Sort… | Flips the order; the label flips with it | Auto |
 | Filter → KOReader annotations | Closes the browser and opens KOReader's own list | Auto |
 | Filter menu | No Close row: its title bar ✕ closes it | Auto |
-| Select / Done selecting | Rows toggle ☑/☐ and the count follows | Auto |
-| Export… | Menu of scopes, one page; a scope prepares, then opens the export form | Auto |
+| Select / Done | Rows toggle ☑/☐ and the count follows | Auto |
+| Delete selected… | Deletes selected JustDraw groups/page notes in one transaction and skips native/legacy items | Auto |
+| Export… | Menu of scopes, one page; a scope prepares, then opens the export form with Include source pages on fixed-layout PDFs | Auto |
 | Page counter (1 / N) | Asks for a list page; Cancel closes it | Auto |
 | Previous / Next | Disabled on a single page | Auto (state), Device (paging) |
 | A row | Opens the note | Auto |

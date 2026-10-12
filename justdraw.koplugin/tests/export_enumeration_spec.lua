@@ -467,6 +467,16 @@ return function(ctx)
         t:check(math.abs(h_pt - 800 * 72 / 300) < 1e-9, "height in points")
     end)
 
+    t:case("an anchored sheet renders at its PDF page size", function()
+        local scale, w_pt, h_pt = DocumentSource.geometryFor{
+            kind = "sheet", logical_w = 600, logical_h = 700,
+            export_width_pt = 612, export_height_pt = 792,
+        }
+        t:check(scale > 1, "screen pixels are enlarged for export")
+        t:eq(w_pt, 612, "source page width")
+        t:eq(h_pt, 792, "source page height")
+    end)
+
     -- =================================================================
     t:describe("export / enumeration / the notes' renderer")
 

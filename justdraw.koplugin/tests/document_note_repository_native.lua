@@ -50,6 +50,15 @@ return function(home)
         #members == 3 and members[1].canvas_id == third.id and members[3].canvas_id == second.id,
         "sheet order did not survive reopening"
     )
+    local loaded_root
+    for _, canvas in ipairs(assert(repo:listCanvases(book))) do
+        if canvas.id == root.id then loaded_root = canvas; break end
+    end
+    assert(loaded_root and loaded_root.book_id == book,
+        "reloaded sheet lost the book ownership needed for navigation")
+    local sequence, current = assert(group:sequence(book, loaded_root))
+    assert(#sequence == 3 and current == 2,
+        "reloaded root sheet no longer navigates inside its logical note")
     assert(repo:readStrokeChunk(stroke, 0).points == blob, "grouping changed stroke bytes")
     repo:close()
     repo = assert(Repository.open { path = path, schema_version = 3 })

@@ -59,11 +59,13 @@ return function(ctx)
             current_page = opts.current_page,
             visible = opts.visible,
         }
-        local store = support.newCanvasStore(opts.canvases or {})
+        local store = opts.store or support.newCanvasStore(opts.canvases or {})
         for _, entry in ipairs(opts.strokes or {}) do
             store:putStroke(entry.canvas_id, entry.stroke)
         end
-        local p = support.newPlugin(ctx.JustDraw, env, { document = doc })
+        local p = support.newPlugin(ctx.JustDraw, env, {
+            document = doc, doc_settings = opts.doc_settings,
+        })
         p.canvas_repository = store
         env.UIManager:flush()
         p:onReaderReady()
@@ -159,18 +161,16 @@ return function(ctx)
         t:eq(p.session:isAvailable(), true, "and it is usable")
     end)
 
-    t:case("the sheet menu is off without a session", function()
+    t:case("the redundant sheet submenu is absent without a session", function()
         ctx.reset()
         local p = support.newPlugin(ctx.JustDraw, env, {})
         env.UIManager:flush()
-        local item = ctx.menuItem(p, "Drawing sheet")
-        t:check(item ~= nil, "the entry is there")
-        t:eq(item.enabled_func(), false, "and greyed out")
+        t:eq(ctx.menuItem(p, "Drawing sheet"), nil, "no redundant entry")
     end)
 
-    t:case("the sheet menu is on with one", function()
+    t:case("the redundant sheet submenu is absent with a session", function()
         local p = canvasPlugin()
-        t:eq(ctx.menuItem(p, "Drawing sheet").enabled_func(), true, "reachable")
+        t:eq(ctx.menuItem(p, "Drawing sheet"), nil, "Start drawing owns creation")
     end)
 
     t:case("the checksum is read from the document's settings", function()
@@ -286,10 +286,11 @@ return function(ctx)
         end
     end)
 
-    t:case("opening a sheet turns drawing on", function()
+    t:case("opening a sheet waits for an explicit drawing tool", function()
         local p = canvasPlugin()
         p:openCanvasHere()
-        t:eq(p.drawing, true, "generic sheet entry retains editing behavior")
+        t:eq(p.drawing, false, "opening a sheet does not capture input")
+        t:eq(p.bar.status_text, "Drawing off", "the idle state is explicit")
     end)
 
     t:case("a populated sheet captures no ink until its chunks validate", function()
@@ -306,7 +307,7 @@ return function(ctx)
         }
         p:openCanvas(canvas)
         t:eq(p.drawing, false, "loading is not advertised as Draw")
-        t:eq(p.bar.draw_btn.text, "Loading", "the reachable button shows the state")
+        t:eq(p.bar.status_text, "Loading", "the header shows the state")
         p:setDrawing(true)
         t:eq(p.drawing, false, "manual Draw is guarded too")
         p:onJustDrawUndo()
@@ -324,7 +325,9 @@ return function(ctx)
         p:releaseStylusMachine()
         env.UIManager:flush()
         t:eq(p.session:cache():isReady(), true, "the stored stroke validated")
-        t:eq(p.drawing, true, "only then is capture enabled")
+        t:eq(p.drawing, false, "readiness does not choose drawing for the reader")
+        p.bar.pen_btn.callback()
+        t:eq(p.drawing, true, "Pen enables capture after validation")
         t:eq(store.calls.stroke_chunk, 1, "one persisted chunk was streamed")
     end)
 
@@ -346,17 +349,17 @@ return function(ctx)
         t:eq(p.session:loadFailed(), true, "corruption is visible as load_failed")
         t:eq(p.drawing, false, "the failed sheet does not capture input")
         t:eq(p.canvas_open, true, "Hide and Retry remain reachable")
-        t:eq(p.bar.draw_btn.text, "Retry", "the toolbar exposes recovery")
+        t:eq(p.bar.status_text, "Load failed", "the toolbar exposes recovery")
         store.fail_stroke_chunk = nil
         t:eq(p:retryCanvasLoad(), true, "retry starts a fresh generation")
-        t:eq(p.bar.draw_btn.text, "Loading", "retry reports its new state")
+        t:eq(p.bar.status_text, "Loading", "retry reports its new state")
         env.UIManager:flush()
         t:eq(p.session:cache():isReady(), true, "retry rebuilt the raster")
-        t:eq(p.drawing, true, "capture resumes after successful validation")
+        t:eq(p.drawing, false, "retry leaves drawing under explicit control")
     end)
 
     t:describe("main / canvas viewing intent")
-    t:case("view survives ready, retry, recovery and same-ID reopen without a lease", function()
+    t:case("view stays idle while an explicitly selected tool survives recovery", function()
         local rows, pages = manySheets(1)
         local canvas = rows[1]
         local p, store = canvasPlugin{canvases=rows, pages=pages, strokes={
@@ -370,21 +373,21 @@ return function(ctx)
         t:eq(p.session:loadFailed(), true, "load failure is visible")
         store.fail_stroke_chunk = nil
         p:retryCanvasLoad(); env.UIManager:flush()
-        t:eq(p.drawing, false, "Retry preserves view")
-        t:eq(p.input_lease, nil, "no lease after ready")
+        t:eq(p.drawing, false, "Retry preserves view mode")
+        t:eq(p.input_lease, nil, "view mode has no capture lease")
+        p.bar.pen_btn.callback()
+        t:eq(p.drawing, true, "Pen explicitly starts editing")
         p:onCanvasSaveRecovered(canvas)
-        t:eq(p.drawing, false, "save recovery is not user intent")
-        p:setDrawing(true)
-        t:eq(p.drawing, true, "explicit Draw works")
+        t:eq(p.drawing, true, "save recovery preserves selected editing")
         local copy = {}; for k,v in pairs(canvas) do copy[k]=v end
         local cache = p.session:cache()
         t:eq(p:openCanvas(copy,{mode="view"}), overlay, "same ID returns its overlay")
         t:eq(p.session:cache(), cache, "same ID reuses its raster")
-        t:eq(p.drawing, false, "same ID can stop drawing")
+        t:eq(p.drawing, false, "an explicit view reopen stops capture")
         overlay.remember_height = false
         overlay:setHeight(100)
         t:eq(G_reader_settings.data.justdraw_canvas_height, saved, "context height is transient")
-        t:eq(p.drawing, false, "expansion stays in view")
+        t:eq(p.drawing, false, "expansion preserves the stopped state")
         p:teardown()
     end)
 
@@ -464,7 +467,8 @@ return function(ctx)
         p.bar.more_btn.callback()
         local dialog = env.dialogs[#env.dialogs]
         t:check(row(dialog, "Close sheet") ~= nil, "the sheet can be closed from the bar")
-        t:check(row(dialog, "Delete sheet") ~= nil, "and deleted")
+        t:check(row(dialog, "Delete note") ~= nil,
+            "a one-page note names deletion after the whole note")
         t:eq(row(dialog, "Export…").enabled, true,
             "an open sheet is something to export")
         row(dialog, "Close sheet").callback()
@@ -602,12 +606,12 @@ return function(ctx)
         t:eq(p.session:activeCanvas().id, second.id, "session retains the target")
         t:eq(p.canvas_open, true, "main agrees the failed sheet is open")
         t:check(p.bar ~= nil and p.bar.embedded, "Retry remains in the overlay")
-        t:eq(p.bar.draw_btn.text, "Retry", "the failure is explicit, not a blank editable page")
+        t:eq(p.bar.status_text, "Load failed", "the failure is explicit, not a blank editable page")
         t:eq(p.drawing, false, "capture is off")
         store.fail_stroke_list = nil
         t:eq(p:retryCanvasLoad(), true, "the target can be retried in place")
         env.UIManager:flush()
-        t:eq(p.drawing, true, "successful recovery resumes drawing")
+        t:eq(p.drawing, false, "successful recovery remains in view mode")
     end)
 
     t:case("rotation keeps main bound to the overlay's rebuilt toolbar", function()
@@ -627,9 +631,85 @@ return function(ctx)
         p.session:overlay():setHeight(40)
         t:check(p.bar ~= old, "the embedded bar was replaced")
         t:eq(p.bar, p.session:overlay().bar, "main owns the replacement")
-        p.bar.draw_btn.callback()
-        t:eq(p.drawing, false, "Stop on the visible bar controls capture")
-        t:eq(p.bar.draw_btn.text, "Draw", "and its own label updates")
+        local old_id = p.session:activeCanvas().id
+        p.bar.add_btn.callback()
+        t:check(p.session:activeCanvas().id ~= old_id, "Add page uses the visible bar")
+        t:eq(p.drawing, true, "the new page opens ready to write")
+    end)
+
+    t:case("sheet header hides a one-page count and navigates a logical note", function()
+        local settings = {}
+        local p, store = canvasPlugin{ doc_settings = settings }
+        p:openCanvasHere()
+        local first = p.session:activeCanvas()
+        t:eq(p.bar.status_text:find("Page", 1, true), nil,
+            "a single page does not announce Page 1 of 1")
+        t:eq(p.bar.previous_btn.enabled, false, "previous is visibly disabled")
+        t:eq(p.bar.status_btn.enabled, false, "one-page selector is visibly disabled")
+        t:eq(p.bar.next_btn.enabled, false, "next is visibly disabled")
+        p.bar.add_btn.callback()
+        local second = p.session:activeCanvas()
+        t:check(second.id ~= first.id, "Add page opened a second page")
+        t:check(p.bar.status_text:find("Page 2 of 2", 1, true) ~= nil,
+            "multi-page notes show their position")
+        t:eq(p.bar.previous_btn.enabled, true, "the previous page is reachable")
+        t:eq(p.bar.status_btn.enabled, true, "multi-page selector is enabled")
+        t:eq(p.bar.next_btn.enabled, false, "the last-page boundary is disabled")
+        local more = p:showBarMenu()
+        local delete_page
+        for _, row in ipairs(more.buttons) do
+            for _, button in ipairs(row) do
+                if button.text == "Delete page" then delete_page = button end
+            end
+        end
+        t:check(delete_page ~= nil,
+            "a multi-page note names deletion after the current page")
+        p:closeReaderModal(more)
+        p.bar.status_btn.callback()
+        local selector = env.dialogs[#env.dialogs]
+        t:eq(selector.title, "Pages in this note", "the centre control opens its note")
+        t:eq(selector.buttons[1][1].text, "Page 1", "first sibling is listed")
+        t:eq(selector.buttons[2][1].text, "Page 2 · Current", "current page is identified")
+        selector.buttons[1][1].callback()
+        t:eq(p.session:activeCanvas().id, first.id, "the chooser jumps directly")
+        p.bar.next_btn.callback()
+        t:eq(p.session:activeCanvas().id, second.id, "next returns after a direct jump")
+        p.bar.previous_btn.callback()
+        t:eq(p.session:activeCanvas().id, first.id, "previous stays inside the note")
+        t:check(p.bar.status_text:find("Page 1 of 2", 1, true) ~= nil,
+            "the indicator follows navigation")
+        t:eq(p.bar.previous_btn.enabled, false, "first-page boundary is disabled")
+        t:eq(p.bar.next_btn.enabled, true, "next returns to page two")
+        p.bar.next_btn.callback()
+        t:eq(p.session:activeCanvas().id, second.id, "next returns to the sibling")
+        p:onCloseDocument()
+        local reopened = canvasPlugin{ store = store, doc_settings = settings }
+        reopened:openCanvasHere()
+        t:eq(reopened.session:activeCanvas().id, second.id,
+            "a new plugin instance restores the selected note page")
+    end)
+
+    t:case("a saved writable sheet starts idle and its tools toggle capture", function()
+        local p = canvasPlugin()
+        p:openCanvasHere()
+        local canvas_id = p.session:activeCanvas().id
+        t:eq(p:closeCanvas(), true, "the created sheet is saved and closed")
+        p:openCanvasHere()
+        t:eq(p.session:activeCanvas().id, canvas_id, "the saved sheet reopens")
+        t:eq(p.drawing, false, "a reopened writable sheet starts with drawing off")
+        t:eq(p.bar.pen_btn.enabled, true, "Pen remains available for recovery")
+        t:eq(p.bar.eraser_btn.enabled, true, "Eraser remains available for recovery")
+        p.bar.pen_btn.callback()
+        t:eq(p.drawing, true, "Pen resumes editing the saved sheet")
+        t:check(p.input_lease ~= nil, "capture is active again")
+        p.bar.pen_btn.callback()
+        t:eq(p.drawing, false, "tapping the active Pen disables drawing")
+        t:eq(p.input_lease, nil, "stopping Pen releases capture")
+        p.bar.eraser_btn.callback()
+        t:eq(p.drawing, true, "Eraser can start editing directly")
+        t:eq(p.eraser, true, "the eraser is selected")
+        p.bar.eraser_btn.callback()
+        t:eq(p.drawing, false, "tapping the active Eraser disables drawing")
     end)
 
     t:case("opening a sheet builds its raster once, at the scale the sheet shows", function()
@@ -667,6 +747,7 @@ return function(ctx)
     t:case("legacy toolbar side preferences preserve top sheet-bar ownership", function()
         local p = canvasPlugin()
         p:openCanvasHere()
+        p.bar.pen_btn.callback()
         local right_x = p.bar.dimen.x
         p:sideItem("Left", "left").callback()
         t:eq(p.bar, p.session:overlay().bar, "main owns the rebuilt left bar")
@@ -700,7 +781,7 @@ return function(ctx)
         t:eq(p.canvas_stroke, nil, "the in-flight stroke was repaired first")
         t:eq(p.drawing, false, "capture is suspended")
         t:eq(p.session:cache():stateName(), "loading", "while vectors replay")
-        t:eq(p.bar.draw_btn.text, "Loading", "the rebuilt visible bar reports it")
+        t:eq(p.bar.status_text, "Loading", "the rebuilt visible bar reports it")
         env.UIManager:flush()
         t:eq(p.session:cache():isReady(), true, "the rotated raster completes")
         t:eq(p.drawing, true, "and capture resumes only then")
@@ -1076,6 +1157,7 @@ return function(ctx)
     t:case("canvas fatal teardown preserves the real SYN pipeline", function()
         local p = canvasPlugin()
         p:openCanvasHere()
+        p.bar.pen_btn.callback()
         p.session.addStroke = function() return nil, "operation_too_large" end
         local input = Device.input
         local callback = input.stylus_callback
@@ -1228,7 +1310,7 @@ return function(ctx)
         env.UIManager:flush()
         t:eq(input.stylus_callback, nil, "it unhooks on the safe tick")
         t:eq(p.drawing, false, "the failed sheet no longer captures")
-        t:eq(p.bar.draw_btn.text, "Retry", "recovery remains reachable")
+        t:eq(p.bar.status_text, "Load failed", "recovery remains reachable")
     end)
 
     t:case("the sheet's eraser cuts a stroke instead of swallowing it", function()

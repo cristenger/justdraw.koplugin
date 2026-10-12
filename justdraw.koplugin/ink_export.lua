@@ -263,9 +263,20 @@ function Export.plan(opts)
 
     local targets, temporaries, existing = {}, {}, {}
     for i = 1, files do
-        local name = stem .. suffixFor(i, files) .. extension
+        local item = opts.items and opts.items[i]
+        local file_format = format == "pdf" and "pdf"
+            or tostring(item and item.export_format or format)
+        local file_extension = Export.EXTENSIONS[file_format]
+        if not file_extension then return nil, "bad_format" end
+        -- A PDF always has one container file, even when its first logical
+        -- page is a named source-page descriptor. Per-item suffixes belong to
+        -- image companions only; applying the first page's suffix renamed the
+        -- whole PDF to e.g. `notes-source-page-2.pdf`.
+        local suffix = format == "pdf" and ""
+            or (item and item.export_suffix or suffixFor(i, files))
+        local name = stem .. suffix .. file_extension
         if not isDirectChild(name) then return nil, "bad_name" end
-        local temp_name = Export.TEMP_PREFIX .. token .. "-" .. i .. extension
+        local temp_name = Export.TEMP_PREFIX .. token .. "-" .. i .. file_extension
         if not isDirectChild(temp_name) then return nil, "bad_name" end
         targets[i] = dir .. "/" .. name
         temporaries[i] = dir .. "/" .. temp_name
@@ -284,6 +295,7 @@ function Export.plan(opts)
         total = total,
         targets = targets,
         temporaries = temporaries,
+        items = opts.items,
         existing = existing,
     }
 end
@@ -630,7 +642,9 @@ function Job:_encode(result, index)
 
     local temp = self.plan.temporaries[index]
     self.active_temp = temp
-    local ok, err = self.write_image(bb, temp, self.plan.format, self.quality)
+    local item = self.items[index]
+    local format = item and item.export_format or self.plan.format
+    local ok, err = self.write_image(bb, temp, format, self.quality)
     if not ok then
         self:_removeActiveTemp()
         return nil, err or "encode_failed"

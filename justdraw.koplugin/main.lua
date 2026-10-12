@@ -151,6 +151,7 @@ local PAGE_SHEET_FALLBACK = {
 }
 
 local PAGE_SHEET_ACCEPTED_SETTING = "page_sheet_fallback_accepted"
+local NOTE_PAGE_SELECTION_SETTING = "note_page_selection"
 local PAGE_SHEET_PROMPT = _("Direct annotations not available")
 local PAGE_SHEET_RESET_NOTICE = _("The drawing-page confirmation will be shown again for this document.")
 
@@ -657,6 +658,12 @@ function JustDraw:init()
     self.page_sheet_fallback_accepted = not self.is_docless
         and Compat.readSetting(self.ui.doc_settings,
             PAGE_SHEET_ACCEPTED_SETTING, false) == true
+    self.note_page_selection = not self.is_docless
+        and Compat.readSetting(self.ui.doc_settings,
+            NOTE_PAGE_SELECTION_SETTING, {}) or {}
+    if type(self.note_page_selection) ~= "table" then
+        self.note_page_selection = {}
+    end
     --- What the "Delete all page notes" entry reads, cached: `enabled_func`
     --- runs on every paint of the menu and a COUNT per paint is exactly the
     --- query `canExport` exists not to make. Invalidated by everything that
@@ -2009,6 +2016,10 @@ function JustDraw:setDrawing(on, preserve_intent)
         end
     end
     if on and not self.canvas_open and not self.document_session
+        and not self.ui.paging and self.session and self.session:isAvailable() then
+        return self:openCanvasHere()
+    end
+    if on and not self.canvas_open and not self.document_session
         and self:legacyInkFrozen() then
         --[[--
         There is nowhere for this reader's ink to go, and arming Draw anyway
@@ -3222,7 +3233,7 @@ meaning "the toolbar the reader can see" everywhere else in this file.
 function JustDraw:openCanvas(canvas, opts)
     opts = opts or {}
     self:cancelPageSheetOffer()
-    local mode = opts.mode or "edit"
+    local mode = opts.mode or "view"
     if mode ~= "view" and mode ~= "edit" then return nil, "invalid_mode" end
     if not (self.session and canvas) then return nil, "no_canvas" end
     local valid, validation_err = self.session:validateCanvas(canvas)
@@ -3281,6 +3292,7 @@ function JustDraw:openCanvas(canvas, opts)
     else
         self.bar:update(true)
     end
+    self:rememberCanvasNotePage(canvas)
     return overlay, err
 end
 
@@ -3566,10 +3578,121 @@ end
 
 --- Open the sheet at the reader's position, or make one there.
 function JustDraw:openCanvasHere()
+    if self.ui.paging then return self:resolvePageSheet() end
     if not (self.session and self.session:isAvailable()) then return end
+    local groups = self:pageSheetGroupsHere()
+    if #groups == 1 then return self:openCanvas(groups[1].canvas) end
+    if #groups > 1 then return self:showPageSheetPicker(groups) end
+    local canvas, err = self.session:createHere(self:currentPage())
+    if not canvas then
+        if err ~= "indexing" then self:notify(_("Cannot anchor a sheet at this position")) end
+        return nil, err
+    end
+    return self:openCanvas(canvas)
+end
+
+function JustDraw:canOpenPageSheet()
+    if not self.ui.paging then return false, "unsupported_document" end
+    local session = self.session
+    if not (session and session:isAvailable()) then return false, "unavailable" end
+    if session:isIndexing() then return false, "indexing" end
+    if not session:isWritable() then return false, "read_only" end
+    if session:saveFailed() then return false, "save_failed" end
+    return true
+end
+
+--- Collapse physical sheet rows into logical notes for choices at one PDF
+--- page.  A standalone first page is its own one-page note.
+function JustDraw:pageSheetGroupsHere()
+    local session = self.session
     local here = self.session:canvasesHere(self:currentPage())
-    if #here == 1 then return self:openCanvas(here[1]) end
-    if #here > 1 then return self:showCanvasPicker(here) end
+    local memberships = require("ink_note_repository").new(session.repository)
+        :memberships(session.book_id) or {}
+    local membership = {}
+    for _, row in ipairs(memberships) do membership[row.canvas_id] = row end
+    local groups, by_key = {}, {}
+    for _, canvas in ipairs(here) do
+        local member = membership[canvas.id]
+        local key = member and ("note:" .. tostring(member.note_id))
+            or ("canvas:" .. tostring(canvas.id))
+        local group = by_key[key]
+        if not group then
+            group = { key=key, note_id=member and member.note_id,
+                count=0, pages={} }
+            by_key[key], groups[#groups + 1] = group, group
+        end
+        group.count = group.count + 1
+        group.pages[#group.pages + 1] = {
+            canvas=canvas, position=member and member.position or 1,
+        }
+    end
+    for _, group in ipairs(groups) do
+        table.sort(group.pages, function(a, b)
+            if a.position ~= b.position then return a.position < b.position end
+            return a.canvas.id < b.canvas.id
+        end)
+        group.canvas = group.pages[1].canvas
+        local remembered = group.note_id
+            and tonumber(self.note_page_selection[tostring(group.note_id)])
+        if remembered then
+            for _, page in ipairs(group.pages) do
+                if tonumber(page.canvas.id) == remembered then
+                    group.canvas = page.canvas
+                    break
+                end
+            end
+        end
+    end
+    return groups
+end
+
+--- Remember only navigation state in the document settings. Ink and note
+--- membership remain in SQLite; a stale preference safely falls back to the
+--- first surviving page when groups are rebuilt.
+function JustDraw:rememberCanvasNotePage(canvas)
+    local pages = self.session and self.session:notePageState()
+    if not (canvas and pages and pages.note_id) then return false end
+    self.note_page_selection[tostring(pages.note_id)] = tonumber(canvas.id)
+    Compat.saveSetting(self.ui.doc_settings, NOTE_PAGE_SELECTION_SETTING,
+        self.note_page_selection)
+    return true
+end
+
+function JustDraw:showPageSheetPicker(groups, after_open)
+    local buttons = {}
+    for i, group in ipairs(groups) do
+        buttons[i] = { {
+            text = T(_("Drawing note %1 · %2 pages"), i, group.count),
+            callback = function()
+                if self.canvas_picker then
+                    UIManager:close(self.canvas_picker)
+                    self.canvas_picker = nil
+                end
+                local opened, err = self:openCanvas(group.canvas)
+                if opened and after_open then after_open(group.canvas) end
+                return opened, err
+            end,
+        } }
+    end
+    self.canvas_picker = ButtonDialog:new{
+        title = _("Drawing notes on this page"), buttons = buttons,
+    }
+    UIManager:show(self.canvas_picker)
+    return self.canvas_picker
+end
+
+--- Resolve the destination note once for both Open page sheet and PDF
+--- excerpts: create, direct-open, or a grouped chooser.
+function JustDraw:resolvePageSheet(after_open)
+    local available, reason = self:canOpenPageSheet()
+    if not available then return nil, reason end
+    local groups = self:pageSheetGroupsHere()
+    if #groups > 1 then return self:showPageSheetPicker(groups, after_open) end
+    if #groups == 1 then
+        local opened, err = self:openCanvas(groups[1].canvas)
+        if opened and after_open then after_open(groups[1].canvas) end
+        return opened, err
+    end
     local canvas, err = self.session:createHere(self:currentPage())
     if not canvas then
         if err ~= "indexing" then
@@ -3577,7 +3700,134 @@ function JustDraw:openCanvasHere()
         end
         return
     end
-    return self:openCanvas(canvas)
+    local opened, open_err = self:openCanvas(canvas)
+    if opened and after_open then after_open(canvas) end
+    return opened, open_err
+end
+
+--- Append a blank page to the logical note containing the open sheet and
+--- immediately open it. This is the sheet header's primary action.
+function JustDraw:addCanvasPage()
+    local session = self.session
+    local active = session and session:activeCanvas()
+    if not active or not session:isWritable() then return nil, "unavailable" end
+    self:abortCanvasStroke()
+    self:setDrawing(false, true)
+    local ok, err = session:flush()
+    if not ok then
+        self:notify(_("Could not save the current page"))
+        return nil, err
+    end
+    local canvas, why = require("ink_note_repository").new(session.repository)
+        :append(session.book_id, active)
+    if not canvas then
+        self:notify(_("Could not add a page"))
+        if self.canvas_open then self:setDrawing(true, true) end
+        return nil, why
+    end
+    local page = active.fixed_page or self:currentPage()
+    session.index:add(canvas, page)
+    local overlay, open_err = self:openCanvas(canvas, {
+        mode = "edit",
+        height_pct = session:overlay() and session:overlay().height_pct,
+        note_context = self.note_context,
+    })
+    if overlay then self:adoptNoteContextCanvas(canvas) end
+    return overlay, open_err
+end
+
+--- Keep a note opened from Document Notes attached to the page the reader is
+--- actually editing.  The context is deliberately one table shared by the
+--- overlay and return bar, so updating its identity updates both routes.
+function JustDraw:adoptNoteContextCanvas(canvas)
+    local c = self.note_context
+    if not (c and canvas) then return end
+    c.surface_id, c.anchor_key, c.anchor_raw = canvas.id, canvas.anchor_key, canvas.anchor_raw
+    c.fixed_page = canvas.fixed_page
+    local pages = self.session and self.session:notePageState()
+    if pages and pages.note_id then c.group_id = "note:" .. tostring(pages.note_id) end
+    self:refreshNoteContextPlacement()
+end
+
+--- Move inside one logical drawing note.  No boundary wraps into another
+--- note, and the current raster stays live if validation or durability fails.
+function JustDraw:navigateCanvasPage(direction)
+    if direction ~= -1 and direction ~= 1 then return nil, "bad_direction" end
+    local session = self.session
+    local active = session and session:activeCanvas()
+    if not (self.canvas_open and active) then return nil, "unavailable" end
+    local pages = session:notePageState()
+    local position = pages.position + direction
+    if position < 1 or position > pages.total then return nil, "boundary" end
+    return self:selectCanvasPage(position)
+end
+
+--- Jump directly to one page of the open logical note.
+function JustDraw:selectCanvasPage(position)
+    local session = self.session
+    local active = session and session:activeCanvas()
+    if not (self.canvas_open and active) then return nil, "unavailable" end
+    local pages = session:notePageState()
+    position = tonumber(position)
+    if not position or position < 1 or position > pages.total
+        or position ~= math.floor(position) then return nil, "bad_page" end
+    if position == pages.position then return true end
+    local target_id = pages.ids and pages.ids[position]
+    if not target_id then return nil, "missing_page" end
+    local target = session:canvasById(target_id)
+    if not target then return nil, "missing_page" end
+    self:abortCanvasStroke()
+    self:setDrawing(false, true)
+    local saved, err = session:flush()
+    if not saved then
+        self:notify(_("Could not save the current page"))
+        if self.canvas_open then self:setDrawing(true, true) end
+        return nil, err
+    end
+    local overlay = session:overlay()
+    local height = overlay and overlay.height_pct
+    local opened, open_err = self:openCanvas(target, {
+        mode = "edit", height_pct = height, note_context = self.note_context,
+    })
+    if not opened then
+        if self.canvas_open then self:setDrawing(true, true) end
+        return nil, open_err
+    end
+    self:adoptNoteContextCanvas(target)
+    return opened
+end
+
+--- The centre Page X of Y control lists only siblings of the active logical
+--- note. It never exposes another note anchored at the same document page.
+function JustDraw:showCanvasPageSelector()
+    local lease = self.input_lease
+    if lease and lease:hasActiveContact() then return nil, "contact_active" end
+    local pages = self.session and self.session:notePageState()
+    if not pages or pages.error or not pages.ids or pages.total < 2 then
+        return nil, "unavailable"
+    end
+    local dialog
+    local buttons = {}
+    for position = 1, pages.total do
+        local target_position = position
+        local selected = target_position == pages.position
+        buttons[#buttons + 1] = { {
+            text = selected and T(_("Page %1 · Current"), target_position)
+                or T(_("Page %1"), target_position),
+            callback = function()
+                self:closeReaderModal(dialog)
+                if not selected then self:selectCanvasPage(target_position) end
+            end,
+        } }
+    end
+    buttons[#buttons + 1] = { {
+        text = _("Cancel"),
+        callback = function() self:closeReaderModal(dialog) end,
+    } }
+    dialog = ButtonDialog:new{
+        title = _("Pages in this note"), buttons = buttons,
+    }
+    return self:showReaderModal(dialog)
 end
 
 --[[--
@@ -4442,18 +4692,46 @@ function JustDraw:showBarMenu()
             callback = pick(function() self:showDrawingRefreshDialog() end) } },
         { { text = _("Input mode"),
             callback = pick(function() self:showInputModeDialog() end) } },
-        { { text = _("Export…"), enabled = self:canExport(),
-            callback = pick(function() self:showExportDialog() end) } },
     }
+    if self.ui.paging then
+        local can_open = self:canOpenPageSheet()
+        rows[#rows + 1] = { { text = _("Open page sheet"), enabled = can_open,
+            help_text = _("Open or create a separate drawing note on this PDF page."),
+            callback = pick(function() self:resolvePageSheet() end) } }
+    end
+    rows[#rows + 1] = { { text = _("Export…"), enabled = self:canExport(),
+        callback = pick(function() self:showExportDialog() end) } }
     if self.canvas_open then
         local active = self.session:activeCanvas()
+        if self.session:loadFailed() then
+            rows[#rows + 1] = { { text = _("Retry loading sheet"),
+                callback = pick(function() self:retryCanvasLoad() end) } }
+        end
+        if self.session:saveFailed() then
+            rows[#rows + 1] = { { text = _("Retry saving ink"),
+                callback = pick(function() self.session:retrySave() end) } }
+        end
         rows[#rows + 1] = { { text = self.note_context and _("Hide note") or _("Close sheet"),
             callback = pick(function()
                 if self.note_context then self:hideNote() else self:closeCanvas() end
             end) } }
-        rows[#rows + 1] = { { text = _("Delete sheet"),
+        local pages = self.session and self.session:notePageState()
+        local deleting_page = pages and tonumber(pages.total) and pages.total > 1
+        rows[#rows + 1] = { { text = self:canvasDeleteLabel(),
             enabled = self.session:isWritable(),
-            callback = pick(function() self:confirmDeleteCanvas(active) end) } }
+            -- Deleting a page of a note keeps the note open, so the menu must
+            -- not close with it; deleting the last page closes everything, so
+            -- that pick closes the dialog like every other row.
+            callback = function()
+                local current = self.session:activeCanvas()
+                if not current then return end
+                if deleting_page then
+                    self:confirmDeleteCanvas(current)
+                else
+                    self:closeReaderModal(dialog)
+                    self:confirmDeleteCanvas(current)
+                end
+            end } }
     end
     if not self.canvas_open then
         -- Through `pick` like every other row: moving the side rebuilds the
@@ -4504,9 +4782,22 @@ function JustDraw:showCanvasPicker(list)
     UIManager:show(self.canvas_picker)
 end
 
+--- Name deletion after what it removes from the logical note. A physical
+--- canvas is one page; when it is the note's only page, removing it removes
+--- the note itself.
+function JustDraw:canvasDeleteLabel()
+    local pages = self.session and self.session:notePageState()
+    return pages and tonumber(pages.total) and pages.total > 1
+        and _("Delete page") or _("Delete note")
+end
+
 function JustDraw:confirmDeleteCanvas(canvas)
+    local pages = self.session and self.session:notePageState()
+    local multiple = pages and tonumber(pages.total) and pages.total > 1
     UIManager:show(ConfirmBox:new{
-        text = _("Delete this sheet and everything drawn on it?"),
+        text = multiple
+            and _("Delete this page of the note and everything drawn on it?")
+            or _("Delete this note and everything drawn on it?"),
         ok_text = _("Delete"),
         ok_callback = function()
             self:deleteCanvas(canvas)
@@ -4519,17 +4810,49 @@ end
 --- capture flags.
 function JustDraw:deleteCanvas(canvas)
     if not (self.session and canvas) then return nil, "no_canvas" end
+    local pages = self.session:notePageState()
+    local remembered_note = pages and pages.note_id
+    local replacement = pages and (pages.previous_id or pages.next_id)
     local active = self.canvas_open and self.session:activeCanvas()
         and self.session:activeCanvas().id == canvas.id
     if active then
         self:abortCanvasStroke()
         self:setDrawing(false)
     end
+    local overlay = self.session:overlay()
+    local height_pct = overlay and overlay.height_pct
 
     local ok, err = self.session:deleteCanvas(canvas)
     if not ok then
         self:notify(_("Could not delete this sheet"))
         return nil, err
+    end
+
+    if remembered_note
+        and tonumber(self.note_page_selection[tostring(remembered_note)]) == tonumber(canvas.id) then
+        self.note_page_selection[tostring(remembered_note)] = replacement
+        Compat.saveSetting(self.ui.doc_settings, NOTE_PAGE_SELECTION_SETTING,
+            self.note_page_selection)
+    end
+
+    if active and replacement then
+        -- Deleted the open page of a note that still has pages: keep the note
+        -- focused by opening the page it moved to, rather than closing the
+        -- sheet the deletion was offered from. Falls through to the close
+        -- below if the switch cannot be opened.
+        local target = self.session:canvasById(replacement)
+        if target then
+            local opened, open_err = self:openCanvas(target, {
+                mode = "edit",
+                height_pct = height_pct,
+                note_context = self.note_context,
+            })
+            if opened then
+                self:adoptNoteContextCanvas(target)
+                UIManager:setDirty(self.ui, "full")
+                return true
+            end
+        end
     end
 
     if self.note_context and self.note_context.surface_id == canvas.id then
@@ -4604,11 +4927,14 @@ function JustDraw:canvasMenu()
             callback = function() self:openCanvasHereInstead() end,
         }
         items[#items + 1] = {
-            text = _("Delete this sheet"),
+            text = self:canvasDeleteLabel(),
             enabled_func = function() return self.session:isWritable() end,
             keep_menu_open = true,
             separator = true,
-            callback = function() self:confirmDeleteCanvas(active) end,
+            callback = function()
+                local current = self.session:activeCanvas()
+                if current then self:confirmDeleteCanvas(current) end
+            end,
         }
     else
         local open_here = MENU_OPEN_SHEET_HERE
@@ -4764,7 +5090,7 @@ function JustDraw:deleteDocumentInk()
     self.document_ink_count = nil
     -- The ink came off a transparent layer: the page under it has to be drawn
     -- again, and the whole page changed.
-    UIManager:setDirty(self.ui, "ui")
+    UIManager:setDirty(self.ui, "full")
     return true
 end
 
@@ -4779,7 +5105,7 @@ function JustDraw:deleteAllDocumentInk()
         return nil, err
     end
     self.document_ink_count = nil
-    UIManager:setDirty(self.ui, "ui")
+    UIManager:setDirty(self.ui, "full")
     return true
 end
 
@@ -4838,6 +5164,13 @@ function JustDraw:documentInkMenu()
         help_text = _([[Deletes the ink drawn on the pages of this book. Drawing sheets and ink drawn before this KOReader version are not affected.]]),
         callback = function() self:confirmDeleteAllDocumentInk() end,
     }
+    items[#items + 1] = {
+        text = _("Export…"),
+        separator = true,
+        enabled_func = function() return self:canExport() end,
+        callback = function() self:showExportDialog() end,
+        help_text = _([[Writes page notes and drawing sheets to PDF, PNG or JPEG. Nothing in the book itself is changed.]]),
+    }
     return items
 end
 
@@ -4870,6 +5203,12 @@ at the panel. The record is what makes that second close a no-op (ADR-28).
 ]]
 function JustDraw:showReaderModal(widget)
     self.reader_modals = self.reader_modals or {}
+    if self.canvas_open and self.drawing and not self.reader_modal_resume then
+        local active = self.session and self.session:activeCanvas()
+        self:abortCanvasStroke()
+        self:setDrawing(false, true)
+        self.reader_modal_resume = active and active.id or false
+    end
     self.reader_modals[widget] = true
     local previous = widget.onCloseWidget
     widget.onCloseWidget = function(dialog, ...)
@@ -4881,6 +5220,20 @@ function JustDraw:showReaderModal(widget)
         -- still in flight. Full-screen, with no region, is the form
         -- `_isFullScreen` recognises.
         UIManager:setDirty(nil, "flashui")
+        if self.reader_modal_resume and next(self.reader_modals) == nil then
+            local resume_id = self.reader_modal_resume
+            self.reader_modal_resume = nil
+            UIManager:nextTick(function()
+                if self.reader_modals and next(self.reader_modals) ~= nil then
+                    self.reader_modal_resume = resume_id
+                    return
+                end
+                local active = self.session and self.session:activeCanvas()
+                if self.canvas_open and active and active.id == resume_id then
+                    self:setDrawing(true, true)
+                end
+            end)
+        end
     end
     widget.show_parent = widget
     UIManager:show(widget)
@@ -4964,15 +5317,8 @@ function JustDraw:addToMainMenu(menu_items)
     -- ink layer.
     local marker_style_item = self:styleItem(_("Marker"), Style.MARKER)
     marker_style_item.enabled_func = function() return self:markerAvailable() end
-    local sheet_item = {
-        text = MENU_DRAWING_SHEET,
-        separator = true,
-        enabled_func = function()
-            return self.session ~= nil and self.session:isAvailable()
-        end,
-        help_text = _([[Separate paper sheets anchored to a place in an EPUB or to a page in a PDF. In PDFs, direct page annotations remain the default and a sheet is offered when the current view cannot place them safely.]]),
-        sub_item_table_func = function() return self:canvasMenu() end,
-    }
+    local page_notes_available = Capture:supportsStylus() and self.ui.paging
+        and self.document_session ~= nil
     menu_items.justdraw = {
         text = MENU_JUSTDRAW,
         sorting_hint = "tools",
@@ -4994,6 +5340,12 @@ function JustDraw:addToMainMenu(menu_items)
                 callback = function() self:setDrawing(true) end,
                 help_text = _([[Use the Draw/Stop button on the side toolbar to switch drawing off again. Two fingers also work as usual while drawing is on.]]),
             },
+            self.ui.paging and {
+                text = _("Open page sheet"),
+                enabled_func = function() return self:canOpenPageSheet() end,
+                callback = function() self:resolvePageSheet() end,
+                help_text = _("Open or create a separate drawing note on this PDF page, independently of page notes."),
+            } or nil,
             {
                 text = _("Show toolbar"),
                 checked_func = function() return self.bar ~= nil end,
@@ -5063,8 +5415,7 @@ function JustDraw:addToMainMenu(menu_items)
                 help_text = _([[Shows why the pen route is or is not running. With confirmation, it writes pen coordinates and decisions to the local log for up to one minute or 8,192 events. No book or notebook identity is logged.]]),
                 separator = true,
             },
-            sheet_item,
-            {
+            not page_notes_available and {
                 -- Deliberately closes the menu: the export dialog is a modal,
                 -- and arranging one underneath an open menu leaves two window
                 -- stacks competing for the same taps.
@@ -5073,11 +5424,13 @@ function JustDraw:addToMainMenu(menu_items)
                 enabled_func = function() return self:canExport() end,
                 callback = function() self:showExportDialog() end,
                 help_text = _([[Writes what you have drawn to a PDF, PNG or JPEG in a folder of your choosing. Exports the page you are reading, the sheet that is open, or every sheet in this book. Nothing in the book itself is changed.]]),
-            },
+            } or nil,
         },
     }
     local sub = menu_items.justdraw.sub_item_table
-    self:addPageNotesMenuItem(sub, sheet_item)
+    -- Remove the conditional hole left by the standalone export on PDFs.
+    for i = #sub, 1, -1 do if sub[i] == nil then table.remove(sub, i) end end
+    self:addPageNotesMenuItem(sub)
     if self.ui.paging then
         local reset_prompt = self:pageSheetResetMenuItem()
         reset_prompt.separator = true
@@ -5177,13 +5530,9 @@ Placed by the identity of the sheet row rather than by an index or a
 translated label, so neither reordering the menu nor translating it can move
 it somewhere else.
 ]]
-function JustDraw:addPageNotesMenuItem(items, sheet_item)
-    if not (Capture:supportsStylus() and self.ui.paging) then return end
-    local at = #items + 1
-    for i = 1, #items do
-        if items[i] == sheet_item then at = i + 1 break end
-    end
-    table.insert(items, at, {
+function JustDraw:addPageNotesMenuItem(items)
+    if not (Capture:supportsStylus() and self.ui.paging and self.document_session) then return end
+    table.insert(items, {
         text = _("Page notes"),
         separator = true,
         enabled_func = function() return self.document_session ~= nil end,

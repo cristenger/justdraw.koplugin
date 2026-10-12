@@ -84,7 +84,7 @@ return function(ctx)
         local input = { wacom_protocol = true }
         if opts.stylus_api == false then input.stylus_api = false end
         ctx.reset(input)
-        local store = support.newCanvasStore(opts.canvases or {})
+        local store = opts.store or support.newCanvasStore(opts.canvases or {})
         if opts.read_only then
             store.read_only = true
             function store:findBookId(partial_md5, file_size)
@@ -1254,22 +1254,56 @@ return function(ctx)
         env.UIManager:flush()
         t:eq(ctx.menuItem(epub, "Page notes"), nil,
             "and none on a reflowable book, where a sheet is the surface")
-        t:check(ctx.menuItem(epub, "Drawing sheet") ~= nil,
-            "which still has its own row")
+        t:eq(ctx.menuItem(epub, "Drawing sheet"), nil,
+            "and the redundant sheet submenu is absent")
     end)
 
-    t:case("the page-notes row sits next to the sheet's own", function()
+    t:case("page notes owns export on a fixed-layout document", function()
         local p = documentPlugin()
         local items = {}
         p:addToMainMenu(items)
         local sub = items.justdraw.sub_item_table
-        local sheet_at, notes_at
+        local notes
         for i = 1, #sub do
-            if sub[i].text == "Drawing sheet" then sheet_at = i end
-            if sub[i].text == "Page notes" then notes_at = i end
+            if sub[i].text == "Page notes" then notes = sub[i] end
         end
-        t:check(sheet_at ~= nil, "the sheet row is there")
-        t:eq(notes_at, sheet_at + 1, "and page notes directly after it")
+        t:check(notes ~= nil, "the page-notes row is there")
+        local export
+        for _, item in ipairs(notes.sub_item_table_func()) do
+            if item.text == "Export…" then export = item end
+        end
+        t:check(export ~= nil, "Export is inside Page notes")
+        t:eq(ctx.menuItem(p, "Drawing sheet"), nil, "no sheet submenu")
+        local open_sheet = ctx.menuItem(p, "Open page sheet")
+        t:check(open_sheet ~= nil, "a direct page-sheet action is always visible")
+        t:eq(open_sheet.enabled_func(), true,
+            "direct page annotation does not disable separate sheets")
+        p:setBarShown(true)
+        local more = p:showBarMenu()
+        local found
+        for _, row in ipairs(more.buttons) do
+            for _, button in ipairs(row) do
+                if button.text == "Open page sheet" then found = button end
+            end
+        end
+        t:check(found ~= nil and found.enabled, "the toolbar More dialog agrees")
+        p:closeReaderModal(more)
+    end)
+
+    t:case("a PDF page sheet restores its selected logical page after reopening", function()
+        local settings = {}
+        local p, store = documentPlugin{ doc_settings = settings }
+        t:check(p:resolvePageSheet() ~= nil, "the first page sheet opens")
+        local first = p.session:activeCanvas()
+        t:check(p:addCanvasPage() ~= nil, "a second logical page is appended")
+        local second = p.session:activeCanvas()
+        t:check(second.id ~= first.id, "the appended page is active")
+
+        p:onCloseDocument()
+        local reopened = documentPlugin{ store = store, doc_settings = settings }
+        t:check(reopened:resolvePageSheet() ~= nil, "the page sheet reopens")
+        t:eq(reopened.session:activeCanvas().id, second.id,
+            "the PDF restores the page selected before it was closed")
     end)
 
     t:case("Delete this page note takes only this page's row", function()

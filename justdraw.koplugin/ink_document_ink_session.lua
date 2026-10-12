@@ -995,6 +995,11 @@ function Session:deleteAll()
     if not self:isWritable() then return nil, "read_only" end
     local closed, cerr = self:_flushAndClose()
     if not closed then return nil, cerr end
+    -- A page turn held behind a failed/slow flush must not resurrect a surface
+    -- from the just-deleted book set after this transaction completes.
+    self.pending_page = nil
+    self.holding_save_recovered = false
+    self.deferred_save_recovered = false
     local ok, err = self.repository:deleteAllPageInkSurfaces(self.book_id)
     if not ok then
         self:_notifyState()
@@ -1003,7 +1008,23 @@ function Session:deleteAll()
     self.surface_obj = nil
     self.transform_obj = nil
     self.geometry_ok = false
+    self.load_error = nil
     self:_notifyState()
+    return true
+end
+
+--- Reconcile an already-committed book-scoped deletion without issuing a
+--- second DELETE. Used by Document Notes batch actions.
+function Session:forgetDeletedCanvases(ids)
+    local deleted = {}
+    for _, id in ipairs(ids or {}) do deleted[tonumber(id)] = true end
+    if self.surface_obj and deleted[self.surface_obj.id] then
+        if self.surface_session then self.surface_session:close{ discard = true } end
+        self.surface_session, self.surface_obj, self.transform_obj = nil, nil, nil
+        self.geometry_ok, self.load_error = false, nil
+        self.pending_page = nil
+        self:_notifyState()
+    end
     return true
 end
 

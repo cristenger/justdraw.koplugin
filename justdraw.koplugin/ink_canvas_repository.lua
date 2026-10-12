@@ -43,7 +43,7 @@ Repository.__index = Repository
 
 --- Bumped when the schema changes. Every bump needs a MIGRATIONS entry for the
 --- version below it, or opening an older database refuses rather than guesses.
-Repository.SCHEMA_VERSION = 4
+Repository.SCHEMA_VERSION = 5
 
 --- `MIGRATIONS[v]` upgrades a database at version v to version v + 1. A step is
 --- DDL and nothing else: `_migrate` owns the checkpoint, the backup copy, the
@@ -129,11 +129,31 @@ CREATE TABLE stroke_chunks (
     points       BLOB    NOT NULL,
     PRIMARY KEY(stroke_id, chunk_no)
 );
+CREATE TABLE canvas_images (
+    id           INTEGER PRIMARY KEY,
+    canvas_id    INTEGER NOT NULL REFERENCES canvases(id) ON DELETE CASCADE,
+    position     INTEGER NOT NULL,
+    png          BLOB    NOT NULL,
+    pixel_w      INTEGER NOT NULL,
+    pixel_h      INTEGER NOT NULL,
+    x            REAL    NOT NULL,
+    y            REAL    NOT NULL,
+    w            REAL    NOT NULL,
+    h            REAL    NOT NULL,
+    source_page  INTEGER NOT NULL,
+    source_x     REAL    NOT NULL,
+    source_y     REAL    NOT NULL,
+    source_w     REAL    NOT NULL,
+    source_h     REAL    NOT NULL,
+    created_at   INTEGER NOT NULL,
+    UNIQUE(canvas_id, position)
+);
 CREATE INDEX canvases_by_book ON canvases(book_id, updated_at);
 CREATE INDEX canvases_by_book_role_page ON canvases(book_id, surface_role, fixed_page, id);
 CREATE INDEX layout_by_page
     ON canvas_layout_cache(book_id, layout_hash, resolved_page, canvas_id);
 CREATE INDEX strokes_by_canvas ON strokes(canvas_id, seq);
+CREATE INDEX canvas_images_by_canvas ON canvas_images(canvas_id, position, id);
 ]]
 
 --[[--
@@ -180,6 +200,30 @@ CREATE INDEX document_notes_by_book ON document_notes(book_id);
 ]]
 Repository.SCHEMA = Repository.SCHEMA .. NOTE_SCHEMA
 Repository.MIGRATIONS[3] = function(conn) conn:exec(NOTE_SCHEMA) end
+
+local IMAGE_SCHEMA = [[
+CREATE TABLE canvas_images (
+    id INTEGER PRIMARY KEY,
+    canvas_id INTEGER NOT NULL REFERENCES canvases(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    png BLOB NOT NULL,
+    pixel_w INTEGER NOT NULL,
+    pixel_h INTEGER NOT NULL,
+    x REAL NOT NULL,
+    y REAL NOT NULL,
+    w REAL NOT NULL,
+    h REAL NOT NULL,
+    source_page INTEGER NOT NULL,
+    source_x REAL NOT NULL,
+    source_y REAL NOT NULL,
+    source_w REAL NOT NULL,
+    source_h REAL NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(canvas_id, position)
+);
+CREATE INDEX canvas_images_by_canvas ON canvas_images(canvas_id, position, id);
+]]
+Repository.MIGRATIONS[4] = function(conn) conn:exec(IMAGE_SCHEMA) end
 
 -- ------------------------------------------------------------------ helpers
 
@@ -640,7 +684,7 @@ end
 local CANVAS_COLUMNS = [[
     SELECT id, anchor_kind, anchor_key, anchor_raw, anchor_normalized,
            anchor_dom_version, fixed_page, logical_w, logical_h, updated_at,
-           surface_role, coordinate_space
+           surface_role, coordinate_space, book_id
       FROM canvases]]
 
 local function canvasRow(row)
@@ -657,6 +701,7 @@ local function canvasRow(row)
         updated_at         = num(row[10]),
         surface_role       = str(row[11]),
         coordinate_space   = str(row[12]),
+        book_id            = num(row[13]),
     }
 end
 
@@ -690,6 +735,23 @@ function Repository:countCanvases(book_id)
         { book_id }, function(row) return num(row[1]) or 0 end)
     if not rows then return nil, err end
     return rows[1] or 0
+end
+
+--- Logical-note membership metadata, book-scoped and stroke-free.  Consumers
+--- use this to build page navigation and grouped choices without exposing a
+--- sheet from another book through a guessed canvas id.
+function Repository:listNoteMemberships(book_id)
+    local ready, reason = self:_ready(false)
+    if not ready then return nil, reason end
+    return self:_select([[
+        SELECT s.canvas_id,s.note_id,s.position
+          FROM document_note_sheets s
+          JOIN document_notes n ON n.id=s.note_id
+         WHERE n.book_id=?1
+         ORDER BY s.note_id,s.position,s.canvas_id;]],
+        { book_id }, function(row)
+            return { canvas_id=num(row[1]), note_id=num(row[2]), position=num(row[3]) }
+        end)
 end
 
 --[[--
@@ -870,6 +932,53 @@ function Repository:deleteCanvas(canvas_id)
     if not ready then return nil, reason end
     return self:_run("DELETE FROM canvases WHERE id = ?1;", { canvas_id })
 end
+
+--- Delete an explicitly validated set of canvases belonging to one book.
+--- The ownership check and all deletes share one transaction, so a stale or
+--- foreign id cannot turn a batch action into a partial deletion.
+function Repository:deleteBookCanvases(book_id, canvas_ids)
+    local ready, reason = self:_ready(true)
+    if not ready then return nil, reason end
+    if type(canvas_ids) ~= "table" then return nil, "bad_canvases" end
+    local wanted, ids = {}, {}
+    for _, value in ipairs(canvas_ids) do
+        local id = tonumber(value)
+        if not finite(id) or id < 1 or id ~= math.floor(id) or wanted[id] then
+            return nil, "bad_canvases"
+        end
+        wanted[id], ids[#ids + 1] = true, id
+    end
+    if #ids == 0 then return true end
+
+    return self:transaction(function(repo)
+        for _, id in ipairs(ids) do
+            local rows, err = repo:_select([[
+                SELECT surface_role FROM canvases
+                 WHERE id = ?1 AND book_id = ?2;]], { id, book_id },
+                function(row) return str(row[1]) end)
+            if not rows then return nil, err end
+            if rows[1] ~= "sheet" and rows[1] ~= "page_ink" then
+                return nil, "foreign_canvas"
+            end
+        end
+        for _, id in ipairs(ids) do
+            local ok, err = repo:_run([[
+                DELETE FROM canvases WHERE id = ?1 AND book_id = ?2;]],
+                { id, book_id })
+            if not ok then return nil, err end
+        end
+        local cleaned, clean_err = repo:_run([[
+            DELETE FROM document_notes
+             WHERE book_id = ?1
+               AND NOT EXISTS (SELECT 1 FROM document_note_sheets s
+                                WHERE s.note_id = document_notes.id);]],
+            { book_id })
+        if not cleaned then return nil, clean_err end
+        return true
+    end)
+end
+
+-- ------------------------------------------------------------ canvas images
 
 -- ----------------------------------------------------------------- page ink
 

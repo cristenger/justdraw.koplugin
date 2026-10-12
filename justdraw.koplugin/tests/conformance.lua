@@ -945,15 +945,15 @@ else
         now = function() return 1000 end,
     }
 
-    claim("canvas database: the v4 schema is accepted by SQLite",
+    claim("canvas database: the v5 schema is accepted by SQLite",
         true, repo ~= nil, tostring(open_err or db_path))
 
     if repo then
         local conn = repo.conn
 
-        claim("canvas database: user_version is stamped at 4",
-            true, tonumber(conn:rowexec("PRAGMA user_version;")) == 4
-                and Repository.SCHEMA_VERSION == 4,
+        claim("canvas database: user_version is stamped at 5",
+            true, tonumber(conn:rowexec("PRAGMA user_version;")) == 5
+                and Repository.SCHEMA_VERSION == 5,
             "user_version = " .. tostring(conn:rowexec("PRAGMA user_version;")))
 
         claim("canvas database: foreign keys are actually enforced",
@@ -1364,6 +1364,7 @@ CREATE INDEX strokes_by_canvas ON strokes(canvas_id, seq);
                 Repository.MIGRATIONS[3](conn)
                 error("conformance: a migration step that fails", 0)
             end,
+            [4] = Repository.MIGRATIONS[4],
         },
     }
     logger.err = real_err

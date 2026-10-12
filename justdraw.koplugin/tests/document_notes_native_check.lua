@@ -110,6 +110,70 @@ end
 menuPicture(function() notes.browser:showFilters() end, "notes-filters")
 menuPicture(function() notes:showExportOptions() end, "notes-export-scopes")
 menuPicture(function() notes:export(notes.catalog.items,"full",150) end, "notes-export-dialog")
+
+-- Exercise the real export form and the real MuPDF source-page renderer. This
+-- catches failures that a mocked raster cannot, including the Source page
+-- header path. The supplied PDF remains read-only; output lives in KO_HOME.
+G_reader_settings:saveSetting("justdraw_export_dir", home)
+G_reader_settings:saveSetting("justdraw_export_format", "pdf")
+local sheet_repo, sheet_index = host.session:exportSources()
+local export_sheet = assert(host.session:createHere(ink_page))
+assert(sheet_repo:addStroke(export_sheet, {
+    points = { 20, 30, 180, 140, 320, 40 }, n = 3, width = 3, tool = 1,
+}))
+local sheet_note = require("ink_document_note").new{
+    kind = "sheet", page = ink_page, surface = export_sheet,
+    repository = sheet_repo,
+    logical_w = tonumber(export_sheet.logical_w),
+    logical_h = tonumber(export_sheet.logical_h), units = "px",
+    location_label = "Page " .. tostring(ink_page),
+}
+notes:export({ sheet_note }, "notes", nil, true)
+local source_dialog = assert(topOwned(notes), "source-page export dialog missing")
+picture(source_dialog, "notes-source-page-export")
+if source_dialog.onCloseKeyboard then source_dialog:onCloseKeyboard() end
+local source_check
+for _, widget in ipairs(source_dialog._added_widgets or source_dialog.added_widgets or {}) do
+    local candidate = widget.text and widget or widget[1]
+    if candidate and candidate.text == "Include source pages" then
+        source_check = candidate
+        break
+    end
+end
+assert(source_check, "Include source pages checkbox missing")
+source_check:onTapCheckButton()
+assert(source_check.checked, "Include source pages did not select")
+picture(source_dialog, "notes-source-page-export-selected")
+source_dialog.input_fields[1]:setText("source-pages-gui")
+local source_export_notice
+local original_notify = host.notify
+host.notify = function(self, text)
+    source_export_notice = text
+end
+local export_button
+for _, row in ipairs(source_dialog.buttons or {}) do
+    for _, button in ipairs(row) do
+        if button.text == "Export" then export_button = button break end
+    end
+end
+assert(export_button, "Export button missing").callback()
+local source_pdf = home .. "/source-pages-gui.pdf"
+pump(function()
+    return source_export_notice ~= nil
+end)
+host.notify = original_notify
+assert(lfs.attributes(source_pdf, "mode") == "file",
+    "source-page export failed: " .. tostring(source_export_notice))
+local exported = assert(require("document/documentregistry"):openDocument(source_pdf))
+assert(exported:getPageCount() == 2, "source-page PDF should contain source then note")
+local source_size = exported:getNativePageDimensions(1)
+local note_size = exported:getNativePageDimensions(2)
+assert(math.abs(source_size.w - note_size.w) < 0.01
+    and math.abs(source_size.h - note_size.h) < 0.01,
+    "drawing sheet PDF page should match its source page size")
+exported:close()
+assert(host.session:deleteCanvas(export_sheet))
+
 menuPicture(function() notes.browser:showRange() end, "notes-page-range-keyboard")
 menuPicture(function()
     notes.browser:showFilters()

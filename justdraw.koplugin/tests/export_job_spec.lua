@@ -145,6 +145,28 @@ return function(ctx)
         t:eq(plan.files, 1, "one file")
         t:eq(plan.total, 40, "forty pages")
         t:eq(plan.targets[1], DIR .. "/Notebook.pdf", "and no numbering")
+
+        local mixed = Export.plan{ format = "pdf", dir = DIR, stem = "Notebook",
+            items = {
+                { export_suffix = "-source-page-2" },
+                { export_suffix = "-01" },
+            },
+            fs = support.newExportFs{}, sanitize = function(n) return n end }
+        t:eq(mixed.targets[1], DIR .. "/Notebook.pdf",
+            "a source-page suffix does not rename the PDF container")
+    end)
+
+    t:case("image batches may mix note images with named source PNGs", function()
+        local items = {
+            { export_format = "png", export_suffix = "-source-page-2" },
+            { export_suffix = "-01" },
+            { export_suffix = "-02" },
+        }
+        local plan = Export.plan{ format = "jpg", dir = DIR, stem = "Notes",
+            items = items, fs = support.newExportFs{}, sanitize = function(n) return n end }
+        t:eq(plan.targets[1], DIR .. "/Notes-source-page-2.png", "clean source PNG")
+        t:eq(plan.targets[2], DIR .. "/Notes-01.jpg", "first note keeps chosen format")
+        t:eq(plan.targets[3], DIR .. "/Notes-02.jpg", "second note keeps chosen format")
     end)
 
     t:case("only the three known formats are planned at all", function()

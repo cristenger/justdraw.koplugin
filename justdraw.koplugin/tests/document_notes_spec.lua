@@ -186,6 +186,50 @@ return function(ctx)
         t:eq(selected[2], first, "followed by its selected sheets")
         t:eq(selected[3], second, "without scanning unrelated pages")
     end)
+    t:case("source pages are deduplicated and precede their anchored notes", function()
+        local first = Note.new{kind="sheet",page=2,surface={id=21}}
+        local second = Note.new{kind="sheet",page=2,surface={id=22}}
+        local third = Note.new{kind="sheet",page=5,surface={id=23}}
+        local orphan = Note.new{kind="sheet",surface={id=24}}
+        local items, skipped = assert(Full.withSourcePages(6,
+            { first, second, third, orphan }, "pdf"))
+        t:eq(#items, 6, "two source pages, four notes")
+        t:eq(items[1].kind, "source_page", "page 2 source comes first")
+        t:eq(items[1].page, 2, "the correct source page")
+        t:eq(items[2], first, "then its first note")
+        t:eq(items[3], second, "then its second note")
+        t:eq(items[4].kind, "source_page", "page 5 is inserted once")
+        t:eq(items[5], third, "its note follows")
+        t:eq(items[6], orphan, "unanchored notes remain at the end")
+        t:eq(skipped, 1, "the missing source is reported")
+    end)
+    t:case("image exports force source companions to PNG names", function()
+        local note = Note.new{kind="sheet",page=3,surface={id=31}}
+        local items = assert(Full.withSourcePages(4, { note }, "jpg"))
+        t:eq(items[1].export_format, "png", "source is always lossless")
+        t:eq(items[1].export_suffix, "-source-page-3", "source has a stable name")
+        t:eq(note.export_suffix, "", "a single note keeps the unsuffixed name")
+    end)
+    t:case("anchored drawing sheets inherit their PDF page size", function()
+        local first = Note.new{kind="sheet",page=2,surface={id=31}}
+        local second = Note.new{kind="sheet",page=2,surface={id=32}}
+        local page_ink = Note.new{kind="page_ink",page=2,surface={id=33}}
+        local calls = 0
+        local items = assert(Full.matchSheetPageSizes(
+            { first, second, page_ink }, {
+                getNativePageDimensions = function(_, page)
+                    calls = calls + 1
+                    t:eq(page, 2, "resolved anchored page")
+                    return { w = 612, h = 792 }
+                end,
+            }))
+        t:eq(items, items, "same ordered descriptors")
+        t:eq(calls, 1, "shared source page measured once")
+        t:eq(first.export_width_pt, 612, "sheet width matches PDF")
+        t:eq(first.export_height_pt, 792, "sheet height matches PDF")
+        t:eq(second.export_width_pt, 612, "every logical sheet page matches")
+        t:eq(page_ink.export_width_pt, nil, "direct page ink is already sized")
+    end)
     t:case("invalid pages and oversized exports are never silently truncated", function()
         t:eq(select(2,Full.items(5001,{},false)),"too_many_pages","full page limit")
         t:eq(select(2,Full.items(0,{},false)),"bad_geometry","invalid source")

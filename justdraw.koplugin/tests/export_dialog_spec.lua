@@ -89,6 +89,14 @@ return function(ctx)
             "the failure reason is the message")
     end)
 
+    t:case("a partial image failure reports the files it kept", function()
+        local message = Dialog.outcome{ status = "failed", count = 2,
+            written = { "a", "b" }, error = "encode_failed" }
+        t:check(message:find("2", 1, true) ~= nil, "written companion files are counted")
+        t:check(message:find(Dialog.reason("encode_failed"), 1, true) ~= nil,
+            "the failure remains actionable")
+    end)
+
     -- =================================================================
     t:describe("export / dialog / remembered choices")
 
@@ -127,6 +135,30 @@ return function(ctx)
 
     -- =================================================================
     t:describe("export / dialog / the widget")
+
+    t:case("source pages are an opt-in choice that resets for every dialog", function()
+        local captured = {}
+        local function open()
+            local dialog, state = Dialog.show{
+                title = "Export", stem = "Notes", settings = settings(),
+                offer_source_pages = true,
+                build = function(_, options)
+                    captured[#captured + 1] = options.include_source_pages
+                    return { items = {}, render = function() end }
+                end,
+                show_modal = function(w) return w end,
+                close_modal = function() end,
+                notify = function() end,
+            }
+            return dialog, state, dialog.added_widgets[2]
+        end
+        local first, first_state, check = open()
+        t:eq(first_state.include_source_pages, false, "starts off")
+        check:tap()
+        t:eq(first_state.include_source_pages, true, "can be selected")
+        local _, second_state = open()
+        t:eq(second_state.include_source_pages, false, "is not remembered")
+    end)
 
     t:case("opening it offers the file types and remembers the chosen one", function()
         local s = settings()
@@ -735,7 +767,8 @@ return function(ctx)
         local scopes = plugin:exportScopes()
         t:eq(#scopes, 1, "one scope")
         t:eq(scopes[1].value, "page", "the current page")
-        t:check(menuItem(plugin, "Export…").enabled_func(), "and the entry is live")
+        t:check(menuItem(plugin, "Export…").enabled_func(),
+            "and standalone export remains live when Page notes is unavailable")
     end)
 
     t:case("the page export renders the document and this page's ink", function()

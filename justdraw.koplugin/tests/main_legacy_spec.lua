@@ -190,14 +190,17 @@ return function(ctx)
     -- =================================================================
     t:describe("main / legacy ink / the gate is false")
 
-    t:case("an EPUB with no sheet still inks into the sidecar", function()
+    t:case("Start drawing in an EPUB opens a sheet instead of legacy sidecar ink", function()
         local p = epubPlugin{ stylus_api = false }
         t:eq(p:legacyInkFrozen(), false, "v2026.03 keeps the direct route")
         p:setDrawing(true)
-        t:eq(p.drawing, true, "Draw was not refused")
+        t:eq(p.drawing, false, "the new sheet waits for an explicit tool")
+        t:eq(p.canvas_open, true, "a sheet opened directly")
+        p.bar.pen_btn.callback()
+        t:eq(p.drawing, true, "Pen starts drawing on the sheet")
         fingerStroke(p, INK_XY.x, INK_XY.y)
         local list = p.store:get(1)
-        t:eq(list and #list, 1, "one stroke reached the sidecar")
+        t:eq(list, nil, "the legacy sidecar remains unchanged")
     end)
 
     t:case("a fixed layout still inks into the sidecar", function()
@@ -228,31 +231,23 @@ return function(ctx)
     -- =================================================================
     t:describe("main / legacy ink / the gate is true")
 
-    t:case("Draw in an EPUB with no sheet is refused and creates nothing", function()
+    t:case("Start drawing in an EPUB creates and opens its sheet", function()
         local p, store = epubPlugin()
         t:eq(p:legacyInkFrozen(), true, "the runtime has the new surfaces")
         p:setDrawing(true)
-        t:eq(p.drawing, false, "drawing did not start")
-        t:eq(env.notifications[#env.notifications], FROZEN_EPUB,
-            "and the reader is told where the ink goes now")
-        t:eq(#store.canvases, 0, "no sheet was created behind their back")
-        t:eq(p.input_lease, nil, "and no capture was installed")
+        t:eq(p.drawing, false, "opening the sheet does not start drawing")
+        t:eq(p.canvas_open, true, "the sheet opened")
+        t:eq(#store.canvases, 1, "one sheet was created")
+        p.bar.pen_btn.callback()
+        t:eq(p.drawing, true, "Pen starts drawing")
+        t:check(p.input_lease ~= nil, "capture was installed")
     end)
 
-    t:case("the sentence walks the menu that is actually there", function()
+    t:case("the redundant sheet submenu is absent", function()
         local p = epubPlugin()
         -- Every label in the sentence is a row a reader can find: the top
         -- entry, its sheet row, and the child that opens one here.
-        t:check(ctx.menuItem(p, "Drawing sheet") ~= nil, "the sheet row is Drawing sheet")
-        local opens
-        for _, item in ipairs(p:canvasMenu()) do
-            if item.text == "Open sheet here" then opens = item end
-        end
-        t:check(opens ~= nil, "and its child opens a sheet here")
-        for _, label in ipairs({ "JustDraw", "Drawing sheet", "Open sheet here" }) do
-            t:check(FROZEN_EPUB:find(label, 1, true) ~= nil,
-                "the refusal names " .. label)
-        end
+        t:eq(ctx.menuItem(p, "Drawing sheet"), nil, "Start drawing is the only entry")
     end)
 
     t:case("a whole contact in a frozen EPUB adds nothing to the sidecar", function()

@@ -442,6 +442,12 @@ function Controller:showDetail(id, sheet_index)
                 self:showDetail(target, offset < 0 and previous.sheets and #previous.sheets or 1)
             end
         end
+        local caption = group.sheets and T(
+            _("Sheet %1 of %2"), sheet_index or 1, #group.sheets)
+            or Note.kindLabel(item.kind)
+        if item.chapter and item.chapter ~= "" then
+            caption = item.chapter .. " · " .. caption
+        end
         local ok, detail = pcall(function()
             return require("ink_document_notes_detail"):new {
                 image = result.bb,
@@ -451,11 +457,7 @@ function Controller:showDetail(id, sheet_index)
                     #sequence,
                     item.locating and _("Locating…") or item.location_label
                 ),
-                caption = (item.chapter or self.title) .. " · " .. (group.sheets and T(
-                    _("Sheet %1 of %2"),
-                    sheet_index or 1,
-                    #group.sheets
-                ) or Note.kindLabel(item.kind)),
+                caption = caption,
                 has_previous = position > 1 or (sheet_index or 1) > 1,
                 -- A boolean either way: a lone sheet has no `sheets`, and an
                 -- `enabled = nil` Button is an enabled one.
@@ -793,6 +795,12 @@ function Controller:organizeSheets(item)
                                     if not ok then
                                         return self:notify(ExportDialog.reason(err))
                                     end
+                                    if session:activeCanvas() then
+                                        session:refreshNotePages()
+                                        if self.host.bar and self.host.bar.embedded then
+                                            self.host.bar:update(true)
+                                        end
+                                    end
                                     self:retry()
                                 end,
                             },
@@ -906,13 +914,15 @@ function Controller:export(items, mode, dpi, prepared)
                     or _("Document pages containing the selected notes"),
             },
         },
-        build = function()
-            return export:buildNotes(items, mode, dpi)
+        build = function(_, export_options)
+            return export:buildNotes(items, mode, dpi, export_options)
         end,
         build_async = mode == "epub" and function(done)
             self:buildEPUB(items, dpi, done)
         end or nil,
         settings = export.settings(),
+        offer_source_pages = mode == "notes"
+            and require("ink_document_export_full").supports(self.host.ui),
         show_modal = function(w)
             return self:showModal(w)
         end,
@@ -1138,6 +1148,74 @@ function Controller:showExportOptions()
         ),
         close_callback = function()
             self:closeModal(dialog)
+        end,
+    }
+    self:showModal(dialog)
+end
+
+function Controller:_selectedDeletion()
+    local ids, seen, selected_notes, skipped = {}, {}, 0, 0
+    for _, item in ipairs(self.catalog.items or {}) do
+        if self.catalog.selected[item.id] then
+            if item.kind == "sheet" then
+                selected_notes = selected_notes + 1
+                local leaves = item.sheets or { item }
+                for _, leaf in ipairs(leaves) do
+                    local id = leaf.surface and tonumber(leaf.surface.id)
+                    if id and not seen[id] then seen[id], ids[#ids+1] = true, id end
+                end
+            elseif item.kind == "page_ink" then
+                selected_notes = selected_notes + 1
+                local id = item.surface and tonumber(item.surface.id)
+                if id and not seen[id] then seen[id], ids[#ids+1] = true, id end
+            else
+                skipped = skipped + 1
+            end
+        end
+    end
+    return ids, selected_notes, skipped
+end
+
+function Controller:confirmDeleteSelected()
+    local ids, notes, skipped = self:_selectedDeletion()
+    if notes == 0 then
+        return self:notify(skipped > 0
+            and _("Only JustDraw notes can be deleted here. KOReader annotations and legacy ink were skipped.")
+            or _("Select at least one note."))
+    end
+    local dialog
+    local text = T(_("Delete %1 selected JustDraw notes?"), notes)
+    if skipped > 0 then
+        text = text .. "\n\n" .. T(_("%1 KOReader or legacy items will be skipped."), skipped)
+    end
+    dialog = require("ui/widget/confirmbox"):new{
+        text = text,
+        ok_text = _("Delete"),
+        ok_callback = function()
+            local host = self.host
+            local flushed, flush_err = host.export_controller:flushSurfaces()
+            if not flushed then return self:notify(ExportDialog.reason(flush_err)) end
+            local session = host.session
+            local document = host.document_session
+            local repository = session and session.repository
+                or document and document.repository
+            local book_id = session and session.book_id or document and document.book_id
+            if not repository or not book_id then
+                return self:notify(_("Could not delete the selected notes."))
+            end
+            local ok, err = repository:deleteBookCanvases(book_id, ids)
+            if not ok then
+                return self:notify(_("Could not delete the selected notes. Nothing was changed."))
+            end
+            if session then session:forgetDeletedCanvases(ids) end
+            if document then document:forgetDeletedCanvases(ids) end
+            host.document_ink_count = nil
+            self.catalog.selected = {}
+            self.focus_id, self.surface_id, self.focus_sheet_index = nil, nil, nil
+            self:closeModal(dialog)
+            self:notify(T(_("Deleted %1 JustDraw notes. %2 other items skipped."), notes, skipped))
+            UIManager:setDirty(host.ui, "ui")
+            self:retry()
         end,
     }
     self:showModal(dialog)

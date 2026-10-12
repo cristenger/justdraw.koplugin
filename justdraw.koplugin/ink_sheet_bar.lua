@@ -20,10 +20,8 @@ for six 10 mm targets gets its tools in two rows of three instead.
 local Blitbuffer = require("ffi/blitbuffer")
 local Button = require("ui/widget/button")
 local Device = require("device")
-local Font = require("ui/font")
 local Geom = require("ui/geometry")
 local Size = require("ui/size")
-local TextWidget = require("ui/widget/textwidget")
 local UIManager = require("ui/uimanager")
 local _ = require("gettext")
 local T = require("ffi/util").template
@@ -89,25 +87,36 @@ function SheetBar:init()
             (index - 1) % columns + 1, columns, callback, icon)
     end
 
-    -- First row: the state control, what the pen will do (painted between
-    -- them by update), and the way out.
-    self.draw_btn = place(_("Draw"), 0, 1, 3, function()
-        if p.canvas_open and p.session and p.session:loadFailed() then
-            p:retryCanvasLoad()
-        else
-            p:setDrawing(not p.drawing)
-        end
-    end)
+    -- First row: append a real page to this logical note, current state in the
+    -- centre, and the way out. Pen and Eraser below are explicit drawing-mode
+    -- toggles, leaving a newly opened sheet safe to read or navigate.
+    self.add_btn = place(_("Add page"), 0, 1, 5,
+        function() p:addCanvasPage() end, "add")
+    self.previous_btn = place(_("Previous page"), 0, 2, 5,
+        function() p:navigateCanvasPage(-1) end, "previous")
+    self.status_btn = place(_("Page status"), 0, 3, 5,
+        function() p:showCanvasPageSelector() end)
+    self.next_btn = place(_("Next page"), 0, 4, 5,
+        function() p:navigateCanvasPage(1) end, "next")
     -- The way out is the cross every panel closes with; a hold names it,
     -- and the name differs between a sheet and a note.
-    self.hide_btn = place(self.note_context and _("Hide note") or _("Close sheet"), 0, 3, 3,
+    self.hide_btn = place(self.note_context and _("Hide note") or _("Close sheet"), 0, 5, 5,
         function() p:setBarShown(false) end, "close")
 
     self.pen_btn = tool(_("Pen"), 1, function()
-        if not p.eraser and p.drawing then p:showPenSettingsDialog()
-        else p:setEraser(false) end
+        if not p.drawing then
+            p:setEraser(false)
+            p:setDrawing(true)
+        elseif not p.eraser then
+            p:setDrawing(false)
+        else
+            p:setEraser(false)
+        end
     end, "pen")
-    self.eraser_btn = tool(_("Eraser"), 2, function() p:setEraser(true) end, "eraser")
+    self.eraser_btn = tool(_("Eraser"), 2, function()
+        if p.drawing and p.eraser then p:setDrawing(false)
+        else p:setEraser(true) end
+    end, "eraser")
     self.undo_btn = tool(_("Undo"), 3, function() p:onJustDrawUndo() end, "undo")
     self.notes_btn = tool(_("Document notes"), 4, function() p:onShowDocumentNotes() end, "notes")
     self.more_btn = tool(_("More"), 5, function() p:showBarMenu() end, "more")
@@ -126,49 +135,50 @@ function SheetBar:update(refresh)
     local p = self.plugin
     local session = p.session
     local cache = session and session:cache()
-    local draw_text = p.drawing and _("Stop") or _("Draw")
-    if cache and not p.drawing then
-        local state = cache:stateName()
-        if state == "loading" then draw_text = _("Loading")
-        elseif state == "load_failed" then draw_text = _("Retry")
-        elseif not session:isWritable() then
-            draw_text = self.note_context and _("Read-only") or _("View")
-        end
-    end
-    self:setContextText(self.draw_btn, draw_text)
-
     local label = PenDialog.label(p:effectiveStyle(), p.pen_width)
     ToolButton.setState(self.pen_btn, label .. "\n"
-        .. _("Tap the selected pen to change its style and width."), not p.eraser)
-    ToolButton.setState(self.eraser_btn, _("Eraser"), p.eraser)
-    self:_setStatus(p.eraser and _("Eraser") or label)
+        .. _("Tap to start or stop drawing. Pen settings are in More."),
+        p.drawing and not p.eraser)
+    ToolButton.setState(self.eraser_btn, _("Eraser"), p.drawing and p.eraser)
+    local status = p.eraser and _("Eraser") or label
+    if cache then
+        local state = cache:stateName()
+        if state == "loading" then status = _("Loading")
+        elseif state == "load_failed" then status = _("Load failed")
+        elseif session:saveFailed() then status = _("Save failed")
+        elseif not session:isWritable() then status = _("Read-only")
+        elseif p.canvas_off_page then status = _("Off page")
+        elseif not p.drawing then status = _("Drawing off") end
+    end
+    local pages = session and session:notePageState() or { position=1, total=1 }
+    if pages.total and pages.total > 1 then
+        status = T(_("Page %1 of %2 · %3"), pages.position, pages.total, status)
+    end
+    self:_setStatus(status)
 
-    if self.note_context and session then
+    if session then
         local ready = cache and cache:isReady()
-        self.draw_btn:enableDisable(p.drawing or session:loadFailed()
-            or ready and session:isWritable() and not p.canvas_off_page and not session:saveFailed())
-        local editing = p.drawing and ready and session:isWritable() and not p.canvas_off_page
-        self.pen_btn:enableDisable(editing)
-        self.eraser_btn:enableDisable(editing)
-        self.undo_btn:enableDisable(editing)
+        self.add_btn:enableDisable(ready and session:isWritable()
+            and not session:saveFailed())
+        local can_navigate = ready and not session:saveFailed() and not pages.error
+        self.previous_btn:enableDisable(can_navigate and pages.previous_id ~= nil)
+        self.status_btn:enableDisable(can_navigate and pages.total > 1)
+        self.next_btn:enableDisable(can_navigate and pages.next_id ~= nil)
+        local editable = ready and session:isWritable() and not p.canvas_off_page
+            and not session:saveFailed()
+        self.pen_btn:enableDisable(editable)
+        self.eraser_btn:enableDisable(editable)
+        self.undo_btn:enableDisable(p.drawing and editable)
     end
     if refresh then UIManager:setDirty(self.parent, "ui", self.dimen) end
 end
 
---- The words between Draw and Hide. Shaped and measured here, when the tool
---- changes; paint only draws them.
+--- Keep the centre page/status button in sync with navigation and tool state.
 function SheetBar:_setStatus(text)
     if text == self.status_text then return end
-    if self.status_widget then self.status_widget:free() end
-    self.status_widget = TextWidget:new{
-        text = text,
-        face = Font:getFace("smallinfofont", 18),
-        max_width = floor(self.dimen.w / 3) - 2 * Size.padding.small,
-    }
-    local size = self.status_widget:getSize()
     self.status_text = text
-    self.status_x = floor((self.dimen.w - size.w) / 2)
-    self.status_y = self.top + math.max(0, floor((self.target - size.h) / 2))
+    self.status_btn:setText(text, self.status_btn.width)
+    self.status_btn.help_text = text .. "\n" .. _("Tap to choose a page in this note.")
 end
 
 function SheetBar:paintTo(bb)
@@ -178,16 +188,12 @@ function SheetBar:paintTo(bb)
         local entry = self.entries[i]
         entry.widget:paintTo(bb, entry.rect.x, entry.rect.y)
     end
-    if self.status_widget then
-        self.status_widget:paintTo(bb, self.status_x, self.status_y)
-    end
 end
 
 --- The overlay replaces its bar on every geometry change and frees the old
 --- one a tick later. Idempotent: a close and a rebuild can both reach it.
 function SheetBar:free()
-    if self.status_widget then self.status_widget:free() end
-    self.status_widget, self.status_text = nil, nil
+    self.status_text = nil
     for i = 1, #self.entries do self.entries[i].widget:free() end
     self.entries = {}
 end

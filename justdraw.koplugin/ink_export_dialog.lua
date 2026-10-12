@@ -26,6 +26,7 @@ local ConfirmBox = require("ui/widget/confirmbox")
 local Device = require("device")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
 local RadioButtonTable = require("ui/widget/radiobuttontable")
+local CheckButton = require("ui/widget/checkbutton")
 local ButtonDialog = require("ui/widget/buttondialog")
 local UIManager = require("ui/uimanager")
 local logger = require("logger")
@@ -220,6 +221,11 @@ function Dialog.outcome(result)
             "Export cancelled. %1 files were already written.", result.count),
             result.count)
     end
+    if result.status == "failed" and (tonumber(result.count) or 0) > 0 then
+        return T(N_("The export stopped. %1 file was already written.\n\n%2",
+            "The export stopped. %1 files were already written.\n\n%2",
+            result.count), result.count, Dialog.reason(result.error))
+    end
     return Dialog.reason(result.error)
 end
 
@@ -243,7 +249,10 @@ function Dialog.run(opts)
         end)
         return
     end
-    local built, build_err = opts.build(opts.scope)
+    local built, build_err = opts.build(opts.scope, {
+        format = opts.format,
+        include_source_pages = opts.include_source_pages == true,
+    })
     if not built then
         opts.notify(Dialog.reason(build_err))
         return nil, build_err
@@ -450,6 +459,7 @@ function Dialog.show(opts)
         -- three different answers to "where" would be three different bugs.
         dir = Dialog.rememberedDirectory(settings, opts.fs),
         scope = opts.scopes and opts.scopes[1] and opts.scopes[1].value or nil,
+        include_source_pages = false,
     }
     local active_job = {}
     local dialog
@@ -491,6 +501,7 @@ function Dialog.show(opts)
             build_async = opts.build_async,
             scope = state.scope,
             format = state.format,
+            include_source_pages = state.include_source_pages,
             dir = state.dir,
             stem = stem,
             notify = opts.notify,
@@ -587,6 +598,20 @@ function Dialog.show(opts)
         },
         button_select_callback = function(entry) state.format = entry.value end,
     })
+
+    if opts.offer_source_pages then
+        local source_pages = CheckButton:new{
+            text = _("Include source pages"),
+            checked = false,
+            width = width,
+            parent = dialog,
+            show_parent = dialog,
+        }
+        source_pages.callback = function()
+            state.include_source_pages = source_pages.checked == true
+        end
+        dialog:addWidget(source_pages)
+    end
 
     if opts.scopes and #opts.scopes > 1 then
         local scope_buttons = {}

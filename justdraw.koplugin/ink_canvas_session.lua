@@ -29,6 +29,7 @@ local _ = require("gettext")
 local Anchor = require("ink_anchor")
 local BookDatabase = require("ink_book_database")
 local Index = require("ink_anchor_index")
+local NoteGroups = require("ink_note_repository")
 local PageIndex = require("ink_page_index")
 local Overlay = require("ink_canvas_overlay")
 local SurfaceSession = require("ink_surface_session")
@@ -92,6 +93,7 @@ function Session.new(opts)
         open_placement = nil,
         open_placement_page = nil,
         marks_here = {},
+        note_pages = nil,
         available = false,
         closed = false,
     }, Session)
@@ -244,6 +246,7 @@ function Session:close(opts)
         self.queue = nil
         self.surface_session = nil
         self.canvas = nil
+        self.note_pages = nil
         self:_placeOpenCanvas()
         self.next_seq = nil
         self.edited = false
@@ -549,6 +552,7 @@ function Session:openCanvas(canvas, opts)
         remember_height = opts.remember_height,
         note_context = opts.note_context,
     }
+    self:refreshNotePages()
     --[[--
     With a refresh, always.
 
@@ -596,6 +600,7 @@ function Session:closeCanvas()
     self.cache_obj = nil
     self.surface_session = nil
     self.canvas = nil
+    self.note_pages = nil
     self:_placeOpenCanvas()
     self.next_seq = nil
     return true
@@ -628,12 +633,67 @@ function Session:deleteCanvas(canvas)
         self.edited = false
     end
     if self.index then self.index:forget(canvas.id) end
+    if self.canvas then self:refreshNotePages() end
     self.marks_here = {}
     return true
 end
 
 function Session:activeCanvas()
     return self.canvas
+end
+
+--- Refresh the cheap header snapshot only at sheet lifecycle boundaries, not
+--- from paint or pen-state updates.  IDs resolve through the already-loaded
+--- book index, so navigating never has to enumerate canvas metadata again.
+function Session:refreshNotePages()
+    local canvas = self.canvas
+    if not canvas or not self.book_id or not self.repository then
+        self.note_pages = nil
+        return nil, "closed"
+    end
+    local rows, current, note_id = NoteGroups.new(self.repository)
+        :sequence(self.book_id, canvas)
+    if not rows then
+        self.note_pages = { position = 1, total = 1, error = current }
+        return nil, current
+    end
+    local ids = {}
+    for i, row in ipairs(rows) do ids[i] = tonumber(row.canvas_id) end
+    self.note_pages = {
+        ids = ids,
+        position = current,
+        total = #ids,
+        note_id = note_id,
+        previous_id = current > 1 and ids[current - 1] or nil,
+        next_id = current < #ids and ids[current + 1] or nil,
+    }
+    return self.note_pages
+end
+
+function Session:notePageState()
+    return self.note_pages or { position = 1, total = 1 }
+end
+
+--- Reconcile this live session after a book-scoped batch transaction deleted
+--- rows behind it. No repository writes happen here.
+function Session:forgetDeletedCanvases(ids)
+    local deleted = {}
+    for _, id in ipairs(ids or {}) do deleted[tonumber(id)] = true end
+    if self.canvas and deleted[self.canvas.id] then
+        if self.surface_session then self.surface_session:close{ discard = true } end
+        if self.overlay_widget then UIManager:close(self.overlay_widget) end
+        self.overlay_widget, self.cache_obj, self.queue = nil, nil, nil
+        self.surface_session, self.canvas, self.next_seq = nil, nil, nil
+        self.note_pages = nil
+        self.edited = false
+        self:_placeOpenCanvas()
+    end
+    if self.index then
+        for id in pairs(deleted) do self.index:forget(id) end
+    end
+    if self.canvas then self:refreshNotePages() end
+    self.marks_here = {}
+    return true
 end
 
 --[[--

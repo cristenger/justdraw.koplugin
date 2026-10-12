@@ -224,6 +224,20 @@ reduced, and the band's own 10 mm is added by `Header.compose`.
 ]]
 function DocumentSource.geometryFor(item)
     if type(item) ~= "table" then return nil, "bad_geometry" end
+    local target_w = tonumber(item.export_width_pt)
+    local target_h = tonumber(item.export_height_pt)
+    if item.kind == "sheet" and positive(target_w) and positive(target_h) then
+        if not positive(item.logical_w) or not positive(item.logical_h) then
+            return nil, "bad_geometry"
+        end
+        local page_scale, err = Header.budgetedScale(target_w, target_h,
+            Raster.TARGET_DPI / 72)
+        if not page_scale then return nil, err end
+        local scale = math.min(target_w * page_scale / item.logical_w,
+            target_h * page_scale / item.logical_h)
+        if not positive(scale) then return nil, "bad_geometry" end
+        return scale, target_w, target_h
+    end
     local base, width_pt, height_pt
     if item.kind == "page_ink" then
         base, width_pt, height_pt = ExportSource.pageInkGeometry(item)
@@ -238,6 +252,48 @@ function DocumentSource.geometryFor(item)
     local scale, err = Header.budgetedScale(item.logical_w, item.logical_h, base)
     if not scale then return nil, err end
     return scale, width_pt, height_pt
+end
+
+--- Pad an anchored drawing sheet to its PDF page's aspect ratio. The sheet is
+--- never stretched: one raster dimension is retained and the other gains
+--- white margins, while the PDF MediaBox takes the exact source-page size.
+local function fitToExportPage(item, result)
+    local target_w = tonumber(item and item.export_width_pt)
+    local target_h = tonumber(item and item.export_height_pt)
+    if item and item.kind == "sheet" and positive(target_w) and positive(target_h) then
+        local source = result and result.bb
+        if not source then return nil, "bad_raster" end
+        local w, h = tonumber(source:getWidth()), tonumber(source:getHeight())
+        if not positive(w) or not positive(h) then return nil, "bad_raster" end
+        local target_ratio = target_w / target_h
+        local fitted_w, fitted_h = w, h
+        if w / h > target_ratio then
+            fitted_h = math.floor(w / target_ratio + 0.5)
+        else
+            fitted_w = math.floor(h * target_ratio + 0.5)
+        end
+        if fitted_w ~= w or fitted_h ~= h then
+            local made, bb = pcall(Blitbuffer.new, fitted_w, fitted_h,
+                Blitbuffer.TYPE_BB8)
+            if not made or not bb then return nil, "bad_raster" end
+            bb:fill(Blitbuffer.COLOR_WHITE)
+            bb:blitFrom(source, math.floor((fitted_w - w) / 2),
+                math.floor((fitted_h - h) / 2))
+            if type(result.release) == "function" then pcall(result.release) end
+            local released = false
+            result = {
+                bb = bb,
+                release = function()
+                    if released then return end
+                    released = true
+                    bb:free()
+                end,
+            }
+        end
+        result.width_pt = target_w
+        result.height_pt = target_h
+    end
+    return result
 end
 
 --[[--
@@ -323,9 +379,11 @@ raster itself on success and releases nothing on a refusal, which is why the
 refusal branch here releases and the success branch does not.
 ]]
 local function withHeader(header, item, done)
-    if type(header) ~= "table" then return done end
     return function(result, err)
         if not result then return done(nil, err) end
+        result, err = fitToExportPage(item, result)
+        if not result then return done(nil, err) end
+        if type(header) ~= "table" then return done(result) end
         local composed, compose_err = Header.compose{
             result = result,
             title = header.title,

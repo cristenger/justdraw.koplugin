@@ -1297,8 +1297,8 @@ else
                 case("EPUB sheet: More > " .. entry, function() moreEntry(sheetBar(), entry) end)
             end
 
-            case("EPUB sheet: More > Delete sheet asks, Cancel keeps it", function()
-                moreEntry(sheetBar(), "Delete sheet")
+            case("EPUB sheet: More > Delete note asks, Cancel keeps it", function()
+                moreEntry(sheetBar(), "Delete note")
                 expect(plugin.canvas_open, "Cancel closed the sheet")
             end)
 

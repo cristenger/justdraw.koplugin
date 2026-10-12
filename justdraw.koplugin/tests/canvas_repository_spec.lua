@@ -359,7 +359,8 @@ return function(ctx)
         local repo, driver = openRepo{
             answers = function(conn)
                 conn:answer("FROM canvases", {
-                    { 3, "xpointer", "xp:/body/p[7]", "raw", "norm", 20240101, nil, 1860, 2480, 4242 },
+                    { 3, "xpointer", "xp:/body/p[7]", "raw", "norm", 20240101,
+                      nil, 1860, 2480, 4242, "sheet", "surface", 12 },
                 })
             end,
         }
@@ -375,7 +376,8 @@ return function(ctx)
         local repo = openRepo{
             answers = function(conn)
                 conn:answer("FROM canvases", {
-                    { 3, "xpointer", "xp:/body/p[7]", "raw", "norm", 20240101, nil, 1860, 2480, 4242 },
+                    { 3, "xpointer", "xp:/body/p[7]", "raw", "norm", 20240101,
+                      nil, 1860, 2480, 4242, "sheet", "surface", 12 },
                 })
             end,
         }
@@ -388,6 +390,8 @@ return function(ctx)
         t:eq(c.anchor_dom_version, 20240101, "dom version")
         t:eq(c.logical_w, 1860, "width")
         t:eq(c.logical_h, 2480, "height")
+        t:eq(c.book_id, 12,
+            "database reloads retain ownership required by logical-note navigation")
     end)
 
     t:case("integers come back as Lua numbers, not as int64 from the driver", function()
@@ -875,7 +879,7 @@ CREATE INDEX strokes_by_canvas ON strokes(canvas_id, seq);
     end
 
     t:case("the current schema declares both surfaces and visual order", function()
-        t:eq(Repository.SCHEMA_VERSION, 4, "version 4")
+        t:eq(Repository.SCHEMA_VERSION, 5, "version 5")
         t:check(Repository.SCHEMA:find("paint_seq    INTEGER", 1, true) ~= nil,
             "visual order is independent of the unique edit sequence")
         local schema = squash(Repository.SCHEMA)
@@ -890,6 +894,8 @@ CREATE INDEX strokes_by_canvas ON strokes(canvas_id, seq);
         t:check(schema:find(squash(
             "CREATE INDEX canvases_by_book_role_page ON canvases(book_id, surface_role, fixed_page, id)"),
             1, true) ~= nil, "with the index the page-ink lookups need")
+        t:check(schema:find("CREATE TABLE canvas_images", 1, true) ~= nil,
+            "the retired v5 image table remains for database compatibility")
     end)
 
     t:case("the v1 schema had neither column, so the migration is the only way in", function()
@@ -943,19 +949,21 @@ CREATE INDEX strokes_by_canvas ON strokes(canvas_id, seq);
     t:case("a v1 database is migrated by the real ladder, backup first", function()
         local repo, driver, backups = realMigratingRepo()
         t:check(repo ~= nil, "opened")
-        t:eq(repo.version, 4, "at version 4")
+        t:eq(repo.version, 5, "at version 5")
         local conn = driver.last()
         local begin_at = conn:indexOf("BEGIN")
         local role_at = conn:indexOf("ADD COLUMN surface_role")
         local space_at = conn:indexOf("ADD COLUMN coordinate_space")
         local index_at = conn:indexOf("CREATE INDEX canvases_by_book_role_page")
         local order_at = conn:indexOf("ALTER TABLE strokes ADD COLUMN paint_seq")
-        local stamp_at = conn:indexOf("PRAGMA user_version=4")
+        local images_at = conn:indexOf("CREATE TABLE canvas_images")
+        local stamp_at = conn:indexOf("PRAGMA user_version=5")
         local commit_at = conn:indexOf("COMMIT")
-        t:check(begin_at and role_at and space_at and index_at and order_at and stamp_at and commit_at,
+        t:check(begin_at and role_at and space_at and index_at and order_at and images_at and stamp_at and commit_at,
             "every step ran")
         t:check(begin_at < role_at and role_at < space_at and space_at < index_at
-            and index_at < order_at and order_at < stamp_at and stamp_at < commit_at, "in that order")
+            and index_at < order_at and order_at < images_at
+            and images_at < stamp_at and stamp_at < commit_at, "in that order")
         t:eq(conn:saw("UPDATE canvases"), false, "no row was rewritten to fill the columns in")
         t:eq(#backups, 1, "exactly one backup")
         t:eq(backups[1].dest, PATH .. ".backup-v1", "named for the version it holds")

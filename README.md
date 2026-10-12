@@ -27,7 +27,8 @@ JustDraw gives you three places to write, and one place to find them all again.
   current view cannot safely place ink over the PDF itself.
 - **Document notes** — one list of everything in the book you are reading: your
   sheets and page notes, plus KOReader's own highlights, bookmarks and typed
-  notes. From here you can read, filter, export and jump back to any of them.
+  notes. From here you can read, filter, export, batch-delete JustDraw notes
+  and jump back to any of them.
 
 Direct page notes remain the default in PDFs. The first time a PDF's current
 view needs separate paper, JustDraw asks before opening a drawing page. After
@@ -80,7 +81,7 @@ the menu, KOReader's Gesture Manager lists the plugin's actions under
 **In a PDF or other fixed-layout document,** your ink goes on the current page
 and stays with it: turn the page and you get that page's own layer. Manage them
 under **JustDraw → Page notes**, which offers *Delete this page note* and
-*Delete all page notes*. Dewatermark, white threshold, background cleanup,
+*Delete all page notes*, plus *Export…*. Dewatermark, white threshold, background cleanup,
 crop, margins and colour/contrast effects remain compatible with direct ink.
 Reflow, Auto Straighten, continuous scrolling, rotation, or a zoom too large
 for the page raster cannot be mapped safely. If a page sheet can be used,
@@ -88,20 +89,25 @@ JustDraw asks whether to open one or cancel. A successful opening remembers
 the choice for this PDF, so later incompatible views open their page sheet
 directly. **Reset drawing-page prompt** makes this PDF ask again.
 
-**For a separate sheet,** use **JustDraw → Drawing sheet → Open sheet here**.
-In an EPUB it is anchored to the passage you were reading; in a PDF it stays
-with the page where it was created. Its controls sit
+**For a separate sheet,** choose **Start drawing** in an EPUB, or **Open page
+sheet** from the JustDraw menu or toolbar More dialog in a PDF. It creates or
+reopens a sheet anchored to the passage or fixed page you were reading. Its controls sit
 across its top, above the paper, so neither hand rests on them:
-**Draw** and a ✕ that puts the sheet away, with the current pen between them,
+**Add page · Previous · status/page · Next · ✕**. A one-page note omits the
+page count and greys both arrows; a multi-page note shows **Page X of Y**,
+which you can tap to choose any page in that note directly. JustDraw remembers
+the selected page when the document is closed and reopened,
 then icons for **Pen · Eraser · Undo · Document notes · More** and the sheet's
 height (**40 % · 70 % · 100 %**). Tap or drag the strip above them to resize
-it.
+it. A sheet opens with drawing off: tap **Pen** or **Eraser** to start, and tap
+the active tool again to stop. Opening a dialog or leaving the anchored page
+suspends active capture and returning restores it. In **More**, the
+destructive action reads **Delete note** for a one-page note and **Delete page**
+when the note has multiple pages, so it is clear what will be removed.
 
 Because a sheet belongs to a passage and not to a page, you can keep reading
 with one open. When the page behind it changes, the sheet's top edge says which
-page it belongs to and it stops accepting ink. **JustDraw → Drawing sheet** then
-offers both ways out: **Go to this sheet's page**, or **Open a sheet here
-instead**.
+page it belongs to and it stops accepting ink. Return to the anchor to resume.
 
 Other useful entries in the same menu: **Toolbar side** (left or right, for the
 reader's toolbar; a sheet keeps its controls on top), **Input mode**
@@ -134,7 +140,9 @@ reader's toolbar; a sheet keeps its controls on top), **Input mode**
    ink, and KOReader's own notes, highlights and bookmarks. Each row names its
    page and its kind.
 3. **Filter** narrows by type, chapter, page range or annotation text, and sorts
-   by document order or last change. **Select** marks rows. **Export…** writes
+   by document order or last change. **Select** marks rows. In selection mode,
+   **Delete selected…** removes only selected drawing sheets and page notes;
+   KOReader annotations and legacy ink are reported as skipped. **Export…** writes
    all notes, the filtered results or just your selection.
 4. Tap a row to open it. You can zoom and pan, and step through the list with
    **Previous note** / **Next note**.
@@ -144,8 +152,8 @@ reader's toolbar; a sheet keeps its controls on top), **Input mode**
    no panel at all.
 6. After **View on page**, a small bar stays with the note: **Show note** (or
    **Go to note**, if you have since read on), **Notes** to return to the list,
-   and **Dismiss** to put the bar away. The note is still reachable from
-   **JustDraw → Drawing sheet** for the rest of the session.
+   and **Dismiss** to put the bar away. The note remains reachable from
+   **Document notes** and, on PDFs, **Open page sheet**.
 
 A drawing note can hold several sheets. From its detail view, **Actions… → Add
 sheet at end** extends it and **Organize sheets…** reorders them.
@@ -178,6 +186,13 @@ list also offers **Annotated pages as images…** and **Complete document as
 images…**. A PDF page is rendered with its direct ink, then that page's drawing
 sheets are inserted immediately after it. For EPUB, the list offers
 **Complete EPUB with notes appendix…**.
+
+Fixed-layout PDF note exports also offer **Include source pages**. It starts
+off each time. In a PDF export, each clean 150 dpi source page is inserted once
+before the selected notes anchored there. In PNG or JPEG exports, the notes
+keep the chosen format and each unique clean source page is saved beside them
+as `-source-page-N.png`. Unanchored notes still export, without an invented
+source page.
 
 Output is a picture of your ink, not editable vectors. If the folder looks too
 full you are asked before anything is written, and leftovers from an interrupted

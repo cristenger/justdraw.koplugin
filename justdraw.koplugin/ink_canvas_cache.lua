@@ -510,6 +510,7 @@ function Cache:repair(m)
     self:_resetCoverage()
     clearRegion(self, self.bb, box.x, box.y, box.w, box.h)
 
+    local view = self.bb:viewport(box.x, box.y, box.w, box.h)
     local scale = self.transform.scale
     local neighbours = self:_metaNear(
         box.x / scale, box.y / scale,
@@ -522,7 +523,6 @@ function Cache:repair(m)
         table.sort(neighbours, paintBefore)
         -- A viewport of the region, so the repair cannot paint outside it even
         -- if a neighbour reaches far beyond.
-        local view = self.bb:viewport(box.x, box.y, box.w, box.h)
         local canvas_box = {
             min_x = box.x / scale, min_y = box.y / scale,
             max_x = (box.x + box.w) / scale,

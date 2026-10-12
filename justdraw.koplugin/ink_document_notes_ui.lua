@@ -87,15 +87,28 @@ function Browser:_rebuild()
     end
     local row_h = math.floor(list_h / self.per_page)
     local content = VerticalGroup:new{ align = "left", title }
-    content[#content + 1] = self:_actions({
-        { text = c.state == "error" and _("Retry") or next(c.filter) and _("Filtered") or _("Filter"),
-          enabled = ready or c.state == "error",
-          callback = function() if c.state == "error" then self.controller:retry() else self:showFilters() end end },
-        { text = self.select_mode and _("Done selecting") or _("Select"), enabled = ready,
-          callback = function() self.select_mode = not self.select_mode; self:_rebuild() end },
-        { text = _("Export…"), enabled = ready,
-          callback = function() self.controller:showExportOptions() end },
-    }, w, controls_h)
+    local actions
+    if self.select_mode then
+        actions = {
+            { text = _("Delete selected…"), enabled = ready and c:selectionCount() > 0,
+              callback = function() self.controller:confirmDeleteSelected() end },
+            { text = _("Done"), enabled = ready,
+              callback = function() self.select_mode = false; self:_rebuild() end },
+            { text = _("Export…"), enabled = ready,
+              callback = function() self.controller:showExportOptions() end },
+        }
+    else
+        actions = {
+            { text = c.state == "error" and _("Retry") or next(c.filter) and _("Filtered") or _("Filter"),
+              enabled = ready or c.state == "error",
+              callback = function() if c.state == "error" then self.controller:retry() else self:showFilters() end end },
+            { text = _("Select"), enabled = ready,
+              callback = function() self.select_mode = true; self:_rebuild() end },
+            { text = _("Export…"), enabled = ready,
+              callback = function() self.controller:showExportOptions() end },
+        }
+    end
+    content[#content + 1] = self:_actions(actions, w, controls_h)
     local used = 0
     self.visible_ids = {}
     for i = self.first, math.min(#c.result, self.first + self.per_page - 1) do
@@ -105,9 +118,14 @@ function Browser:_rebuild()
         if item.surface then label = label .. " " .. tostring(item.surface.id) end
         if item.sheets then label=label.." · "..T(_("%1 sheets"),#item.sheets) end
         if self.select_mode then label = (c.selected[item.id] and "☑ " or "☐ ") .. label end
-        local chapter = TextWidget:new{ text = item.chapter or self.controller.title,
-            face = Font:getFace("smallinfofont"), max_width = w - 2 * Size.padding.large }
-        local chapter_h = chapter:getSize().h
+        local chapter, chapter_h
+        if item.chapter and item.chapter ~= "" then
+            chapter = TextWidget:new{ text = item.chapter,
+                face = Font:getFace("smallinfofont"), max_width = w - 2 * Size.padding.large }
+            chapter_h = chapter:getSize().h
+        else
+            chapter_h = 0
+        end
         local button = self:_button{ text = label, align = "left", width = w,
             height = row_h - chapter_h, enabled = ready or not self.select_mode,
             callback = function()
@@ -115,7 +133,11 @@ function Browser:_rebuild()
                 if self.select_mode then c:toggle(item.id)
                 else self.controller:showDetail(item.id) end
             end }
-        content[#content + 1] = VerticalGroup:new{ align = "left", chapter, button }
+        if chapter then
+            content[#content + 1] = VerticalGroup:new{ align = "left", chapter, button }
+        else
+            content[#content + 1] = button
+        end
         self.layout[#self.layout + 1] = {button}
         used = used + row_h
     end
