@@ -68,7 +68,9 @@ the menu, KOReader's Gesture Manager lists the plugin's actions under
 ## Drawing over a document
 
 1. Open a book, then **Tools → JustDraw → Start drawing**. (**Show toolbar**
-   brings up the toolbar without starting.)
+   brings up the toolbar without starting.) Or select some text: KOReader's
+   selection menu has a **JustDraw** button that brings up the toolbar. Nothing
+   of JustDraw is on screen until you ask for it this way.
 2. A small toolbar appears at the side of the screen: **Draw**, then icons for
    **Pen · Eraser · Undo · More · Hide** (the ✕). While you are drawing, **Draw**
    reads **Stop**. The selected tool is underlined; hold any icon to see its

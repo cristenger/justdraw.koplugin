@@ -94,7 +94,6 @@ return function(ctx)
     t:case("plugin imports legacy preferences and direct document ink", function()
         ctx.reset()
         _G.G_reader_settings.data.fingerink_input_mode = "finger"
-        _G.G_reader_settings.data.fingerink_bar_shown = false
         local legacy = { [2] = { { 10, 10, 20, 20 } } }
         local plugin = ctx.newPlugin{
             page = 2,
@@ -102,14 +101,11 @@ return function(ctx)
         }
 
         t:eq(plugin.input_mode, "finger", "legacy input mode restored")
-        t:eq(plugin.bar, nil, "legacy hidden-toolbar preference restored")
         t:eq(plugin.store.pages, legacy, "legacy document ink is used in place")
         t:eq(plugin.stroke_storage_id, "fingerink", "legacy key remains the active store")
         t:eq(#plugin.store.pages[2], 1, "legacy document ink loaded")
         t:eq(_G.G_reader_settings.data.justdraw_input_mode, "finger",
             "input mode migrated")
-        t:eq(_G.G_reader_settings.data.justdraw_bar_shown, false,
-            "toolbar preference migrated")
 
         plugin.store:add(3, { n = 2, w = 4, 30, 30, 40, 40 })
         plugin:onSaveSettings()

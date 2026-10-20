@@ -2881,6 +2881,23 @@ function support.newPlugin(JustDraw, env, opts)
             return true
         end,
     }
+    -- KOReader's selection menu, kept the way ReaderHighlight keeps it: a
+    -- table of button factories by sort key, and `onClose` is what its own
+    -- entries call to drop the selection and the dialog. `highlight = false`
+    -- is a reader without the module; a table replaces it wholesale.
+    if opts.highlight ~= false then
+        ui.highlight = opts.highlight or {
+            _highlight_buttons = {},
+            closed = 0,
+            addToHighlightDialog = function(self, idx, fn) self._highlight_buttons[idx] = fn end,
+            removeFromHighlightDialog = function(self, idx)
+                local fn = self._highlight_buttons[idx]
+                self._highlight_buttons[idx] = nil
+                return fn
+            end,
+            onClose = function(self) self.closed = self.closed + 1 end,
+        }
+    end
     -- The reflowable-document surface. Absent by default, so every existing
     -- test still describes a plugin with no canvas session at all.
     if opts.document then

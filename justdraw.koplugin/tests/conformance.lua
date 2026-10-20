@@ -2730,6 +2730,56 @@ do
     bar:free()
 end
 
+--[[--
+The selection menu's JustDraw entry (ADR-61) leans on three things the suite's
+fake ReaderHighlight states: a factory table filled by `addToHighlightDialog`
+and emptied by `removeFromHighlightDialog`, a factory that is called with the
+ReaderHighlight itself, and `show_in_highlight_dialog_func` deciding per menu
+whether the button is there at all -- that is what keeps the entry out of the
+menu while the toolbar is already up. The menu is built for real over a bare
+ReaderHighlight-shaped table; ReaderUI is not needed to build a ButtonDialog.
+]]
+do
+    local ok_class, ReaderHighlight = pcall(require, "apps/reader/modules/readerhighlight")
+    local api = ok_class and type(ReaderHighlight) == "table"
+        and type(ReaderHighlight.addToHighlightDialog) == "function"
+        and type(ReaderHighlight.removeFromHighlightDialog) == "function"
+        and type(ReaderHighlight.onClose) == "function"
+    claim("ReaderHighlight exposes add/removeFromHighlightDialog and onClose",
+        ok_class, api, not ok_class and tostring(ReaderHighlight) or nil)
+    if api and type(ReaderHighlight.onShowHighlightMenu) == "function" then
+        local UIManager = require("ui/uimanager")
+        local host = setmetatable({ selected_text = { text = "word" },
+            _highlight_buttons = {} }, { __index = ReaderHighlight })
+        local seen
+        local function factory(visible)
+            return function(this)
+                seen = this
+                return { text = visible and "jd_shown" or "jd_hidden",
+                    show_in_highlight_dialog_func = function() return visible end,
+                    callback = function() end }
+            end
+        end
+        host:addToHighlightDialog("13_jd_shown", factory(true))
+        host:addToHighlightDialog("13_jd_hidden", factory(false))
+        local ok_menu, err = pcall(host.onShowHighlightMenu, host)
+        local texts = {}
+        local dialog = host.highlight_dialog
+        for _, row in ipairs(dialog and dialog.buttons or {}) do
+            for _, b in ipairs(row) do texts[b.text] = true end
+        end
+        claim("the selection menu honours show_in_highlight_dialog_func",
+            ok_menu, texts.jd_shown == true and texts.jd_hidden == nil
+                and seen == host,
+            ok_menu and "" or tostring(err))
+        if dialog then UIManager:close(dialog) end
+        local removed = host:removeFromHighlightDialog("13_jd_shown")
+        claim("removeFromHighlightDialog takes the entry out",
+            true, type(removed) == "function"
+                and host._highlight_buttons["13_jd_shown"] == nil)
+    end
+end
+
 for _, r in ipairs(rows) do
     io.write(string.format("%-12s %-56s %s\n", r[1], r[2], r[3]))
 end

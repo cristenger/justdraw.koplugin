@@ -527,6 +527,11 @@ local JustDraw = WidgetContainer:extend{
     is_doc_only = false,
 }
 
+--- Our key in ReaderHighlight's selection menu. The menu sorts its factories
+--- by key; KOReader's own run 01..11 and qrclipboard takes 12, so this one
+--- comes after every built-in entry.
+JustDraw.HIGHLIGHT_BUTTON = "13_justdraw"
+
 -- ---------------------------------------------------------------- lifecycle
 
 function JustDraw:init()
@@ -751,10 +756,48 @@ function JustDraw:init()
     self.direct_ink_clear_all = false
 
     self.view:registerViewModule("justdraw", self)
+    self:addSelectionEntry()
+end
 
-    if Compat.readSetting(G_reader_settings, "bar_shown", true) ~= false then
-        UIManager:nextTick(function() self:setBarShown(true) end)
-    end
+--[[--
+The toolbar is asked for, never put up by a book opening (ADR-61).
+
+It used to mount on every open under a `bar_shown` preference that defaulted
+to on and rewrote itself on each mount, so it was on screen beside every word
+a reader selected -- KOReader's dictionary, highlight and translate menus with
+a drawing toolbar next to them, in a reader who had never opened JustDraw. A
+selection is the moment a reader wants KOReader's tools, and also the moment
+someone who does want to draw over that passage is looking at a menu: so the
+way in is one entry in that menu, shown only while the toolbar is down.
+
+It shows the toolbar and nothing more. Draw stays a second, deliberate press,
+so nothing reached from the selection menu can leave the reader in a mode that
+swallows touches. `this:onClose()` is how KOReader's own entries leave: it
+closes the dialog and clears the selection. A runtime without the API simply
+has no entry.
+]]
+function JustDraw:addSelectionEntry()
+    local highlight = self.ui.highlight
+    if not (highlight and type(highlight.addToHighlightDialog) == "function") then return end
+    highlight:addToHighlightDialog(JustDraw.HIGHLIGHT_BUTTON, function(this)
+        return {
+            text = MENU_JUSTDRAW,
+            show_in_highlight_dialog_func = function()
+                return not (self.bar or self.canvas_open or self.drawing
+                    or self.reader_closed)
+            end,
+            callback = function()
+                this:onClose()
+                self:setBarShown(true)
+            end,
+        }
+    end)
+end
+
+function JustDraw:removeSelectionEntry()
+    local highlight = self.ui and self.ui.highlight
+    if not (highlight and type(highlight.removeFromHighlightDialog) == "function") then return end
+    highlight:removeFromHighlightDialog(JustDraw.HIGHLIGHT_BUTTON)
 end
 
 --- Return the headless notebook domain without opening its SQLite database.
@@ -1117,6 +1160,7 @@ function JustDraw:teardown()
     -- A selection or placement holds keys of the sheet about to go (7.2).
     self:clearSheetEditing("close")
     self.reader_closed = true
+    self:removeSelectionEntry()
     self.note_context = nil
     self.canvas_intent, self.canvas_intent_id = nil, nil
     self.document_drawing_suspended = false
@@ -1648,7 +1692,6 @@ function JustDraw:setBarShown(on)
         if not on then self:dismissNoteReturnBar(); return end
         self:clearNoteContext()
     end
-    Compat.saveSetting(G_reader_settings, "bar_shown", on)
 
     if on then
         if self.bar then return end

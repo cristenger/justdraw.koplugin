@@ -47,7 +47,7 @@ end
 
 local function newPlugin(opts)
     local p = support.newPlugin(JustDraw, env, opts)
-    env.UIManager:flush()   -- let the deferred setBarShown run
+    env.UIManager:flush()   -- drain whatever init deferred to the first tick
     return p
 end
 
@@ -1867,13 +1867,11 @@ t:case("a failed start does not force the toolbar on", function()
     reset{ stylus_api = false }
     local p = newPlugin()
     p:setBarShown(false)
-    _G.G_reader_settings.data.justdraw_bar_shown = false
     p:setInputMode("stylus")
 
     p:setDrawing(true)
     t:eq(p.drawing, false, "drawing stayed off")
     t:eq(p.bar, nil, "the toolbar was not forced on")
-    t:eq(_G.G_reader_settings.data.justdraw_bar_shown, false, "the preference was not rewritten")
 end)
 
 -- =====================================================================
@@ -2400,6 +2398,7 @@ for _, spec in ipairs({
     "i18n_spec",
     "i18n_catalog_spec",
     "compat_spec",
+    "selection_activation_spec",
     "conformance_policy_spec",
     "stylus_sequence_spec",
     "wacom_palm_spec",
