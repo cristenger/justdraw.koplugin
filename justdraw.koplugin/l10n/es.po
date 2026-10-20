@@ -18,7 +18,7 @@ msgid "Show note"
 msgstr "Mostrar nota"
 
 #: ink_bar.lua ink_document_export_controller.lua ink_document_notes_ui.lua
-#: main.lua
+#: ink_reader_menu.lua main.lua
 msgid "Document notes"
 msgstr "Notas del documento"
 
@@ -53,7 +53,7 @@ msgstr "Ocultar nota"
 
 #: ink_bar.lua
 msgid "Hide toolbar"
-msgstr "Ocultar barra"
+msgstr "Ocultar barra de herramientas"
 
 #: ink_bar.lua main.lua
 msgid "Go to note"
@@ -61,7 +61,7 @@ msgstr "Ir a la nota"
 
 #: ink_bar.lua ink_sheet_bar.lua
 msgid "Stop"
-msgstr "Parar"
+msgstr "Detener"
 
 #: ink_bar.lua ink_sheet_bar.lua
 msgid "Loading"
@@ -97,14 +97,11 @@ msgid "This sheet's place in the book is missing"
 msgstr "No se encuentra la posición de esta hoja en el libro"
 
 #: ink_canvas_session.lua
-msgid ""
-"This sheet changed since it was last open, so its undo history was cleared."
+msgid "This sheet changed since it was last open, so its undo history was cleared."
 msgstr "Esta hoja cambió desde la última vez que se abrió, así que se borró su historial de deshacer."
 
 #: ink_canvas_session.lua ink_notebook_session.lua
-msgid ""
-"Erasing stopped here so this erase can still be undone. Lift the pen and "
-"erase again."
+msgid "Erasing stopped here so this erase can still be undone. Lift the pen and erase again."
 msgstr "El borrado se detuvo aquí para que aún se pueda deshacer. Levanta el lápiz y vuelve a borrar."
 
 #: ink_canvas_session.lua
@@ -136,15 +133,11 @@ msgid "Could not list this book's sheets."
 msgstr "No se pudieron listar las hojas de este libro."
 
 #: ink_canvas_session.lua
-msgid ""
-"This sheet is read-only because it was created by a newer JustDraw version."
+msgid "This sheet is read-only because it was created by a newer JustDraw version."
 msgstr "Esta hoja es de solo lectura porque se creó con una versión más reciente de JustDraw."
 
 #: ink_canvas_session.lua
-msgid ""
-"Both JustDraw and FingerInk sheet databases exist. Close KOReader, then move "
-"one database together with its matching -wal and -shm files to another "
-"directory."
+msgid "Both JustDraw and FingerInk sheet databases exist. Close KOReader, then move one database together with its matching -wal and -shm files to another directory."
 msgstr "Existen bases de datos de hojas de JustDraw y de FingerInk. Cierra KOReader y mueve una de ellas, junto con sus archivos -wal y -shm correspondientes, a otro directorio."
 
 #: ink_document_export_controller.lua ink_notebook_editor.lua
@@ -164,22 +157,15 @@ msgid "Notes"
 msgstr "Notas"
 
 #: ink_document_export_controller.lua
-msgid ""
-"This export includes legacy ink whose original zoom, rotation and screen "
-"geometry were not stored. Its layout cannot be guaranteed."
+msgid "This export includes legacy ink whose original zoom, rotation and screen geometry were not stored. Its layout cannot be guaranteed."
 msgstr "Esta exportación incluye tinta antigua cuyo zoom, rotación y geometría de pantalla originales no se guardaron. No se puede garantizar su disposición."
 
 #: ink_document_export_controller.lua
-msgid ""
-"This creates document pages as grayscale images. Text will not be selectable "
-"and links will not be preserved. Native annotations are included as text "
-"pages in an appendix."
+msgid "This creates document pages as grayscale images. Text will not be selectable and links will not be preserved. Native annotations are included as text pages in an appendix."
 msgstr "Esto crea las páginas del documento como imágenes en escala de grises. El texto no se podrá seleccionar y los enlaces no se conservarán. Las anotaciones nativas se incluyen como páginas de texto en un apéndice."
 
 #: ink_document_export_controller.lua
-msgid ""
-"Legacy ink is included separately after the document pages, because its "
-"original position cannot be reconstructed."
+msgid "Legacy ink is included separately after the document pages, because its original position cannot be reconstructed."
 msgstr "La tinta antigua se incluye aparte, después de las páginas del documento, porque no se puede reconstruir su posición original."
 
 #: ink_document_export_controller.lua ink_export_dialog.lua
@@ -196,16 +182,11 @@ msgid "Page notes need a database this KOReader cannot open."
 msgstr "Las notas de página necesitan una base de datos que este KOReader no puede abrir."
 
 #: ink_document_ink_session.lua
-msgid ""
-"Both JustDraw and FingerInk notes databases exist. Close KOReader, then move "
-"one database together with its matching -wal and -shm files to another "
-"directory."
+msgid "Both JustDraw and FingerInk notes databases exist. Close KOReader, then move one database together with its matching -wal and -shm files to another directory."
 msgstr "Existen bases de datos de notas de JustDraw y de FingerInk. Cierra KOReader y mueve una de ellas, junto con sus archivos -wal y -shm correspondientes, a otro directorio."
 
 #: ink_document_ink_session.lua
-msgid ""
-"Page notes are read-only because this database was created by a newer "
-"JustDraw version."
+msgid "Page notes are read-only because this database was created by a newer JustDraw version."
 msgstr "Las notas de página son de solo lectura porque esta base de datos se creó con una versión más reciente de JustDraw."
 
 #: ink_document_ink_session.lua
@@ -272,7 +253,7 @@ msgstr "Marcador de KOReader"
 msgid "Page note"
 msgstr "Nota de página"
 
-#: ink_document_note.lua ink_document_notes_ui.lua
+#: ink_document_note.lua ink_document_notes_ui.lua ink_reader_menu.lua
 msgid "Legacy ink"
 msgstr "Tinta antigua"
 
@@ -305,7 +286,8 @@ msgid "Read from here"
 msgstr "Leer desde aquí"
 
 #: ink_document_notes_controller.lua ink_document_notes_ui.lua
-#: ink_notebook_editor.lua ink_notebook_library.lua main.lua
+#: ink_notebook_editor.lua ink_notebook_library.lua ink_reader_menu.lua
+#: main.lua
 msgid "Export…"
 msgstr "Exportar…"
 
@@ -454,10 +436,7 @@ msgid "Export page %1"
 msgstr "Exportar página %1"
 
 #: ink_document_notes_controller.lua
-msgid ""
-"The complete EPUB is reflowed to A5 grayscale pages. Notes and native "
-"annotations follow in an appendix with source references. Text will not be "
-"selectable and links will not be preserved."
+msgid "The complete EPUB is reflowed to A5 grayscale pages. Notes and native annotations follow in an appendix with source references. Text will not be selectable and links will not be preserved."
 msgstr "El EPUB completo se recompone en páginas A5 en escala de grises. Las notas y las anotaciones nativas van a continuación en un apéndice con referencias a su origen. El texto no se podrá seleccionar y los enlaces no se conservarán."
 
 #: ink_document_notes_controller.lua
@@ -636,7 +615,7 @@ msgstr "Hojas de dibujo"
 msgid "KOReader notes and highlights"
 msgstr "Notas y subrayados de KOReader"
 
-#: ink_document_notes_ui.lua main.lua
+#: ink_document_notes_ui.lua ink_reader_menu.lua
 msgid "Page notes"
 msgstr "Notas de página"
 
@@ -717,9 +696,7 @@ msgid "The sheets in this book are still being located. Try again in a moment."
 msgstr "Aún se están localizando las hojas de este libro. Inténtalo de nuevo en un momento."
 
 #: ink_export_dialog.lua
-msgid ""
-"This document can’t be exported yet. Only fixed-layout documents, such as "
-"PDFs, can."
+msgid "This document can’t be exported yet. Only fixed-layout documents, such as PDFs, can."
 msgstr "Este documento aún no se puede exportar. Solo se pueden exportar documentos de diseño fijo, como los PDF."
 
 #: ink_export_dialog.lua
@@ -731,14 +708,11 @@ msgid "This page is too large to export."
 msgstr "Esta página es demasiado grande para exportarla."
 
 #: ink_export_dialog.lua
-msgid ""
-"This selection has too many pages to export at once. Export a smaller range."
+msgid "This selection has too many pages to export at once. Export a smaller range."
 msgstr "Esta selección tiene demasiadas páginas para exportarlas de una vez. Exporta un rango más pequeño."
 
 #: ink_export_dialog.lua
-msgid ""
-"A note’s page size no longer matches the document. Export the notes "
-"separately."
+msgid "A note’s page size no longer matches the document. Export the notes separately."
 msgstr "El tamaño de página de una nota ya no coincide con el documento. Exporta las notas por separado."
 
 #: ink_export_dialog.lua
@@ -758,9 +732,12 @@ msgid "Lift the pen and try again."
 msgstr "Levanta el lápiz e inténtalo de nuevo."
 
 #: ink_export_dialog.lua
-msgid ""
-"The exported file couldn’t be put in place. Check the folder and try again."
+msgid "The exported file couldn’t be put in place. Check the folder and try again."
 msgstr "No se pudo colocar el archivo exportado en su sitio. Revisa la carpeta e inténtalo de nuevo."
+
+#: ink_export_dialog.lua ink_export_xopp_job.lua
+msgid "A file with that name appeared while exporting. Nothing was replaced; export again to choose."
+msgstr "Apareció un archivo con ese nombre durante la exportación. No se reemplazó nada; vuelve a exportar para elegir."
 
 #: ink_export_dialog.lua
 msgid "The image couldn’t be written. The folder may be full."
@@ -894,8 +871,7 @@ msgstr[1] "Limpiar %1 archivos sobrantes"
 
 #: ink_export_dialog.lua
 msgid "Delete %1 leftover file from an interrupted export? This frees %2."
-msgid_plural ""
-"Delete %1 leftover files from an interrupted export? This frees %2."
+msgid_plural "Delete %1 leftover files from an interrupted export? This frees %2."
 msgstr[0] "¿Borrar %1 archivo sobrante de una exportación interrumpida? Así se liberan %2."
 msgstr[1] "¿Borrar %1 archivos sobrantes de una exportación interrumpida? Así se liberan %2."
 
@@ -927,39 +903,27 @@ msgid "What to export"
 msgstr "Qué exportar"
 
 #: ink_export_xopp.lua
-msgid ""
-"The highlighter paints black at 20% opacity in JustDraw; Xournal++ stores "
-"highlighters at 50% (alpha 0x7f), so they look darker."
+msgid "The highlighter paints black at 20% opacity in JustDraw; Xournal++ stores highlighters at 50% (alpha 0x7f), so they look darker."
 msgstr "En JustDraw, el resaltador pinta en negro con una opacidad del 20%; Xournal++ guarda los resaltadores al 50% (alfa 0x7f), así que se ven más oscuros."
 
 #: ink_export_xopp.lua
-msgid ""
-"The legacy marker is exported as an opaque light-gray pen, not as a "
-"translucent highlighter."
+msgid "The legacy marker is exported as an opaque light-gray pen, not as a translucent highlighter."
 msgstr "El rotulador antiguo se exporta como una pluma gris claro opaca, no como un resaltador translúcido."
 
 #: ink_export_xopp.lua
-msgid ""
-"Textured strokes lose their grain and become flat gray pen strokes. The PDF "
-"export remains the faithful picture."
+msgid "Textured strokes lose their grain and become flat gray pen strokes. The PDF export remains the faithful picture."
 msgstr "Los trazos con textura pierden su grano y se convierten en trazos lisos de pluma gris. La exportación a PDF sigue siendo la imagen fiel."
 
 #: ink_export_xopp.lua
-msgid ""
-"Every stroke uses Xournal++'s round cap; JustDraw's original pen draws a "
-"square nib, so ends and corners may look slightly different."
+msgid "Every stroke uses Xournal++'s round cap; JustDraw's original pen draws a square nib, so ends and corners may look slightly different."
 msgstr "Todos los trazos usan el extremo redondeado de Xournal++; la pluma original de JustDraw dibuja con una punta cuadrada, así que los extremos y las esquinas pueden verse algo distintos."
 
 #: ink_export_xopp.lua
-msgid ""
-"Paper without a Xournal++ equivalent (narrow ruled, checklist) is exported "
-"as ruled."
+msgid "Paper without a Xournal++ equivalent (narrow ruled, checklist) is exported as ruled."
 msgstr "El papel sin equivalente en Xournal++ (rayado estrecho, lista de tareas) se exporta como rayado."
 
 #: ink_export_xopp.lua
-msgid ""
-"Xournal++ draws ruled, squared and dotted backgrounds at its own spacing, "
-"not JustDraw's."
+msgid "Xournal++ draws ruled, squared and dotted backgrounds at its own spacing, not JustDraw's."
 msgstr "Xournal++ dibuja los fondos rayados, cuadriculados y punteados con su propio espaciado, no con el de JustDraw."
 
 #: ink_export_xopp.lua
@@ -967,21 +931,15 @@ msgid "A dot is exported as a zero-length stroke of two identical points."
 msgstr "Un punto se exporta como un trazo de longitud cero con dos puntos idénticos."
 
 #: ink_export_xopp_job.lua
-msgid ""
-"The notebook changed while it was being exported, so nothing was saved. Try "
-"again."
+msgid "The notebook changed while it was being exported, so nothing was saved. Try again."
 msgstr "El cuaderno cambió mientras se exportaba, así que no se guardó nada. Inténtalo de nuevo."
 
 #: ink_export_xopp_job.lua
-msgid ""
-"The export’s temporary file couldn’t be written. The device may be full; "
-"free some space and try again."
+msgid "The export’s temporary file couldn’t be written. The device may be full; free some space and try again."
 msgstr "No se pudo escribir el archivo temporal de la exportación. Puede que el dispositivo esté lleno; libera algo de espacio e inténtalo de nuevo."
 
 #: ink_export_xopp_job.lua
-msgid ""
-"This notebook is too large to export to Xournal++. Export fewer pages, or "
-"use PDF."
+msgid "This notebook is too large to export to Xournal++. Export fewer pages, or use PDF."
 msgstr "Este cuaderno es demasiado grande para exportarlo a Xournal++. Exporta menos páginas o usa PDF."
 
 #: ink_export_xopp_job.lua
@@ -996,16 +954,8 @@ msgstr "No se pudo comprimir el archivo. Puede que la carpeta esté llena."
 msgid "The compressed file didn’t check out, so it wasn’t saved. Try again."
 msgstr "El archivo comprimido no superó la comprobación, así que no se guardó. Inténtalo de nuevo."
 
-#: ink_export_xopp_job.lua
-msgid ""
-"A file with that name appeared while exporting. Nothing was replaced; export "
-"again to choose."
-msgstr "Apareció un archivo con ese nombre durante la exportación. No se reemplazó nada; vuelve a exportar para elegir."
-
 #: ink_localsend.lua
-msgid ""
-"LocalSend isn’t available. Install or update the LocalSend plugin, then try "
-"again."
+msgid "LocalSend isn’t available. Install or update the LocalSend plugin, then try again."
 msgstr "LocalSend no está disponible. Instala o actualiza el complemento LocalSend e inténtalo de nuevo."
 
 #: ink_localsend.lua
@@ -1047,9 +997,7 @@ msgid "Try again?"
 msgstr "¿Reintentar?"
 
 #: ink_localsend.lua
-msgid ""
-"Earlier sends still take up space. Delete the ones from previous sessions "
-"and try again?"
+msgid "Earlier sends still take up space. Delete the ones from previous sessions and try again?"
 msgstr "Los envíos anteriores aún ocupan espacio. ¿Borrar los de sesiones previas y volver a intentarlo?"
 
 #: ink_localsend.lua
@@ -1067,9 +1015,7 @@ msgstr[0] "Enviar %1 cuaderno con LocalSend como:"
 msgstr[1] "Enviar %1 cuadernos con LocalSend como:"
 
 #: ink_localsend.lua
-msgid ""
-"PDF is a picture of each page. Xournal++ keeps every stroke editable; some "
-"pen styles and papers are approximated."
+msgid "PDF is a picture of each page. Xournal++ keeps every stroke editable; some pen styles and papers are approximated."
 msgstr "PDF es una imagen de cada página. Xournal++ mantiene editables todos los trazos; algunos estilos de pluma y papeles son aproximados."
 
 #: ink_localsend.lua
@@ -1107,9 +1053,7 @@ msgid "This page’s ink hasn’t been saved."
 msgstr "La tinta de esta página no se ha guardado."
 
 #: ink_notebook_editor.lua
-msgid ""
-"It is still on this device. You can’t leave this notebook or change pages "
-"until it is saved."
+msgid "It is still on this device. You can’t leave this notebook or change pages until it is saved."
 msgstr "Sigue en este dispositivo. No puedes salir de este cuaderno ni cambiar de página hasta que se guarde."
 
 #: ink_notebook_editor.lua
@@ -1221,9 +1165,7 @@ msgid "A notebook must keep at least one page, so this page can’t be deleted."
 msgstr "Un cuaderno debe conservar al menos una página, así que esta página no se puede borrar."
 
 #: ink_notebook_editor.lua
-msgid ""
-"Delete this page and its ink? The rest of the notebook won’t change. This "
-"can’t be undone."
+msgid "Delete this page and its ink? The rest of the notebook won’t change. This can’t be undone."
 msgstr "¿Borrar esta página y su tinta? El resto del cuaderno no cambiará. Esto no se puede deshacer."
 
 #: ink_notebook_editor.lua ink_notebook_library.lua
@@ -1250,15 +1192,15 @@ msgstr "Ajustes de pluma"
 msgid "Paper style"
 msgstr "Estilo de papel"
 
-#: ink_notebook_editor.lua ink_refresh_dialog.lua main.lua
+#: ink_notebook_editor.lua ink_reader_menu.lua ink_refresh_dialog.lua main.lua
 msgid "Drawing refresh"
 msgstr "Refresco del dibujo"
 
-#: ink_notebook_editor.lua main.lua
+#: ink_notebook_editor.lua ink_reader_menu.lua main.lua
 msgid "Input mode"
 msgstr "Modo de entrada"
 
-#: ink_notebook_editor.lua main.lua
+#: ink_notebook_editor.lua ink_reader_menu.lua
 msgid "Stylus diagnostics"
 msgstr "Diagnóstico del lápiz óptico"
 
@@ -1278,15 +1220,15 @@ msgstr "Cuaderno completo"
 msgid "Export “%1”"
 msgstr "Exportar “%1”"
 
-#: ink_notebook_editor.lua main.lua
+#: ink_notebook_editor.lua ink_reader_menu.lua main.lua
 msgid "Automatic"
 msgstr "Automático"
 
-#: ink_notebook_editor.lua main.lua
+#: ink_notebook_editor.lua ink_reader_menu.lua main.lua
 msgid "Stylus"
 msgstr "Lápiz óptico"
 
-#: ink_notebook_editor.lua main.lua
+#: ink_notebook_editor.lua ink_reader_menu.lua main.lua
 msgid "Finger"
 msgstr "Dedo"
 
@@ -1349,9 +1291,7 @@ msgid "Both JustDraw and FingerInk notebook databases exist."
 msgstr "Existen bases de datos de cuadernos de JustDraw y de FingerInk."
 
 #: ink_notebook_library.lua
-msgid ""
-"Close KOReader, then move one database together with its matching -wal and -"
-"shm files to another directory."
+msgid "Close KOReader, then move one database together with its matching -wal and -shm files to another directory."
 msgstr "Cierra KOReader y mueve una de las bases de datos, junto con sus archivos -wal y -shm correspondientes, a otro directorio."
 
 #: ink_notebook_library.lua ink_notebook_ui.lua
@@ -1359,15 +1299,11 @@ msgid "Couldn’t open the notebook library."
 msgstr "No se pudo abrir la biblioteca de cuadernos."
 
 #: ink_notebook_library.lua
-msgid ""
-"Your notebooks are still stored on this device. Try again, or restart "
-"KOReader."
+msgid "Your notebooks are still stored on this device. Try again, or restart KOReader."
 msgstr "Tus cuadernos siguen guardados en este dispositivo. Inténtalo de nuevo o reinicia KOReader."
 
 #: ink_notebook_library.lua
-msgid ""
-"This notebook library was created by a newer version of JustDraw. You can’t "
-"create or edit notebooks with this version."
+msgid "This notebook library was created by a newer version of JustDraw. You can’t create or edit notebooks with this version."
 msgstr "Esta biblioteca de cuadernos se creó con una versión más reciente de JustDraw. No puedes crear ni editar cuadernos con esta versión."
 
 #: ink_notebook_library.lua
@@ -1404,7 +1340,7 @@ msgid_plural "%1 selected"
 msgstr[0] "%1 seleccionado"
 msgstr[1] "%1 seleccionados"
 
-#: ink_notebook_library.lua main.lua
+#: ink_notebook_library.lua ink_reader_menu.lua main.lua
 msgid "Notebooks"
 msgstr "Cuadernos"
 
@@ -1413,9 +1349,7 @@ msgid "No preview"
 msgstr "Sin vista previa"
 
 #: ink_notebook_library.lua
-msgid ""
-"This notebook was created by a newer version of JustDraw. You can view it "
-"and change pages, but you can’t edit it."
+msgid "This notebook was created by a newer version of JustDraw. You can view it and change pages, but you can’t edit it."
 msgstr "Este cuaderno se creó con una versión más reciente de JustDraw. Puedes verlo y cambiar de página, pero no editarlo."
 
 #: ink_notebook_library.lua
@@ -1425,6 +1359,11 @@ msgstr "Todos los cuadernos"
 #: ink_notebook_library.lua
 msgid "Back"
 msgstr "Atrás"
+
+#
+#: ink_notebook_library.lua
+msgid "Notebook %1"
+msgstr "Cuaderno %1"
 
 #: ink_notebook_library.lua
 msgid "Notebook name"
@@ -1555,9 +1494,7 @@ msgstr[1] ""
 "%3"
 
 #: ink_notebook_library.lua
-msgid ""
-"Delete the folder “%1”? Its notebooks are not deleted: they go back to "
-"Notebooks."
+msgid "Delete the folder “%1”? Its notebooks are not deleted: they go back to Notebooks."
 msgstr "¿Borrar la carpeta “%1”? Sus cuadernos no se borran: vuelven a Cuadernos."
 
 #: ink_notebook_library.lua
@@ -1571,8 +1508,7 @@ msgid "Folder “%1”"
 msgstr "Carpeta “%1”"
 
 #: ink_notebook_library.lua
-msgid ""
-"Notebooks inside a deleted folder are not deleted: they go back to Notebooks."
+msgid "Notebooks inside a deleted folder are not deleted: they go back to Notebooks."
 msgstr "Los cuadernos de una carpeta borrada no se borran: vuelven a Cuadernos."
 
 #: ink_notebook_library.lua
@@ -1580,59 +1516,55 @@ msgid "Couldn’t delete this folder. Try again."
 msgstr "No se pudo borrar esta carpeta. Inténtalo de nuevo."
 
 #: ink_notebook_session.lua
-msgid ""
-"This page changed since it was last open, so its undo history was cleared."
+msgid "This page changed since it was last open, so its undo history was cleared."
 msgstr "Esta página cambió desde la última vez que se abrió, así que se borró su historial de deshacer."
 
 #: ink_notebook_ui.lua
-msgid ""
-"This screen is too small for the notebook controls. Rotate the device or "
-"lower the screen DPI and try again."
+msgid "This screen is too small for the notebook controls. Rotate the device or lower the screen DPI and try again."
 msgstr "Esta pantalla es demasiado pequeña para los controles del cuaderno. Gira el dispositivo o baja los DPI de la pantalla e inténtalo de nuevo."
 
+#
 #: ink_notebook_ui.lua main.lua
-msgid "Stroke was not saved because the write queue is busy. Try again."
-msgstr "El trazo no se guardó porque la cola de escritura está ocupada. Inténtalo de nuevo."
+msgid "That stroke was not kept: the ink before it is still being saved. Draw it again in a moment."
+msgstr "Ese trazo no se conservó: la tinta anterior aún se está guardando. Vuelve a dibujarlo en un momento."
 
 #: ink_notebook_ui.lua main.lua
-msgid ""
-"Stroke stopped because the pen contact did not end. Lift the pen and try "
-"again."
+msgid "Stroke stopped because the pen contact did not end. Lift the pen and try again."
 msgstr "El trazo se detuvo porque el contacto del lápiz no terminó. Levanta el lápiz e inténtalo de nuevo."
 
-#: ink_pen_dialog.lua main.lua
+#: ink_pen_dialog.lua ink_reader_menu.lua
 msgid "Graphite"
 msgstr "Grafito"
 
-#: ink_pen_dialog.lua main.lua
+#: ink_pen_dialog.lua ink_reader_menu.lua
 msgid "Ink pen"
 msgstr "Pluma de tinta"
 
-#: ink_pen_dialog.lua main.lua
+#: ink_pen_dialog.lua ink_reader_menu.lua
 msgid "Marker"
 msgstr "Rotulador"
 
-#: ink_pen_dialog.lua main.lua
+#: ink_pen_dialog.lua ink_reader_menu.lua
 msgid "Round ink"
 msgstr "Tinta redonda"
 
-#: ink_pen_dialog.lua main.lua
+#: ink_pen_dialog.lua ink_reader_menu.lua
 msgid "Highlighter"
 msgstr "Resaltador"
 
-#: ink_pen_dialog.lua main.lua
+#: ink_pen_dialog.lua ink_reader_menu.lua
 msgid "Textured graphite"
 msgstr "Grafito texturizado"
 
-#: ink_pen_dialog.lua ink_shape_dialog.lua main.lua
+#: ink_pen_dialog.lua ink_reader_menu.lua ink_shape_dialog.lua
 msgid "Medium"
 msgstr "Medio"
 
-#: ink_pen_dialog.lua main.lua
+#: ink_pen_dialog.lua ink_reader_menu.lua
 msgid "Thick"
 msgstr "Grueso"
 
-#: ink_pen_dialog.lua main.lua
+#: ink_pen_dialog.lua ink_reader_menu.lua
 msgid "Thin"
 msgstr "Fino"
 
@@ -1656,6 +1588,100 @@ msgstr "No se pudo preparar para colocarlo."
 msgid "That could not be placed. Try again."
 msgstr "No se pudo colocar. Inténtalo de nuevo."
 
+#: ink_reader_menu.lua
+msgid "The marker needs a drawing sheet or a page note to draw on."
+msgstr "El rotulador necesita una hoja de dibujo o una nota de página sobre la que dibujar."
+
+#: ink_reader_menu.lua
+msgid "Pen style"
+msgstr "Estilo de pluma"
+
+#: ink_reader_menu.lua
+msgid "Pen width"
+msgstr "Grosor de pluma"
+
+#: ink_reader_menu.lua main.lua
+msgid "Toolbar side"
+msgstr "Lado de la barra de herramientas"
+
+#: ink_reader_menu.lua
+msgid "Where the reader's toolbar sits. A drawing sheet and a notebook keep their controls above the paper."
+msgstr "Dónde se coloca la barra de herramientas del lector. Una hoja de dibujo y un cuaderno mantienen sus controles encima del papel."
+
+#: ink_reader_menu.lua
+msgid "Left"
+msgstr "Izquierda"
+
+#: ink_reader_menu.lua
+msgid "Right"
+msgstr "Derecha"
+
+#
+#: ink_reader_menu.lua
+msgid "Show JustDraw when text is selected"
+msgstr "Mostrar JustDraw al seleccionar texto"
+
+#: ink_reader_menu.lua
+msgid "Adds a JustDraw button to the menu that appears when you select text, so drawing can start from there. Turn it off if you never draw."
+msgstr "Añade un botón JustDraw al menú que aparece al seleccionar texto, para empezar a dibujar desde ahí. Desactívalo si nunca dibujas."
+
+#: ink_reader_menu.lua
+msgid "Automatic uses the stylus route on devices that report a pen digitizer, and the finger route everywhere else. On a drawing sheet, finger and palm never draw; touches above the bounded sheet can still turn pages. With direct ink, press Stop to return all touch input to reading."
+msgstr "Automático usa el lápiz en los dispositivos que informan de un digitalizador de lápiz, y el dedo en todos los demás. En una hoja de dibujo, el dedo y la palma nunca dibujan; los toques por encima de la hoja delimitada aún pueden pasar páginas. Con tinta directa, pulsa Detener para devolver toda la entrada táctil a la lectura."
+
+#: ink_reader_menu.lua
+msgid "Fast refresh while drawing"
+msgstr "Refresco rápido al dibujar"
+
+#
+#: ink_reader_menu.lua
+msgid "On: strokes appear with the fastest screen update — quick, but grainy, with some ghosting until the next page turn. Off: slower, cleaner."
+msgstr "Activado: los trazos aparecen con la actualización de pantalla más rápida — rápido, pero granulado, con algo de imagen fantasma hasta el siguiente cambio de página. Desactivado: más lento y más limpio."
+
+#: ink_reader_menu.lua
+msgid "Shows why the pen route is or is not running. With confirmation, it writes pen coordinates and decisions to the local log for up to one minute or 8,192 events. No book or notebook identity is logged."
+msgstr "Muestra por qué el lápiz funciona o no. Si lo confirmas, escribe las coordenadas y decisiones del lápiz en el registro local durante un máximo de un minuto o 8192 eventos. No se registra la identidad de ningún libro ni cuaderno."
+
+#: ink_reader_menu.lua
+msgid "Start drawing"
+msgstr "Empezar a dibujar"
+
+#
+#: ink_reader_menu.lua
+msgid "Press Stop on the toolbar to switch drawing off again. Two fingers also work as usual while drawing is on."
+msgstr "Pulsa Detener en la barra de herramientas para volver a desactivar el dibujo. Los gestos con dos dedos siguen funcionando como siempre mientras el dibujo está activado."
+
+#: ink_reader_menu.lua
+msgid "Show toolbar"
+msgstr "Mostrar barra de herramientas"
+
+#: ink_reader_menu.lua
+msgid "Blank sheets anchored to a position in a reflowable book."
+msgstr "Hojas en blanco ancladas a una posición de un libro con texto ajustable."
+
+#
+#: ink_reader_menu.lua
+msgid "Ink drawn on the pages of a PDF or another fixed layout, stored in the page's own units so it follows zoom and panning."
+msgstr "Tinta dibujada en las páginas de un PDF u otro diseño fijo, guardada en las unidades propias de la página para que siga el zoom y el desplazamiento."
+
+#: ink_reader_menu.lua
+msgid "Browse every JustDraw note in this book, read it at full size, go to its location, or export a selection."
+msgstr "Explora todas las notas de JustDraw de este libro, léelas a tamaño completo, ve a su ubicación o exporta una selección."
+
+#: ink_reader_menu.lua
+msgid "Writes what you have drawn to a PDF, PNG or JPEG in a folder of your choosing. Exports the page you are reading, the sheet that is open, or every sheet in this book. Nothing in the book itself is changed."
+msgstr "Guarda lo que has dibujado en un PDF, PNG o JPEG en la carpeta que elijas. Exporta la página que estás leyendo, la hoja abierta o todas las hojas de este libro. El libro en sí no se modifica."
+
+#
+#: ink_reader_menu.lua
+msgid "Settings"
+msgstr "Ajustes"
+
+#
+#: ink_reader_menu.lua
+msgid "Ink drawn by an older JustDraw or FingerInk, in screen pixels. It is shown and exported as it was stored, and these are the only things that can change it."
+msgstr "Tinta dibujada con una versión antigua de JustDraw o FingerInk, en píxeles de pantalla. Se muestra y se exporta tal como se guardó, y estas son las únicas opciones que pueden cambiarla."
+
 #: ink_refresh_dialog.lua
 msgid "%1 ms"
 msgstr "%1 ms"
@@ -1665,9 +1691,7 @@ msgid "%1 ms (default)"
 msgstr "%1 ms (predeterminado)"
 
 #: ink_refresh_dialog.lua
-msgid ""
-"For graphite, marker, and pages containing gray ink. Lower intervals update "
-"the screen more often."
+msgid "For graphite, marker, and pages containing gray ink. Lower intervals update the screen more often."
 msgstr "Para grafito, rotulador y páginas con tinta gris. Los intervalos más cortos actualizan la pantalla con más frecuencia."
 
 #: ink_selection.lua
@@ -1779,10 +1803,8 @@ msgid "Pen input needs KOReader v2026.07 or newer. Drawing with finger."
 msgstr "La entrada con lápiz necesita KOReader v2026.07 o posterior. Se dibujará con el dedo."
 
 #: main.lua
-msgid ""
-"This device does not say which input slot its pen uses, so the pen route is "
-"unavailable."
-msgstr "Este dispositivo no indica qué ranura de entrada usa su lápiz, así que la ruta del lápiz no está disponible."
+msgid "This device does not say which input slot its pen uses, so the pen route is unavailable."
+msgstr "Este dispositivo no indica qué ranura de entrada usa su lápiz, así que el lápiz no está disponible."
 
 #: main.lua
 msgid "JustDraw: input is already captured"
@@ -1809,9 +1831,7 @@ msgid "This sheet belongs to page %1. Go back to it, or open a sheet here."
 msgstr "Esta hoja pertenece a la página %1. Vuelve a ella o abre una hoja aquí."
 
 #: main.lua
-msgid ""
-"This sheet belongs to another place in the book. Go back to it, or open a "
-"sheet here."
+msgid "This sheet belongs to another place in the book. Go back to it, or open a sheet here."
 msgstr "Esta hoja pertenece a otro lugar del libro. Vuelve a él o abre una hoja aquí."
 
 #: main.lua
@@ -1866,31 +1886,32 @@ msgstr "La tinta de esta hoja aún se está cargando"
 msgid "Input mode is set to Finger. Set it to Automatic or Stylus."
 msgstr "El modo de entrada está en Dedo. Cámbialo a Automático o Lápiz óptico."
 
+#
 #: main.lua
-msgid "This KOReader has no stylus API. The pen route needs v2026.07 or newer."
-msgstr "Este KOReader no tiene API de lápiz óptico. La ruta del lápiz necesita v2026.07 o posterior."
+msgid "This KOReader cannot pass the pen to plugins. Drawing with the pen needs v2026.07 or newer."
+msgstr "Este KOReader no permite que los complementos usen el lápiz. Dibujar con el lápiz requiere v2026.07 o posterior."
+
+#
+#: main.lua
+msgid "Another plugin is already using the pen. Turn it off to draw with JustDraw."
+msgstr "Otro complemento ya está usando el lápiz. Desactívalo para dibujar con JustDraw."
 
 #: main.lua
-msgid "Another plugin already owns the stylus input callback."
-msgstr "Otro complemento ya tiene asignado el callback de entrada del lápiz óptico."
-
-#: main.lua
-msgid ""
-"This device does not report a pen digitizer. Set Input mode to Stylus by "
-"hand."
+msgid "This device does not report a pen digitizer. Set Input mode to Stylus by hand."
 msgstr "Este dispositivo no informa de un digitalizador de lápiz. Pon el modo de entrada en Lápiz óptico manualmente."
 
 #: main.lua
-msgid ""
-"Pen coordinates will be written to the local KOReader log for up to 60 "
-"seconds. JustDraw does not upload them; shared logs may contain them. Turn "
-"KOReader's debug logging off again afterwards: it records all raw input and "
-"the file grows very quickly."
+msgid "Pen coordinates will be written to the local KOReader log for up to 60 seconds. JustDraw does not upload them; shared logs may contain them. Turn KOReader's debug logging off again afterwards: it records all raw input and the file grows very quickly."
 msgstr "Las coordenadas del lápiz se escribirán en el registro local de KOReader durante un máximo de 60 segundos. JustDraw no las sube a ningún sitio, pero los registros que compartas pueden contenerlas. Después, vuelve a desactivar el registro de depuración de KOReader: guarda toda la entrada sin procesar y el archivo crece muy rápido."
 
 #: main.lua
 msgid "Start"
 msgstr "Iniciar"
+
+#
+#: main.lua
+msgid "Sheets are still being indexed. Try again in a moment."
+msgstr "Las hojas de este libro aún se están indexando. Inténtalo de nuevo en un momento."
 
 #: main.lua
 msgid "Cannot anchor a sheet at this position"
@@ -1941,10 +1962,6 @@ msgid "Delete sheet"
 msgstr "Borrar hoja"
 
 #: main.lua
-msgid "Toolbar side"
-msgstr "Lado de la barra de herramientas"
-
-#: main.lua
 #, lua-format
 msgid "Sheet %d"
 msgstr "Hoja %d"
@@ -1966,10 +1983,7 @@ msgid "Go to this sheet's page"
 msgstr "Ir a la página de esta hoja"
 
 #: main.lua
-msgid ""
-"The sheet stays open while you read on, and it does not follow the page: it "
-"hangs on a position in the text. This goes back to that position, which is "
-"the only place it will take ink."
+msgid "The sheet stays open while you read on, and it does not follow the page: it hangs on a position in the text. This goes back to that position, which is the only place it will take ink."
 msgstr "La hoja sigue abierta mientras sigues leyendo y no acompaña a la página: está anclada a una posición del texto. Esto vuelve a esa posición, que es el único lugar donde admite tinta."
 
 #: main.lua
@@ -1989,10 +2003,7 @@ msgid "Indexing sheets %1"
 msgstr "Indexando hojas %1"
 
 #: main.lua
-msgid ""
-"Creates a blank sheet anchored to this position in the book, or opens the "
-"one that is already here. The sheet keeps its own coordinates, so changing "
-"font or margins moves the sheet, not what you drew on it."
+msgid "Creates a blank sheet anchored to this position in the book, or opens the one that is already here. The sheet keeps its own coordinates, so changing font or margins moves the sheet, not what you drew on it."
 msgstr "Crea una hoja en blanco anclada a esta posición del libro, o abre la que ya está aquí. La hoja conserva sus propias coordenadas, así que cambiar la fuente o los márgenes mueve la hoja, no lo que dibujaste en ella."
 
 #: main.lua
@@ -2000,10 +2011,7 @@ msgid "Retry saving ink"
 msgstr "Reintentar guardado de tinta"
 
 #: main.lua
-msgid ""
-"A write to the sheet database failed. Nothing has been lost -- the strokes "
-"are still in memory -- but they are not durable until this succeeds, and no "
-"more can be drawn until it does."
+msgid "A write to the sheet database failed. Nothing has been lost -- the strokes are still in memory -- but they are not durable until this succeeds, and no more can be drawn until it does."
 msgstr "Falló una escritura en la base de datos de hojas. No se ha perdido nada —los trazos siguen en memoria—, pero no quedarán guardados de forma permanente hasta que esto funcione, y no se puede dibujar más hasta entonces."
 
 #: main.lua
@@ -2033,28 +2041,19 @@ msgid "Lost sheets (%d)"
 msgstr "Hojas perdidas (%d)"
 
 #: main.lua
-msgid ""
-"Sheets whose place in the book can no longer be found -- usually because the "
-"file was replaced with a different edition. Nothing drawn on them has been "
-"lost."
+msgid "Sheets whose place in the book can no longer be found -- usually because the file was replaced with a different edition. Nothing drawn on them has been lost."
 msgstr "Hojas cuya posición en el libro ya no se encuentra, normalmente porque el archivo se sustituyó por otra edición. No se ha perdido nada de lo dibujado en ellas."
 
 #: main.lua
-msgid ""
-"Delete the ink on this page? Drawing sheets and legacy ink are not affected."
+msgid "Delete the ink on this page? Drawing sheets and legacy ink are not affected."
 msgstr "¿Borrar la tinta de esta página? Las hojas de dibujo y la tinta antigua no se ven afectadas."
 
 #: main.lua
-msgid ""
-"Delete the ink on every page of this book? Drawing sheets and legacy ink are "
-"not affected."
+msgid "Delete the ink on every page of this book? Drawing sheets and legacy ink are not affected."
 msgstr "¿Borrar la tinta de todas las páginas de este libro? Las hojas de dibujo y la tinta antigua no se ven afectadas."
 
 #: main.lua
-msgid ""
-"A write to the page-ink database failed. Nothing has been lost -- the "
-"strokes are still in memory -- but they are not durable until this succeeds, "
-"and no more can be drawn until it does."
+msgid "A write to the page-ink database failed. Nothing has been lost -- the strokes are still in memory -- but they are not durable until this succeeds, and no more can be drawn until it does."
 msgstr "Falló una escritura en la base de datos de tinta de página. No se ha perdido nada —los trazos siguen en memoria—, pero no quedarán guardados de forma permanente hasta que esto funcione, y no se puede dibujar más hasta entonces."
 
 #: main.lua
@@ -2066,85 +2065,8 @@ msgid "Delete all page notes"
 msgstr "Borrar todas las notas de página"
 
 #: main.lua
-msgid ""
-"Deletes the ink drawn on the pages of this book. Drawing sheets and ink "
-"drawn before this KOReader version are not affected."
+msgid "Deletes the ink drawn on the pages of this book. Drawing sheets and ink drawn before this KOReader version are not affected."
 msgstr "Borra la tinta dibujada en las páginas de este libro. No afecta a las hojas de dibujo ni a la tinta dibujada antes de esta versión de KOReader."
-
-#: main.lua
-msgid ""
-"Blank sheets anchored to a position in a reflowable book. Not available in "
-"PDFs and other fixed layouts, where drawing goes straight onto the page "
-"instead."
-msgstr "Hojas en blanco ancladas a una posición de un libro con texto ajustable. No disponibles en PDF ni en otros diseños fijos, donde se dibuja directamente sobre la página."
-
-#: main.lua
-msgid ""
-"Browse every JustDraw note in this book, read it at full size, go to its "
-"location, or export a selection."
-msgstr "Explora todas las notas de JustDraw de este libro, léelas a tamaño completo, ve a su ubicación o exporta una selección."
-
-#: main.lua
-msgid "Start drawing"
-msgstr "Empezar a dibujar"
-
-#: main.lua
-msgid ""
-"Use the Draw/Stop button on the side toolbar to switch drawing off again. "
-"Two fingers also work as usual while drawing is on."
-msgstr "Usa el botón Dibujar/Parar de la barra lateral para volver a desactivar el dibujo. Los gestos con dos dedos siguen funcionando como siempre mientras el dibujo está activado."
-
-#: main.lua
-msgid "Show toolbar"
-msgstr "Mostrar barra de herramientas"
-
-#: main.lua
-msgid "Left"
-msgstr "Izquierda"
-
-#: main.lua
-msgid "Right"
-msgstr "Derecha"
-
-#: main.lua
-msgid ""
-"Automatic uses the stylus route on devices that report a pen digitizer, and "
-"the finger route everywhere else. On a drawing sheet, finger and palm never "
-"draw; touches above the bounded sheet can still turn pages. With direct ink, "
-"press Stop to return all touch input to reading."
-msgstr "Automático usa la ruta del lápiz óptico en los dispositivos que informan de un digitalizador de lápiz, y la ruta del dedo en todos los demás. En una hoja de dibujo, el dedo y la palma nunca dibujan; los toques por encima de la hoja delimitada aún pueden pasar páginas. Con tinta directa, pulsa Parar para devolver toda la entrada táctil a la lectura."
-
-#: main.lua
-msgid "Pen style"
-msgstr "Estilo de pluma"
-
-#: main.lua
-msgid "Pen width"
-msgstr "Grosor de pluma"
-
-#: main.lua
-msgid "Fast refresh while drawing"
-msgstr "Refresco rápido al dibujar"
-
-#: main.lua
-msgid ""
-"On: strokes appear with the DU waveform — quick, but grainy and it leaves "
-"ghosting until the next page turn. Off: slower, cleaner."
-msgstr "Activado: los trazos aparecen con la forma de onda DU — rápido, pero granulado, y deja imágenes fantasma hasta el siguiente cambio de página. Desactivado: más lento y más limpio."
-
-#: main.lua
-msgid ""
-"Shows why the pen route is or is not running. With confirmation, it writes "
-"pen coordinates and decisions to the local log for up to one minute or 8,192 "
-"events. No book or notebook identity is logged."
-msgstr "Muestra por qué la ruta del lápiz está o no en funcionamiento. Si lo confirmas, escribe las coordenadas y decisiones del lápiz en el registro local durante un máximo de un minuto o 8192 eventos. No se registra la identidad de ningún libro ni cuaderno."
-
-#: main.lua
-msgid ""
-"Writes what you have drawn to a PDF, PNG or JPEG in a folder of your "
-"choosing. Exports the page you are reading, the sheet that is open, or every "
-"sheet in this book. Nothing in the book itself is changed."
-msgstr "Guarda lo que has dibujado en un PDF, PNG o JPEG en la carpeta que elijas. Exporta la página que estás leyendo, la hoja abierta o todas las hojas de este libro. El libro en sí no se modifica."
 
 #: main.lua
 msgid "Clear this page"
@@ -2171,10 +2093,7 @@ msgid "Clear legacy ink on this stored page"
 msgstr "Limpiar la tinta antigua de esta página guardada"
 
 #: main.lua
-msgid ""
-"Ink drawn on this page by an older JustDraw or FingerInk, in screen pixels. "
-"It is shown and exported as it was stored, and this is the only thing that "
-"can change it."
+msgid "Ink drawn on this page by an older JustDraw or FingerInk, in screen pixels. It is shown and exported as it was stored, and this is the only thing that can change it."
 msgstr "Tinta dibujada en esta página con una versión antigua de JustDraw o FingerInk, en píxeles de pantalla. Se muestra y se exporta tal como se guardó, y esta es la única opción que puede cambiarla."
 
 #: main.lua
@@ -2182,20 +2101,9 @@ msgid "Clear all legacy ink"
 msgstr "Limpiar toda la tinta antigua"
 
 #: main.lua
-msgid ""
-"Delete the legacy ink stored for page %1? Drawing sheets and page notes are "
-"not affected."
+msgid "Delete the legacy ink stored for page %1? Drawing sheets and page notes are not affected."
 msgstr "¿Borrar la tinta antigua guardada para la página %1? Las hojas de dibujo y las notas de página no se ven afectadas."
 
 #: main.lua
-msgid ""
-"Delete all legacy ink in this book? Drawing sheets and page notes are not "
-"affected."
+msgid "Delete all legacy ink in this book? Drawing sheets and page notes are not affected."
 msgstr "¿Borrar toda la tinta antigua de este libro? Las hojas de dibujo y las notas de página no se ven afectadas."
-
-#: main.lua
-msgid ""
-"Ink drawn on the pages of a PDF or another fixed layout, stored in the "
-"page's own units so it follows zoom and panning. Not available in reflowable "
-"books, where a drawing sheet is anchored to the text instead."
-msgstr "Tinta dibujada en las páginas de un PDF u otro diseño fijo, guardada en las unidades propias de la página para que siga el zoom y el desplazamiento. No disponible en libros con texto ajustable, donde en su lugar se ancla una hoja de dibujo al texto."

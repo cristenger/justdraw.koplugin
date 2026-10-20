@@ -152,7 +152,7 @@ return function(ctx)
         t:eq(#ctx.env.notifications, 0, "notification is outside the input callback")
         ctx.env.UIManager:flush()
         t:eq(#ctx.env.notifications, 1, "recoverable rejection is visible")
-        t:check(ctx.env.notifications[1]:find("write queue is busy", 1, true) ~= nil,
+        t:check(ctx.env.notifications[1]:find("still being saved", 1, true) ~= nil,
             "message is actionable and in English")
 
         callbacks.on_error("point_budget")

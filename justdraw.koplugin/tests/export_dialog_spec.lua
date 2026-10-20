@@ -43,7 +43,7 @@ return function(ctx)
             "bad_quality", "no_items", "empty", "index_incomplete",
             "unsupported_document", "unsupported_mode", "too_large",
             "too_many_pages", "bad_geometry", "contact_active",
-            "rename_failed", "encode_failed", "pdf_failed", "write_failed",
+            "rename_failed", "destination_taken", "encode_failed", "pdf_failed", "write_failed",
             "render_failed", "bad_raster", "no_repository", "list_failed",
             "flush_failed", "export_busy", "internal_error", "unavailable",
             "sweep_failed", "page_size_changed", "bad_surface", "epub_worker_failed",

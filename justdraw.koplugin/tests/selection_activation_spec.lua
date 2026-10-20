@@ -108,6 +108,87 @@ return function(ctx)
         p:teardown()
     end)
 
+    --- A reflowable book on a runtime with sheets, its index settled.
+    local function openEpub()
+        ctx.reset{ wacom_protocol = true }
+        local store = support.newCanvasStore({})
+        local p = support.newPlugin(JustDraw, env, {
+            document = support.newDocument{
+                here = "/body/p[7]", pages = { ["/body/p[7]"] = 1 },
+            },
+        })
+        p.canvas_repository = store
+        env.UIManager:flush()
+        p:onReaderReady()
+        for _ = 1, 200 do
+            if not (p.session and p.session:isIndexing()) then break end
+            env.UIManager:flush()
+        end
+        return p, store
+    end
+
+    --[[--
+    In a reflowable book the toolbar alone is a detour: its Draw has nothing
+    to draw on until a sheet exists. So the entry opens the sheet at the
+    selection's page and starts drawing on it (audit P0-3).
+    ]]
+    t:case("in a reflowable book the entry opens the sheet here", function()
+        local p, store = openEpub()
+        local highlight = p.ui.highlight
+        t:eq(shown(entry(p)), true, "offered while nothing is open")
+        entry(p).callback()
+        env.UIManager:flush()
+        t:eq(highlight.closed, 1, "the selection menu was closed")
+        t:eq(#store.canvases, 1, "a sheet was made here")
+        t:eq(p.canvas_open, true, "and opened")
+        t:eq(p.drawing, true, "ready to draw")
+        t:eq(shown(entry(p)), false, "and the entry steps aside while the sheet is open")
+        p:teardown()
+    end)
+
+    t:case("the reader can take the entry out of the selection menu", function()
+        ctx.reset()
+        local p = openBook()
+        t:eq(p:selectionEntryWanted(), true, "offered by default")
+        p:setSelectionEntryWanted(false)
+        t:eq(shown(entry(p)), false, "gone once switched off")
+        t:eq(_G.G_reader_settings.data.justdraw_selection_entry, false, "and remembered")
+        p:setSelectionEntryWanted(true)
+        t:eq(shown(entry(p)), true, "back when switched on")
+        p:teardown()
+    end)
+
+    --[[--
+    The menu is two levels (audit UX-3): what a reader does first at the top,
+    every setting one level down, so the first page of the menu is the
+    actions and nothing a reader who only draws has to read past.
+    ]]
+    t:case("the menu puts actions on top and settings one level down", function()
+        ctx.reset()
+        local p = openBook()
+        local items = {}
+        p:addToMainMenu(items)
+        local top = {}
+        for _, it in ipairs(items.justdraw.sub_item_table) do top[it.text] = it end
+        t:check(top["Start drawing"] ~= nil, "Start drawing is on top")
+        t:check(top["Settings"] ~= nil, "settings have one entry of their own")
+        for _, name in ipairs({ "Input mode", "Stylus diagnostics", "Drawing refresh",
+            "Fast refresh while drawing", "Pen style", "Toolbar side" }) do
+            t:eq(top[name], nil, name .. " is not on the first level")
+        end
+        local settings = {}
+        for _, it in ipairs(top["Settings"].sub_item_table) do settings[it.text] = it end
+        for _, name in ipairs({ "Input mode", "Stylus diagnostics", "Pen style",
+            "Show JustDraw when text is selected" }) do
+            t:check(settings[name] ~= nil, name .. " is under Settings")
+        end
+        local toggle = settings["Show JustDraw when text is selected"]
+        t:eq(toggle.checked_func(), true, "on by default")
+        toggle.callback()
+        t:eq(p:selectionEntryWanted(), false, "and the menu switches it off")
+        p:teardown()
+    end)
+
     t:case("teardown takes the entry away", function()
         ctx.reset()
         local p = openBook()

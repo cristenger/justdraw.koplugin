@@ -180,6 +180,7 @@ return function(ctx)
         t:eq(plugin.onFingerInkBar, plugin.onJustDrawBar, "bar alias resolves")
     end)
 
+
     -- =================================================================
     --[[--
     The capability report (ADR-41).

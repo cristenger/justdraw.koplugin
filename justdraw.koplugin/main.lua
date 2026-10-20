@@ -54,6 +54,7 @@ local StylusSequence = require("ink_stylus_sequence")
 local Legacy = require("ink_legacy_ink")
 local Limits = require("ink_limits")
 local LiveRefresh = require("ink_live_refresh")
+local ReaderMenu = require("ink_reader_menu")
 local Render = require("ink_render")
 local RefreshDialog = require("ink_refresh_dialog")
 local PenDialog = require("ink_pen_dialog")
@@ -575,8 +576,12 @@ function JustDraw:init()
     end)
     self.bar = nil
     self.pen_width = Compat.readSetting(G_reader_settings, "pen_width", PEN_MEDIUM)
+    -- Round ink unless the reader chose otherwise: the historical pen is a
+    -- square DDA nib whose width varies up to sqrt(2) with direction and
+    -- steps on diagonals. A saved choice is never touched, and a surface that
+    -- cannot take a modern style resolves it to the pen (`Style.resolve`).
     self.pen_style = Style.normalize(
-        Compat.readSetting(G_reader_settings, "pen_style", Style.PEN))
+        Compat.readSetting(G_reader_settings, "pen_style", Style.ROUND))
     self.live_fast = Compat.readSetting(G_reader_settings, "live_fast", true)
     self.bar_side = Compat.readSetting(G_reader_settings, "bar_side", "right")
     self.notebook_rail_side = Compat.readSetting(G_reader_settings, "notebook_rail_side")
@@ -649,6 +654,12 @@ function JustDraw:init()
         unschedule = function(action) UIManager:unschedule(action) end,
         refresh = function(mode, left, top, right, bottom)
             local w, h = right - left, bottom - top
+            -- Each box was asked about gray on its own, but the accumulator
+            -- refreshes their union, whose corners can cross gray that none
+            -- of them touched: asked once more of the union (ADR-65).
+            if mode == "fast" and self:liveBoxHasGray(left, top, right, bottom) then
+                mode = "ui"
+            end
             local cache = self.document_session and self.document_session:cache()
             if not self.canvas_open and cache and cache:hasTranslucentInk() then
                 -- Recompose against the book at the SAME bounded cadence.
@@ -783,15 +794,33 @@ function JustDraw:addSelectionEntry()
         return {
             text = MENU_JUSTDRAW,
             show_in_highlight_dialog_func = function()
-                return not (self.bar or self.canvas_open or self.drawing
-                    or self.reader_closed)
+                return self:selectionEntryWanted()
+                    and not (self.bar or self.canvas_open or self.drawing
+                        or self.reader_closed)
             end,
             callback = function()
                 this:onClose()
-                self:setBarShown(true)
+                -- A reflowable book has nothing to draw on without a sheet,
+                -- and a toolbar whose Draw opens one is a detour (audit
+                -- P0-3): the sheet at the page being read, directly.
+                if self.ui.rolling and self.session and self.session:isAvailable() then
+                    self:openSheetForDrawing()
+                else
+                    self:setBarShown(true)
+                end
             end,
         }
     end)
+end
+
+--- The reader can take the entry out of every selection menu: it is there for
+--- someone who draws, and a reader who never does should not have to see it.
+function JustDraw:selectionEntryWanted()
+    return Compat.readSetting(G_reader_settings, "selection_entry", true) ~= false
+end
+
+function JustDraw:setSelectionEntryWanted(on)
+    Compat.saveSetting(G_reader_settings, "selection_entry", on and true or false)
 end
 
 function JustDraw:removeSelectionEntry()
@@ -1055,9 +1084,10 @@ function JustDraw:openDocumentSession(settings)
     }
     local opened, open_error = session:open()
     if not opened then
-        -- Kept so Draw can say the same thing later. The session notified
-        -- once, at open; a reader who presses Draw ten minutes afterwards is
-        -- owed the reason again rather than a toolbar that arms over nothing.
+        -- Kept so Draw can say it. The session says nothing as the book
+        -- opens (ADR-62): a reader who only came to read is not told, and
+        -- one who presses Draw is owed the reason rather than a toolbar that
+        -- arms over nothing.
         self.document_open_error = open_error or "unavailable"
         return
     end
@@ -1092,10 +1122,15 @@ function JustDraw:openCanvasSession(settings)
         can_work = function() return not self:hasActivePhysicalContact() end,
         notify = function(text) self:notify(text) end,
     }
-    if not self.session:open() then
+    local opened, open_err = self.session:open()
+    if not opened then
+        -- Kept to be said when the reader reaches for a sheet; the session no
+        -- longer says it as the book opens (UX-2).
+        self.canvas_open_error = open_err
         self.session = nil
         return
     end
+    self.canvas_open_error = nil
     self.router = Router.new{
         backend = self.input_backend or "finger",
         regions = function(x, y) return self:regionAt(x, y) end,
@@ -1357,6 +1392,7 @@ function JustDraw:onPageUpdate(page)
         self:refreshCanvasPlacement()
     end
     self:scheduleDocumentPage(page)
+    self:refreshHistoryButtons()
 end
 
 --[[--
@@ -1522,6 +1558,9 @@ function JustDraw:scheduleDocumentPage(page)
         -- note -- so the menu's cached count is no longer the truth.
         if turned then self.document_ink_count = nil end
         if turned and self.drawing then self:continueDocumentInk() end
+        -- The page's own surface is what Undo answers for, and it only just
+        -- arrived: the refresh in onPageUpdate saw the previous page's.
+        self:scheduleHistoryRefresh()
     end)
 end
 
@@ -1616,6 +1655,8 @@ of it on every page turn is not free on eink.
 ]]
 function JustDraw:onDocumentInkReady()
     UIManager:setDirty(self.ui, "ui")
+    -- A page's ink finished loading: Undo may have something to take back.
+    self:scheduleHistoryRefresh()
 end
 
 --- The reason a read or a write failed is the driver's own sentence -- "cannot
@@ -1794,7 +1835,7 @@ function JustDraw:notifyCanvasBackpressure()
     local active = self.session and self.session:activeCanvas()
     local canvas_id = active and active.id
     self:notifyDeferred("canvas_backpressure_notice_pending",
-        _("Stroke was not saved because the write queue is busy. Try again."),
+        _("That stroke was not kept: the ink before it is still being saved. Draw it again in a moment."),
         function()
             local current = self.session and self.session:activeCanvas()
             return self.canvas_open and current ~= nil and current.id == canvas_id
@@ -1803,7 +1844,7 @@ end
 
 function JustDraw:notifyDocumentBackpressure()
     self:notifyDeferred("document_backpressure_notice_pending",
-        _("Stroke was not saved because the write queue is busy. Try again."),
+        _("That stroke was not kept: the ink before it is still being saved. Draw it again in a moment."),
         function() return self.document_session ~= nil end)
 end
 
@@ -1971,9 +2012,17 @@ function JustDraw:setDrawing(on, preserve_intent)
         ]]
         if self.ui.paging then
             self:notify(documentMessage(self.document_open_error or "unavailable"))
-        else
-            self:notify(LEGACY_FROZEN_EPUB)
+            return
         end
+        -- A reflowable book draws on a sheet, so Draw here means "open the
+        -- sheet here" (audit P0-3): the bar's button, the menu entry, the
+        -- dispatcher toggle and the selection menu all land on a sheet rather
+        -- than on a sentence pointing at one. Only a book that cannot hold a
+        -- sheet at all is still told where sheets live.
+        if self.session and self.session:isAvailable() then
+            return self:openSheetForDrawing()
+        end
+        self:notify(self:canvasRefusalMessage() or LEGACY_FROZEN_EPUB)
         return
     end
     if on and self.document_session then
@@ -2147,7 +2196,13 @@ function JustDraw:setTool(name, opts)
         end
     end
     if opts.quiet then return end
-    if self.eraser and not self.drawing then
+    if self.eraser and not self.drawing and self.ui and self.ui.rolling
+        and not self.canvas_open and self:legacyInkFrozen() then
+        -- Nothing to erase without a sheet, and choosing a tool is not
+        -- asking for one to be made (ADR-62): the eraser stays selected for
+        -- when a sheet is open.
+        if self.bar then self.bar:update(true) end
+    elseif self.eraser and not self.drawing then
         self:setDrawing(true)   -- also updates the bar
     elseif self.bar then
         self.bar:update(true)
@@ -2254,11 +2309,7 @@ function JustDraw:buildStylusMachine(input)
         retire_touch = function(slot_number) self:retireTouchSlot(slot_number) end,
     }
     self.evdev_desyncs, self.evdev_desync_cuts = 0, 0
-    self.stylus_sequence = StylusSequence.new{
-        wacom_protocol = input ~= nil and input.wacom_protocol == true,
-        pen_slot = input and input.pen_slot,
-        tool_finger = input and input.TOOL_TYPE_FINGER or 0,
-        to_screen = Capture.toScreen,
+    self.stylus_sequence = StylusSequence.new(Capture:sequenceSpec(input, {
         max_open_points = self.max_open_points,
         max_contact_samples = self.max_contact_samples,
         geometry = self.stylus_geometry,
@@ -2272,31 +2323,14 @@ function JustDraw:buildStylusMachine(input)
         on_finish = function(reason) return self:onStylusFinish(reason) end,
         on_abort = function(reason) return self:onStylusAbort(reason) end,
         on_contact_end = function(reason) return self:onStylusContactEnd(reason) end,
-        -- Increments two integers; cannot raise inside the raw callback.
-        on_pending_finish = function(kind)
-            Capture:noteCollapsedContact(kind)
-        end,
         on_domain_error = function(reason, phase)
             logger.warn("JustDraw: stylus contact reported", reason, phase)
-        end,
-        drop_contact = function(slot) return Capture:dropContact(slot) end,
-        -- Two integer reads; the steer answers zeros when it is not armed,
-        -- and then nothing downstream of them ever fires (ADR-44).
-        sync_counts = function()
-            local _steered_pen, _steered_panel, drops, edges = Capture:steerCounts()
-            return drops, edges
         end,
         on_desync = function(cut)
             self.evdev_desyncs = self.evdev_desyncs + 1
             if cut then self.evdev_desync_cuts = self.evdev_desync_cuts + 1 end
-            -- One line per overflow, at info: `tests/scribe_log_audit.lua`
-            -- counts these against the kernel's own SYN_DROPPED, and a drop
-            -- with no line beside it is a drop nothing answered.
-            logger.info("JustDraw: evdev desync,",
-                cut and "stroke cut" or "nothing in flight",
-                "waiting for a touch boundary")
         end,
-    }
+    }))
     self.trace_instance = self:activeStylusTrace(self:diagnosticSource())
     self.stylus_sequence:setTrace(self.trace_instance)
     self.stylus_budget_notified = false
@@ -2684,6 +2718,8 @@ function JustDraw:onStylusContactEnd()
     self.contact_style = nil
     self.contact_tool = nil
     if self.router then self.router:penUp() end
+    -- A stroke or a cut is the usual way Undo becomes possible.
+    self:scheduleHistoryRefresh()
     return true
 end
 
@@ -2751,9 +2787,9 @@ function JustDraw:diagnosticReport()
     if r.mode == "finger" then
         r.blocker = _("Input mode is set to Finger. Set it to Automatic or Stylus.")
     elseif not r.stylus_api then
-        r.blocker = _("This KOReader has no stylus API. The pen route needs v2026.07 or newer.")
+        r.blocker = _("This KOReader cannot pass the pen to plugins. Drawing with the pen needs v2026.07 or newer.")
     elseif r.callback_taken and backend ~= "stylus" then
-        r.blocker = _("Another plugin already owns the stylus input callback.")
+        r.blocker = _("Another plugin is already using the pen. Turn it off to draw with JustDraw.")
     elseif backend ~= "stylus" then
         r.blocker = _("This device does not report a pen digitizer. Set Input mode to Stylus by hand.")
     end
@@ -3169,6 +3205,7 @@ function JustDraw:endStroke()
     -- never painted live. Waiting for the accumulator's trailing timer here
     -- would leave the last of a stroke behind (ADR-43).
     self.live_refresh:flush()
+    self:scheduleHistoryRefresh()
     return ok, err
 end
 
@@ -3596,6 +3633,35 @@ function JustDraw:showNote()
     return overlay, err
 end
 
+--- Why this book has no sheets right now, as the sentence for it, or nil.
+--- The session's own reason when it opened and then failed (`_indexFailed`),
+--- the open's when it never opened.
+function JustDraw:canvasRefusalMessage()
+    local reason = self.session and self.session.unavailable_reason or self.canvas_open_error
+    return CanvasSession.messageFor(reason)
+end
+
+--- The same for page notes, which keep the open's refusal in
+--- `document_open_error`.
+function JustDraw:documentRefusalMessage()
+    if self.document_session or not self.document_open_error then return nil end
+    return documentMessage(self.document_open_error)
+end
+
+--[[--
+Draw, in a reflowable book with no sheet open: the sheet here, and drawing on
+it once its raster is ready. The one refusal `openCanvasHere` keeps quiet --
+indexing, because the menu shows the count -- is said out loud here, because
+whoever pressed Draw is not looking at the menu.
+]]
+function JustDraw:openSheetForDrawing()
+    if self.session:isIndexing() and #self.session:canvasesHere(self:currentPage()) == 0 then
+        self:notify(_("Sheets are still being indexed. Try again in a moment."))
+        return
+    end
+    return self:openCanvasHere()
+end
+
 --- Open the sheet at the reader's position, or make one there.
 function JustDraw:openCanvasHere()
     if not (self.session and self.session:isAvailable()) then return end
@@ -3605,7 +3671,11 @@ function JustDraw:openCanvasHere()
     local canvas, err = self.session:createHere(self:currentPage())
     if not canvas then
         if err ~= "indexing" then
-            self:notify(_("Cannot anchor a sheet at this position"))
+            -- A sheet can now fail before its anchor is ever looked at --
+            -- making the book's row (ADR-62) -- and that failure has its own
+            -- sentence; only an anchor that cannot be placed is said as one.
+            self:notify(CanvasSession.messageFor(err)
+                or _("Cannot anchor a sheet at this position"))
         end
         return
     end
@@ -3679,7 +3749,8 @@ function JustDraw:onJustDrawSheet()
         -- where "this document" would name a document that does not exist.
         self:notify(_("Drawing sheets need an open book"))
     else
-        self:notify(_("Drawing sheets are not available in this document"))
+        self:notify(self:canvasRefusalMessage()
+            or _("Drawing sheets are not available in this document"))
     end
     return true
 end
@@ -3811,11 +3882,11 @@ function JustDraw:_flushCanvasPendingRepaint(already_painted)
         self.canvas_pending_repaint = nil
         return nil, "stale_repaint"
     end
-    if Stack.visualAbove(pending.overlay) then return nil, "covered" end
-    self.canvas_pending_repaint = nil
     local x, y = pending.screen_left, pending.screen_top
     local w = pending.screen_right - x
     local h = pending.screen_bottom - y
+    if Stack.coveringAbove(pending.overlay, x, y, w, h) then return nil, "covered" end
+    self.canvas_pending_repaint = nil
     if not already_painted then
         local bb = pending.cache:buffer()
         if not bb then return nil, "no_buffer" end
@@ -3826,11 +3897,17 @@ function JustDraw:_flushCanvasPendingRepaint(already_painted)
     end
     if w > 0 and h > 0 then
         if already_painted then
-            UIManager:setDirty(nil, "partial",
+            -- A toast can close while the pen is still writing, and `partial`
+            -- fences on completion where the driver blocks: with the pen
+            -- reporting that overflows evdev (ADR-26, audit P2-1).
+            local mode = (self:hasActivePhysicalContact() or self:partialBlocksInput())
+                and "ui" or "partial"
+            UIManager:setDirty(nil, mode,
                 Geom:new{ x = x, y = y, w = w, h = h })
         else
             self:refreshBox(x, y, x + w, y + h,
-                pending.cache:hasGrayInk())
+                pending.cache:hasGrayInkIn(pending.cache_left, pending.cache_top,
+                    pending.cache_right, pending.cache_bottom))
         end
     end
     return true
@@ -3852,14 +3929,15 @@ function JustDraw:blitCanvasBox(box, tr, editing)
     local bb = cache and cache:buffer()
     if not bb then return end
     local overlay = self.session and self.session:overlay()
-    if overlay and Stack.visualAbove(overlay) then
+    local sx, sy = tr:fromCache(box.x, box.y)
+    if overlay and Stack.coveringAbove(overlay, sx, sy, box.w, box.h) then
         self:_queueCanvasRepaint(box, tr, overlay, cache)
         return nil, "covered"
     end
     self:_flushCanvasPendingRepaint(false)
-    local sx, sy = tr:fromCache(box.x, box.y)
     blitCacheBox(cache, bb, Screen.bb, sx, sy, box.x, box.y, box.w, box.h)
-    local gray = cache:hasGrayInk()
+    -- The box, not the sheet: black ink beside a graphite stroke keeps DU.
+    local gray = cache:hasGrayInkIn(box.x, box.y, box.x + box.w, box.y + box.h)
     local painter = self.sheet_overlay_painter
     if painter then
         -- A selection or placement floats above the page: repaint it inside
@@ -4084,6 +4162,8 @@ function JustDraw:showSheetShapeMenu()
             if not self.drawing then self:setDrawing(true) end
             self:_prepareSheetPlacementSoon("shape")
         end,
+        -- A size or a direction comes back to the menu (UX-6).
+        reopen = function() self:showSheetShapeMenu() end,
     }
     return self:showReaderModal(dialog)
 end
@@ -4214,7 +4294,8 @@ function JustDraw:blitDocumentBox(box, tr)
     if not cache:hasTranslucentInk() then
         blitCacheBox(cache, bb, Screen.bb, sx, sy, box.x, box.y, box.w, box.h)
     end
-    self:refreshBox(sx, sy, sx + box.w, sy + box.h, cache:hasGrayInk())
+    self:refreshBox(sx, sy, sx + box.w, sy + box.h,
+        cache:hasGrayInkIn(box.x, box.y, box.x + box.w, box.y + box.h))
 end
 
 --[[--
@@ -4400,9 +4481,11 @@ function JustDraw:refreshBox(left, top, right, bottom, grayscale, no_partial)
     local mode
     if grayscale then
         mode = "ui"
-    elseif self.live_fast then
+    elseif self:liveFast() then
         mode = "fast"
-    elseif no_partial or self:partialBlocksInput() then
+    elseif no_partial or self:partialBlocksInput() or LiveRefresh.fastBlocks(Screen) then
+        -- A driver that waits after fast updates is one whose refreshes
+        -- block; `ui` is the mode that does not fence with the pen down.
         -- An editing drag (lasso, move, placement) repaints under a pen that
         -- is still down: never `partial` there, on any device.
         mode = "ui"
@@ -4410,6 +4493,23 @@ function JustDraw:refreshBox(left, top, right, bottom, grayscale, no_partial)
         mode = "partial"
     end
     self.live_refresh:add(mode, x, y, x + w, y + h)
+end
+
+--- Whether a screen box of the live surface -- the open sheet, else the page's
+--- ink -- crosses gray ink. Screen to cache is the transform's offset.
+function JustDraw:liveBoxHasGray(left, top, right, bottom)
+    local session = self.canvas_open and self.session or self.document_session
+    if not session then return false end
+    local cache, tr = session:cache(), session:transform()
+    if not (cache and tr and type(cache.hasGrayInkIn) == "function") then return false end
+    local ox, oy = tr.offset_x or 0, tr.offset_y or 0
+    return cache:hasGrayInkIn(left - ox, top - oy, right - ox, bottom - oy)
+end
+
+--- The live-fast preference, as far as this framebuffer can honour it: where
+--- the fast refresh waits for the display pipeline, live ink rides `ui`.
+function JustDraw:liveFast()
+    return self.live_fast and not LiveRefresh.fastBlocks(Screen)
 end
 
 --- Whether this device's `partial` fences on completion with the pen in
@@ -4467,6 +4567,68 @@ function JustDraw:onJustDrawUndo()
     end
     self:repaint()
     return true
+end
+
+--[[--
+Whether Undo and Redo would do anything right now, for the toolbars to show
+rather than to answer with a notice after the tap (audit UX-4). Cheap by
+construction: history and raster state already in memory, never SQLite.
+]]
+function JustDraw:canUndo()
+    if self.canvas_open then
+        local session = self.session
+        return not self.canvas_off_page and session ~= nil
+            and type(session.canUndo) == "function" and session:canUndo() == true
+    end
+    local document = self.document_session
+    if document then
+        return type(document.canUndo) == "function" and document:canUndo() == true
+    end
+    if self:legacyInkFrozen() then return false end
+    local list = self.store and self.store:get(self:currentPage())
+    return list ~= nil and #list > 0
+end
+
+function JustDraw:canRedo()
+    if self.canvas_open then
+        local session = self.session
+        return not self.canvas_off_page and session ~= nil
+            and type(session.canRedo) == "function" and session:canRedo() == true
+    end
+    return false
+end
+
+--[[--
+Repaint the toolbar only if Undo or Redo changed state. Called where those can
+change -- a contact ending, an undo, a redo, a page turn -- so a stroke costs a
+bar refresh only on the first stroke and the last undo, not on every one.
+]]
+function JustDraw:refreshHistoryButtons()
+    local bar = self.bar
+    if not (bar and bar.undo_btn) then return end
+    local undo, redo = self:canUndo(), self:canRedo()
+    if undo == bar.undo_shown and redo == bar.redo_shown then return end
+    bar:update(true)
+end
+
+--[[--
+The same, from the pen's callback, on the next tick. Rebuilding toolbar labels
+is UI work, and nothing between the stylus callback and KOReader's loop is
+guarded beyond the capture's own disarm: a failure here must not take drawing
+down with it. One stored closure, so a contact end allocates nothing.
+]]
+function JustDraw:scheduleHistoryRefresh()
+    if self.history_refresh_pending then return end
+    self.history_refresh_pending = true
+    if not self._history_refresh then
+        self._history_refresh = function()
+            self.history_refresh_pending = false
+            if self.reader_closed then return end
+            local ok, err = pcall(self.refreshHistoryButtons, self)
+            if not ok then logger.warn("JustDraw: toolbar history refresh failed:", err) end
+        end
+    end
+    UIManager:nextTick(self._history_refresh)
 end
 
 --[[--
@@ -4571,7 +4733,10 @@ end
 function JustDraw:styleItem(text, value)
     return {
         text = text,
-        checked_func = function() return self.pen_style == value end,
+        -- The style the pen will actually draw with: where a modern style
+        -- cannot apply it resolves to the pen, and marking the chosen-but-
+        -- greyed row instead left the row that draws unmarked (review).
+        checked_func = function() return self:effectiveStyle() == value end,
         enabled_func = Style.isModern(value) and function() return self:markerAvailable() end or nil,
         radio = true,
         callback = function()
@@ -5266,127 +5431,19 @@ function JustDraw:addToMainMenu(menu_items)
         }
         return
     end
-    -- The marker needs a surface this plugin owns: a sheet, or a page's own
-    -- ink layer.
-    local marker_style_item = self:styleItem(_("Marker"), Style.MARKER)
-    marker_style_item.enabled_func = function() return self:markerAvailable() end
-    local sheet_item = {
-        text = MENU_DRAWING_SHEET,
-        separator = true,
-        enabled_func = function()
-            return self.session ~= nil and self.session:isAvailable()
-        end,
-        help_text = _([[Blank sheets anchored to a position in a reflowable book. Not available in PDFs and other fixed layouts, where drawing goes straight onto the page instead.]]),
-        sub_item_table_func = function() return self:canvasMenu() end,
-    }
-    menu_items.justdraw = {
-        text = MENU_JUSTDRAW,
-        sorting_hint = "tools",
-        sub_item_table = {
-            {
-                text = _("Document notes"),
-                help_text = _("Browse every JustDraw note in this book, read it at full size, go to its location, or export a selection."),
-                callback = function() self:onShowDocumentNotes() end,
-            },
-            {
-                text = _("Notebooks"),
-                callback = function() self:openNotebookLibrary() end,
-            },
-            {
-                -- Deliberately closes the menu: turning drawing on swallows
-                -- single-finger taps, so an open menu would be unusable.
-                text = _("Start drawing"),
-                enabled_func = function() return not self.drawing end,
-                callback = function() self:setDrawing(true) end,
-                help_text = _([[Use the Draw/Stop button on the side toolbar to switch drawing off again. Two fingers also work as usual while drawing is on.]]),
-            },
-            {
-                text = _("Show toolbar"),
-                checked_func = function() return self.bar ~= nil end,
-                check_callback_updates_menu = true,
-                callback = function(touchmenu_instance)
-                    self:setBarShown(self.bar == nil)
-                    if touchmenu_instance then touchmenu_instance:updateItems() end
-                end,
-            },
-            {
-                text = _("Toolbar side"),
-                separator = true,
-                sub_item_table = {
-                    self:sideItem(_("Left"), "left"),
-                    self:sideItem(_("Right"), "right"),
-                },
-            },
-            {
-                text = _("Input mode"),
-                separator = true,
-                help_text = _([[Automatic uses the stylus route on devices that report a pen digitizer, and the finger route everywhere else. On a drawing sheet, finger and palm never draw; touches above the bounded sheet can still turn pages. With direct ink, press Stop to return all touch input to reading.]]),
-                sub_item_table = {
-                    self:inputModeItem(_("Automatic"), "auto"),
-                    self:inputModeItem(_("Stylus"), "stylus"),
-                    self:inputModeItem(_("Finger"), "finger"),
-                },
-            },
-            {
-                text = _("Pen style"),
-                sub_item_table = {
-                    self:styleItem(_("Ink pen"), Style.PEN),
-                    self:styleItem(_("Graphite"), Style.GRAPHITE),
-                    marker_style_item,
-                    self:styleItem(_("Round ink"), Style.ROUND),
-                    self:styleItem(_("Highlighter"), Style.HIGHLIGHTER),
-                    self:styleItem(_("Textured graphite"), Style.TEXTURED),
-                },
-            },
-            {
-                text = _("Pen width"),
-                sub_item_table = {
-                    self:penItem(_("Thin"), PEN_THIN),
-                    self:penItem(_("Medium"), PEN_MEDIUM),
-                    self:penItem(_("Thick"), PEN_THICK),
-                },
-            },
-            {
-                text = _("Drawing refresh"),
-                callback = function() self:showDrawingRefreshDialog() end,
-            },
-            {
-                text = _("Fast refresh while drawing"),
-                checked_func = function() return self.live_fast end,
-                callback = function()
-                    self.live_fast = not self.live_fast
-                    Compat.saveSetting(G_reader_settings, "live_fast", self.live_fast)
-                end,
-                help_text = _([[On: strokes appear with the DU waveform — quick, but grainy and it leaves ghosting until the next page turn. Off: slower, cleaner.]]),
-                separator = true,
-            },
-            {
-                -- Deliberately not gated on the stylus backend being live: the
-                -- only person who opens this is someone whose pen does nothing,
-                -- and for them it never is.
-                text = _("Stylus diagnostics"),
-                callback = function() self:showDiagnostics() end,
-                help_text = _([[Shows why the pen route is or is not running. With confirmation, it writes pen coordinates and decisions to the local log for up to one minute or 8,192 events. No book or notebook identity is logged.]]),
-                separator = true,
-            },
-            sheet_item,
-            {
-                -- Deliberately closes the menu: the export dialog is a modal,
-                -- and arranging one underneath an open menu leaves two window
-                -- stacks competing for the same taps.
-                text = _("Export…"),
-                separator = true,
-                enabled_func = function() return self:canExport() end,
-                callback = function() self:showExportDialog() end,
-                help_text = _([[Writes what you have drawn to a PDF, PNG or JPEG in a folder of your choosing. Exports the page you are reading, the sheet that is open, or every sheet in this book. Nothing in the book itself is changed.]]),
-            },
-        },
-    }
-    local sub = menu_items.justdraw.sub_item_table
-    self:addPageNotesMenuItem(sub, sheet_item)
-    local clear_page, clear_all = self:legacyInkItems()
-    sub[#sub + 1] = clear_page
-    sub[#sub + 1] = clear_all
+    -- The arrangement lives in ink_reader_menu (audit UX-3); the rows, their
+    -- state and their callbacks stay here.
+    ReaderMenu.add(self, menu_items, {
+        justdraw = MENU_JUSTDRAW,
+        drawing_sheet = MENU_DRAWING_SHEET,
+    })
+end
+
+--- The live-fast preference, from the menu: `liveFast` is what the drawing
+--- path asks, this is what the reader chose.
+function JustDraw:setLiveFast(on)
+    self.live_fast = on and true or false
+    Compat.saveSetting(G_reader_settings, "live_fast", self.live_fast)
 end
 
 --[[--
@@ -5466,31 +5523,21 @@ function JustDraw:confirmClearLegacyBook()
     })
 end
 
---[[--
-Put "Page notes" next to "Drawing sheet", where it can exist at all.
-
-Absent rather than greyed on an EPUB and on a runtime with no stylus API
-(ADR-41): a permanently disabled row is a promise about a feature this session
-can never have, and on the v2026.03 route it would be the one visible trace of
-a surface that does not exist there.
-
-Placed by the identity of the sheet row rather than by an index or a
-translated label, so neither reordering the menu nor translating it can move
-it somewhere else.
-]]
-function JustDraw:addPageNotesMenuItem(items, sheet_item)
-    if not (Capture:supportsStylus() and self.ui.paging) then return end
-    local at = #items + 1
-    for i = 1, #items do
-        if items[i] == sheet_item then at = i + 1 break end
+-- Undo and Redo leave the toolbar showing what is possible after them, not
+-- before (audit UX-4). Wrapped once here, so every way in -- the bar, the
+-- menu, a gesture, the legacy aliases below -- gets it.
+do
+    local undo, redo = JustDraw.onJustDrawUndo, JustDraw.onJustDrawRedo
+    function JustDraw:onJustDrawUndo()
+        local handled = undo(self)
+        self:refreshHistoryButtons()
+        return handled
     end
-    table.insert(items, at, {
-        text = _("Page notes"),
-        separator = true,
-        enabled_func = function() return self.document_session ~= nil end,
-        help_text = _([[Ink drawn on the pages of a PDF or another fixed layout, stored in the page's own units so it follows zoom and panning. Not available in reflowable books, where a drawing sheet is anchored to the text instead.]]),
-        sub_item_table_func = function() return self:documentInkMenu() end,
-    })
+    function JustDraw:onJustDrawRedo()
+        local handled = redo(self)
+        self:refreshHistoryButtons()
+        return handled
+    end
 end
 
 -- Compatibility event handlers for Gesture Manager assignments created by

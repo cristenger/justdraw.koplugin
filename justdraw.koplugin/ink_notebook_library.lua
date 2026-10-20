@@ -1017,13 +1017,24 @@ end
 
 -- ------------------------------------------------------------ dialogs
 
+--[[--
+A name the reader can keep. The field used to start empty, so creating a
+notebook meant typing before anything else -- on an e-reader, a keyboard trip
+for a name most people never change (audit UX-14). The date says when it was
+started, and the field is still there to rename it.
+]]
+function Library.defaultTitle(now)
+    return T(_("Notebook %1"), os.date("%Y-%m-%d", now))
+end
+
 function Library:showCreateDialog(previous)
     if not self.batch or not self.batch.writable then return nil, "read_only" end
     local style = previous and previous.paper or "blank"
     local dialog
     dialog = MultiInputDialog:new{
         title = _("New notebook"),
-        fields = {{ description = _("Notebook name"), text = previous and previous.title or "" }},
+        fields = {{ description = _("Notebook name"),
+            text = previous and previous.title or Library.defaultTitle() }},
         buttons = {{
             { no_refresh_checkmark = true, text = _("Cancel"), id = "close", callback = function() self:_closeModal(dialog) end },
             { text = _("Create"), callback = function()

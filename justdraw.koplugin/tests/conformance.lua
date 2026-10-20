@@ -2111,18 +2111,22 @@ do
         tostring(write_err))
     os.remove(png_path)
 
-    -- The one that matters, and it is a trap rather than a contract:
-    -- `writeToFile` wraps the encoder in a pcall, but lodepng and turbojpeg
-    -- do not report a file error at all, so writing into a folder that does
-    -- not exist returns true and creates nothing. `ink_export` therefore
-    -- checks that the file is there before it renames it into place.
+    -- The one that matters, and up to koreader-base 2488d68b it was a trap
+    -- rather than a contract: `writeToFile` wraps the encoder in a pcall,
+    -- and lodepng reported no file error at all, so writing into a folder
+    -- that does not exist returned true and created nothing. Since then the
+    -- PNG writer reports it, as `true, false, message` through that pcall,
+    -- and `Export.imageWriteResult` reads it. Either way nothing is created,
+    -- and `ink_export` still checks the file is there before renaming it:
+    -- turbojpeg reports nothing on any runtime.
     local missing_dir = probe_dir .. "/justdraw-absent-" .. tostring(os.time())
     local missing_path = missing_dir .. "/x.png"
     local claimed = ExportJob.writeImage(shot, missing_path, "png", 90)
     local really_there = lfs.attributes(missing_path, "mode")
-    claim("writeToFile claims success even when nothing was written",
-        true, claimed == true and really_there == nil,
-        "so the export verifies the file rather than trusting the return")
+    claim("a write into a missing folder creates nothing, reported or not",
+        true, really_there == nil and (claimed == true or claimed == nil),
+        claimed == true and "this runtime's writer reports nothing: the file check catches it"
+            or "this runtime's writer reports the failure")
     shot:free()
 
     -- The convention that decides whether a truncated PDF is renamed into

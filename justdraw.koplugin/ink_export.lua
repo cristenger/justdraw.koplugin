@@ -145,12 +145,22 @@ local function defaultSanitize(name, dir)
     return util.getSafeFilename(name, dir, Export.MAX_STEM, 10)
 end
 
---- `writeToFile` hands back the results of a `pcall`, so a failure is
---- `false, message` rather than a raise.
-local function defaultWriteImage(bb, path, format, quality)
-    local ok, err = bb:writeToFile(path, format, quality)
-    if not ok then return nil, err or "encode_failed" end
+--[[--
+`writeToFile` hands back the results of a `pcall`, so a raise is `false,
+message`. Since koreader-base 2488d68b (#2513) the PNG writer also reports a
+failed write, and through that `pcall` it arrives as `true, false, message`:
+the second value is the encoder's own answer. An older runtime leaves it nil,
+which still means "no word either way" -- the size check after this is what
+catches that case, on every runtime.
+]]
+function Export.imageWriteResult(ok, ret, msg)
+    if not ok then return nil, ret or "encode_failed" end
+    if ret == false then return nil, msg or "encode_failed" end
     return true
+end
+
+local function defaultWriteImage(bb, path, format, quality)
+    return Export.imageWriteResult(bb:writeToFile(path, format, quality))
 end
 
 --[[--
@@ -540,7 +550,13 @@ function Job:_preflight()
 
     if self.flush_fn then
         self.phase = "flush"
-        local flushed, flush_err = self.flush_fn()
+        -- Reached from a dialog's callback, where nothing else is guarded: a
+        -- flush that raised would take KOReader down with it.
+        local ran, flushed, flush_err = pcall(self.flush_fn)
+        if not ran then
+            logger.err("JustDraw export: flush raised:", tostring(flushed))
+            return nil, "flush_failed"
+        end
         if not flushed then return nil, flush_err or "flush_failed" end
     end
 
@@ -713,6 +729,13 @@ function Job:_encode(result, index)
         self:_removeActiveTemp()
         return nil, "encode_failed"
     end
+    -- Asked again here, as `_commitProduced` does: the collision question was
+    -- settled at the start, and `rename` would replace a file that appeared
+    -- since without asking anyone (audit P1-6).
+    if not self.overwrite and occupied(self.fs, self.plan.targets[index]) then
+        self:_removeActiveTemp()
+        return nil, "destination_taken"
+    end
     local renamed = self.fs.rename(temp, self.plan.targets[index])
     if not renamed then
         self:_removeActiveTemp()
@@ -796,6 +819,10 @@ function Job:_commit()
     if not closed then
         self:_removeActiveTemp()
         return self:_finish("failed", close_err or "write_failed")
+    end
+    if not self.overwrite and occupied(self.fs, self.plan.targets[1]) then
+        self:_removeActiveTemp()
+        return self:_finish("failed", "destination_taken")
     end
     local renamed = self.fs.rename(self.active_temp, self.plan.targets[1])
     if not renamed then

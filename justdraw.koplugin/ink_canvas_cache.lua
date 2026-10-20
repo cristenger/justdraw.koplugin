@@ -210,6 +210,12 @@ function Cache.new(opts)
         -- erasing the last gray stroke leaves it set, failing toward
         -- correctness -- and re-derived by every rebuild's replay.
         gray_ink = false,
+        -- Where it is: coarse cells of the raster, `[row * GRAY_COLS + col]`,
+        -- marked wherever gray reached it. Same monotone rule as `gray_ink`,
+        -- per cell, so a box that crosses no gray keeps the fast refresh
+        -- (`hasGrayInkIn`).
+        gray_cells = {},
+        gray_marked = {},
         --- Bumped by every rebuild and by close, so a batch in flight from an
         --- earlier geometry does nothing.
         generation = 0,
@@ -384,11 +390,12 @@ function Query:next(limit, out)
     -- Entries looked at, not only entries returned, bound one call: a dense
     -- cell of strokes already seen must still yield within the turn.
     local scan_limit = limit * 8
-    -- The current bucket resumes where it stopped when it is the same table
-    -- with the same length; if it changed (an erase, a COMMIT's re-key) it
-    -- restarts, which is safe because `seen` dedupes.
+    -- The current bucket resumes where it stopped only when the grid has not
+    -- changed since; any insert or remove (an erase, a COMMIT's re-key) can
+    -- shift its entries without changing its length, so it restarts, which
+    -- is safe because `seen` dedupes (audit P1-4).
     local first = grid.cells[self.r * grid.cols + self.c]
-    if first ~= self.bucket or (first and #first ~= self.bucket_len) then self.i = 1 end
+    if first ~= self.bucket or grid.version ~= self.grid_version then self.i = 1 end
     while self.r <= self.r1 do
         local bucket = grid.cells[self.r * grid.cols + self.c]
         if bucket then
@@ -402,7 +409,7 @@ function Query:next(limit, out)
                     added = added + 1
                 end
                 if added >= limit or scanned >= scan_limit then
-                    self.bucket, self.bucket_len = bucket, #bucket
+                    self.bucket, self.grid_version = bucket, grid.version
                     return added, false
                 end
             end
@@ -429,6 +436,51 @@ end
 
 function Cache:hasGrayInk()
     return self.gray_ink == true
+end
+
+--- Raster pixels per side of one gray cell. Coarse on purpose: a cell is a
+--- table entry, and a pen stroke's box marks every cell it crosses.
+local GRAY_CELL = 32
+local GRAY_COLS = 65536
+
+local function grayKey(col, row) return row * GRAY_COLS + col end
+
+function Cache:_markGray(left, top, right, bottom)
+    self.gray_ink = true
+    if not (left and top and right and bottom) then
+        self.gray_everywhere = true
+        return
+    end
+    local cells = self.gray_cells
+    local c0, c1 = math.floor(left / GRAY_CELL), math.floor((right - 1) / GRAY_CELL)
+    local r0, r1 = math.floor(top / GRAY_CELL), math.floor((bottom - 1) / GRAY_CELL)
+    for r = r0, r1 do
+        for c = c0, c1 do cells[grayKey(c, r)] = true end
+    end
+end
+
+--[[--
+Whether this box of the raster -- cache pixels, half-open -- may hold gray ink.
+
+`hasGrayInk` answers for the whole raster, and one graphite stroke anywhere on
+a sheet then sent every later box of black ink to `ui` at 100 ms instead of DU
+at 20 ms (audit, stroke quality). The box is what gets refreshed, so the box
+is what is asked about. Monotone within a build exactly like the flag: an
+erase never clears a cell, which fails toward the grayscale pass.
+Allocation-free: this runs once per live box.
+]]
+function Cache:hasGrayInkIn(left, top, right, bottom)
+    if self.gray_ink ~= true then return false end
+    if self.gray_everywhere then return true end
+    local cells = self.gray_cells
+    local c0, c1 = math.floor(left / GRAY_CELL), math.floor((right - 1) / GRAY_CELL)
+    local r0, r1 = math.floor(top / GRAY_CELL), math.floor((bottom - 1) / GRAY_CELL)
+    for r = r0, r1 do
+        for c = c0, c1 do
+            if cells[grayKey(c, r)] then return true end
+        end
+    end
+    return false
 end
 
 function Cache:buffer()
@@ -648,8 +700,13 @@ Clear a stroke-shaped region and put back whatever else was under it.
 Takes the same shape a stroke's metadata has -- bounding box and width -- so it
 serves both an erase and the abandonment of a stroke that was being drawn and
 never got stored. Returns the region in cache coordinates.
+
+`ctx`, an eraser's `beginErase` context, lets the neighbours' chunks come out
+of that gesture's LRU: an eraser repairs the same neighbourhood sample after
+sample, and without it every sample re-read the same rows from SQLite inside
+the pen's callback (audit P2-5).
 ]]
-function Cache:repair(m)
+function Cache:repair(m, ctx)
     if not self.bb then return nil end
     local box = self:_regionFor(m)
     if box.w <= 0 or box.h <= 0 then return box end
@@ -677,7 +734,7 @@ function Cache:repair(m)
         for i = 1, #neighbours do
             local nm = neighbours[i]
             local ok, err = self:_paintMetaRegion(nm, canvas_box,
-                view, -box.x, -box.y, stats)
+                view, -box.x, -box.y, stats, ctx)
             if not ok then self:_fail(err); return nil, err end
         end
     end
@@ -875,6 +932,11 @@ Returns the dirty region in cache coordinates plus the cache identity and
 generation for a live-raster token, or nil if nothing was painted. A segment
 outside the canvas paints nothing at all: the buffer bounds the write, so it
 is dropped rather than wrapped onto the far side.
+
+The region is one table the cache reuses, valid until the next call: this
+runs once per accepted pen sample, and a fresh table per sample is garbage
+the drawing path does not have to make (audit P2-3). Every caller reads it
+at once and keeps only numbers.
 ]]
 function Cache:drawSegment(x0, y0, x1, y1, width, color, style, stroke)
     if not self.bb then return nil end
@@ -893,10 +955,11 @@ function Cache:drawSegment(x0, y0, x1, y1, width, color, style, stroke)
     self:_recordCoverage(style, left, top, right, bottom, 0, 0)
     -- An explicit colour is exactly a gray style's (colorFor hands nil for
     -- pen). rawequal: a real colour is cdata whose __eq indexes its argument.
-    if not rawequal(color, nil) then self.gray_ink = true end
-    return {
-        x = left, y = top, w = right - left, h = bottom - top,
-    }, self, self.generation
+    if not rawequal(color, nil) then self:_markGray(left, top, right, bottom) end
+    local box = self._segment_box
+    if not box then box = {}; self._segment_box = box end
+    box.x, box.y, box.w, box.h = left, top, right - left, bottom - top
+    return box, self, self.generation
 end
 
 function Cache:close()
@@ -966,6 +1029,9 @@ function Cache:_build()
     self.state = "loading"
     self.chunks_by_id = {}
     self.gray_ink = false
+    self.gray_cells = {}
+    self.gray_marked = {}
+    self.gray_everywhere = false
     self.translucent_ink = false
 
     self:_freeBuffer()
@@ -1190,7 +1256,24 @@ function Cache:_paintStroke(m, points, n, target, ox, oy)
     local tr = self.transform
     -- Every persisted-stroke paint funnels through here -- build replay,
     -- repair, fragment repaint -- so this is where gray content is noticed.
-    if Style.isGray(m.tool) then self.gray_ink = true end
+    if Style.isGray(m.tool) and not self.gray_everywhere
+        and self.gray_marked[m.token or m] == nil then
+        -- Once per stroke per build: repairs repaint the same neighbours
+        -- sample after sample, and their cells are already marked.
+        self.gray_marked[m.token or m] = true
+        -- The stroke's whole box in raster pixels, padded by its nib: what
+        -- it can have painted, wherever this particular paint was clipped.
+        local x0, y0, x1, y1 = tonumber(m.min_x), tonumber(m.min_y),
+            tonumber(m.max_x), tonumber(m.max_y)
+        if x0 and y0 and x1 and y1 then
+            local kx0, ky0 = tr:toCache(x0, y0)
+            local kx1, ky1 = tr:toCache(x1, y1)
+            local pad = tr:scaleWidth(tonumber(m.width) or 0) / 2 + 1
+            self:_markGray(kx0 - pad, ky0 - pad, kx1 + pad, ky1 + pad)
+        else
+            self:_markGray()
+        end
+    end
     if Style.isModern(m.tool) then
         ox, oy = ox or 0, oy or 0
         local painted, left, top, right, bottom = Brush.points(target or self.bb,
@@ -1323,7 +1406,7 @@ function Cache:_readAllPoints(m, ctx)
     return points, n
 end
 
-function Cache:_paintMetaRegion(m, canvas_box, target, ox, oy, stats)
+function Cache:_paintMetaRegion(m, canvas_box, target, ox, oy, stats, ctx)
     if m.points then
         local chunks = self.chunks_by_id[m.id] or {}
         local pad = (tonumber(m.width) or 0) / 2
@@ -1352,7 +1435,7 @@ function Cache:_paintMetaRegion(m, canvas_box, target, ox, oy, stats)
         if self:_boxTouches(cm, canvas_box.min_x, canvas_box.min_y,
             canvas_box.max_x, canvas_box.max_y, pad) then
             if stats then stats.chunks_consulted = stats.chunks_consulted + 1 end
-            local points, n = self:_readChunk(m, cm.chunk_no, nil, stats)
+            local points, n = self:_readChunk(m, cm.chunk_no, ctx, stats)
             if not points then return nil, n end
             self:_paintStroke(m, points, n, target, ox, oy)
         end

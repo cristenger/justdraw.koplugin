@@ -362,9 +362,7 @@ function Thumbs.nativeDeps()
         raster_open = function(o) return require("ink_export_raster").open(o) end,
         scale = function(bb, w, h) return require("ffi/mupdf").scaleBlitBuffer(bb, w, h) end,
         write = function(bb, path)
-            local ok, err = bb:writeToFile(path, "png")
-            if not ok then return nil, err or "encode_failed" end
-            return true
+            return require("ink_export").imageWriteResult(bb:writeToFile(path, "png"))
         end,
         fs = {
             exists = function(p) return lfs.attributes(p, "mode") == "file" end,

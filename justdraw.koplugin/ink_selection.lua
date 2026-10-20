@@ -40,7 +40,11 @@ local _ = require("ink_i18n")
 
 local Selection = {
     MAX_STROKES = 256,
-    MAX_POINTS = 65536,
+    --- Half of `History.MAX_POINTS`: a move is recorded with the selection
+    --- twice, before and after, and a selection the history cannot hold
+    --- answered "Try again" for ever (audit P2-6). Pinned against the
+    --- history's own budget in tests/selection_spec.lua.
+    MAX_POINTS = 32768,
     --- Cooperative budgets per scheduled turn (initial design limits, to be
     --- confirmed on the Scribe; ADR-53).
     TURN_MS = 4,

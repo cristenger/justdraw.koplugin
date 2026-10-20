@@ -119,7 +119,10 @@ return function(ctx)
         t:eq(ok, nil, "refused")
         t:eq(err, "no_identity", "with a reason")
         t:eq(session:isAvailable(), false, "and the feature is off for this book")
-        t:eq(#notes, 1, "the reader is told, once")
+        -- Said when the reader reaches for a sheet, never as the book opens
+        -- (UX-2): the host keeps the reason and asks `messageFor`.
+        t:eq(#notes, 0, "nothing is said to somebody who only came to read")
+        t:check(Session.messageFor(err) ~= nil, "but the sentence is there for when it is asked")
     end)
 
     t:case("an owned repository is closed when identity lookup fails", function()
@@ -129,6 +132,19 @@ return function(ctx)
         t:eq(ok, nil, "opening is refused")
         t:eq(store.closed, true, "the connection opened for this session is closed")
         t:eq(session.repository, nil, "and no unreachable handle is retained")
+    end)
+
+    t:case("a book never drawn in gets its row only with its first sheet", function()
+        local session, store, sched = fixture{ pages = { ["/body/p[1]"] = 1 } }
+        store.book_known = false
+        t:eq(session:open(), true, "the session opens on an unknown book")
+        sched:drain()
+        t:eq(store.calls.book, 0, "without writing a books row")
+        t:eq(session:isAvailable(), true, "and sheets are still on offer")
+        local canvas, err = session:createHere(1)
+        t:check(canvas ~= nil, "the first sheet is made: " .. tostring(err))
+        t:eq(store.calls.book, 1, "and the book's row with it")
+        t:eq(#session:canvasesHere(1), 1, "and the index knows the sheet")
     end)
 
     t:case("no database means the feature is off, not a crash", function()
@@ -150,8 +166,10 @@ return function(ctx)
         t:eq(ok, nil, "opening is refused")
         t:eq(err, "database_conflict", "specific conflict is preserved")
         t:eq(session:isAvailable(), false, "sheet entry points remain disabled")
-        t:check(notes[1] and notes[1]:find("Both JustDraw and FingerInk", 1, true),
-            "the reader gets an actionable explanation")
+        t:eq(#notes, 0, "nothing is said as the book opens (UX-2)")
+        local text = Session.messageFor(err)
+        t:check(text and text:find("Both JustDraw and FingerInk", 1, true),
+            "the reader gets an actionable explanation when they reach for a sheet")
     end)
 
     t:case("nothing at all happens on a book with no canvases", function()
@@ -892,6 +910,37 @@ return function(ctx)
         session:_indexFailed("probe")
         t:eq(session:openCanvasPlacement(), nil,
             "an unavailable session cannot report an authoritative place")
+    end)
+
+    --[[--
+    The index failing does not end the open sheet: its surface still writes
+    through this connection. Closing it here left the sheet accepting ink that
+    could only ever fail to save, and `closeCanvas` indexing a repository that
+    was gone -- from `teardown`, unguarded (audit P0-2). The connection goes
+    with the session, in `close`.
+    ]]
+    t:case("an index failure keeps the open sheet's connection until close", function()
+        local session, store, sched = placed()
+        session.owns_repository = true
+        session:_indexFailed("probe")
+        t:check(session.repository ~= nil, "the open sheet keeps its repository")
+        t:eq(store.closed, false, "and the connection is still open")
+        t:check(session:addStroke({ 10, 10, 20, 20 }, 2, 4, 1) ~= nil, "ink still lands")
+        t:eq(session:flush(), true, "and is saved")
+        local ok, err = session:closeCanvas()
+        t:eq(ok, true, "the sheet closes: " .. tostring(err))
+        session:close{ force = true }
+        t:eq(store.closed, true, "the session's close releases the connection")
+    end)
+
+    t:case("closing an edited sheet survives a repository that is already gone", function()
+        local session = placed()
+        session:addStroke({ 10, 10, 20, 20 }, 2, 4, 1)
+        session:flush()
+        session.edited = true
+        session.repository = nil
+        local ok, err = pcall(session.closeCanvas, session)
+        t:eq(ok, true, "no nil index on the recency marker: " .. tostring(err))
     end)
 
     t:case("the anchor is available for navigating back to", function()

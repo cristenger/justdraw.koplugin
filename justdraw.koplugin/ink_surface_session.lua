@@ -124,17 +124,29 @@ function SurfaceSession:isReady()
         and not self.load_error and not self:saveFailed() and not self.closed
 end
 
+--[[--
+Where the next stroke's seq comes from after a build.
+
+Never backwards. The database answers `MAX(seq) + 1` over what is stored, and
+a stroke still waiting in the queue is not stored yet: on a rebuild that
+answer is the waiting stroke's own seq, and the flush carrying both fails
+`UNIQUE(canvas_id, seq)` on every retry. So the answer is only ever a floor
+under what this session has already handed out.
+]]
 function SurfaceSession:_syncNextSeq()
     if not self.cache_obj then return nil, "no_cache" end
+    local seq
     if self.repository and type(self.repository.nextSeq) == "function" then
-        local seq, err = self.repository:nextSeq(self.surface_obj.id)
+        local err
+        seq, err = self.repository:nextSeq(self.surface_obj.id)
         if not seq then return nil, err or "no_seq" end
-        self.next_seq = seq
-        return true
+    else
+        local strokes = self.cache_obj:strokes()
+        local last = strokes[#strokes]
+        seq = (last and last.seq or 0) + 1
     end
-    local strokes = self.cache_obj:strokes()
-    local last = strokes[#strokes]
-    self.next_seq = (last and last.seq or 0) + 1
+    if self.next_seq and self.next_seq > seq then seq = self.next_seq end
+    self.next_seq = seq
     return true
 end
 
@@ -328,6 +340,10 @@ function SurfaceSession:addStroke(points, n, width, tool, opts)
         seq = seq, paint_seq = paint_seq, width = width, tool = tool, points = points, n = n,
     })
     if not local_id then return nil, err end
+    -- Spent as soon as anything holds it: every return below leaves either
+    -- this insert queued or a gap, and a gap is harmless where a reuse fails
+    -- `UNIQUE(canvas_id, seq)` on every flush.
+    self.next_seq = seq + 1
 
     local min_x, min_y = points[1], points[2]
     local max_x, max_y = min_x, min_y
@@ -345,7 +361,9 @@ function SurfaceSession:addStroke(points, n, width, tool, opts)
         min_x = min_x, min_y = min_y, max_x = max_x, max_y = max_y,
     }, points, n, opts)
     if not added then
+        -- Withdrawn, so nothing holds the seq any more and it is free again.
         self.queue:removeStroke(self.surface_obj, local_id)
+        self.next_seq = seq
         return nil, cache_err
     end
 
@@ -355,7 +373,6 @@ function SurfaceSession:addStroke(points, n, width, tool, opts)
         if not marked then return nil, mark_err end
         self.queue:forgetReal(local_id, row_id)
     end
-    self.next_seq = seq + 1
     self.edited = true
     if key then
         local meta = self.cache_obj:metaById(row_id or local_id)
@@ -460,7 +477,7 @@ function SurfaceSession:eraseAt(cx, cy, radius, ctx)
     for i = 1, #hits do
         local box, err
         if self.history and ctx and ctx.group then
-            box, err = self:_applySplitRecorded(hits[i], ctx.group)
+            box, err = self:_applySplitRecorded(hits[i], ctx.group, ctx)
             if err == "erase_limit" then
                 -- Stop cutting, keep what this contact already cut; the
                 -- reader hears about it once, at the lift.
@@ -468,7 +485,7 @@ function SurfaceSession:eraseAt(cx, cy, radius, ctx)
                 return union
             end
         else
-            box, err = self:_applySplit(hits[i])
+            box, err = self:_applySplit(hits[i], ctx)
         end
         if not box then
             if ctx then ctx.sweep_x, ctx.sweep_y = x0, y0 end
@@ -479,7 +496,7 @@ function SurfaceSession:eraseAt(cx, cy, radius, ctx)
     return union
 end
 
-function SurfaceSession:_applySplit(hit)
+function SurfaceSession:_applySplit(hit, ctx)
     local m = hit.meta
     local added = {}
     for f = 1, #hit.fragments do
@@ -518,11 +535,11 @@ function SurfaceSession:_applySplit(hit)
     -- Interpolated endpoints can change the historical DDA's sampling phase.
     -- Rebuild its full box so live cache and persisted replay cannot diverge.
     local repair = hit.exact and m or hit.removed
-    return self.cache_obj:repair{
+    return self.cache_obj:repair({
         min_x = repair.min_x, min_y = repair.min_y,
         max_x = repair.max_x, max_y = repair.max_y,
         width = m.width,
-    }
+    }, ctx)
 end
 
 --- Take back fragments whose stroke could not be replaced after all. Their
@@ -920,7 +937,7 @@ function SurfaceSession:_repaintPlan(plan, metas)
     local union
     for _, box in ipairs({ removed_box or false, added_box or false }) do
         if box then
-            local painted, err = self.cache_obj:repair(box)
+            local painted, err = self.cache_obj:repair(box, plan.read_ctx)
             if not painted then return union, err or "repaint_failed" end
             union = unionBox(union, painted)
         end
@@ -982,7 +999,7 @@ checked in both directions -- undo re-inserts `before`, redo re-inserts
 `after` -- against the history's budget and the queue's hard bounds; a cut
 whose inverse could never be admitted is not made (D.1.5).
 ]]
-function SurfaceSession:_applySplitRecorded(hit, group)
+function SurfaceSession:_applySplitRecorded(hit, group, ctx)
     if group.limited then return nil, "erase_limit" end
     local m = hit.meta
     local w, h = self.surface_obj.logical_w, self.surface_obj.logical_h
@@ -1065,6 +1082,8 @@ function SurfaceSession:_applySplitRecorded(hit, group)
         self.history:unreserveOpen(bp + frag_points, reserved_bytes)
         return nil, err
     end
+    -- The repaint reads its neighbours through this gesture's LRU (P2-5).
+    plan.read_ctx = ctx
     local metas, publish_err = self:_publishPlan(plan)
     if not metas then return nil, publish_err end
     for i = 1, #metas do metas[i].from_erase = true end

@@ -27,9 +27,11 @@ explanation is what makes a reader try the same thing again. Auto-crop and the
 footer need no refusal: both are already inside `visible_area`, which the
 formula carries.
 
-Last, a budget. The raster is the whole page at zoom, two bytes a pixel as an
-overlay, so a reader who zooms far in would ask for a buffer the device cannot
-hold -- and the allocation would happen inside a paint. Above
+Last, a budget. The raster is the whole page at zoom, three bytes a pixel as
+an overlay -- two for the BB8A layer and one for the highlighter's coverage
+mask, which ADR-48 allocates with every generation so that no stylus sample
+ever has to -- so a reader who zooms far in would ask for buffers the device
+cannot hold, and the allocation would happen inside a paint. Above
 `MAX_CACHE_FACTOR` screens' worth of pixels the answer is `zoom_too_large`,
 which is a sentence the reader can act on, rather than an allocation that
 fails.

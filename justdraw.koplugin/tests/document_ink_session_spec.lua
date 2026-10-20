@@ -76,6 +76,7 @@ return function(ctx)
         end
         if opts.no_identity then
             function store:bookId() return nil, "no_identity" end
+            function store:findBookId() return nil, "no_identity" end
         end
         for id, list in pairs(opts.strokes or {}) do
             for _, s in ipairs(list) do store:putStroke(id, s) end
@@ -158,7 +159,7 @@ return function(ctx)
         local ok, err = session:open()
         t:eq(ok, nil, "refused")
         t:eq(err, "no_repository", "with a reason")
-        t:eq(#notes, 1, "the reader is told, once")
+        t:eq(#notes, 0, "nothing is said as the book opens; Draw says it (UX-2)")
         t:eq(session:isAvailable(), false, "and every entry point checks this")
         t:eq(session:stateName(), "unavailable", "the state says so")
         local _, page_err = session:setPage(3)
@@ -185,9 +186,11 @@ return function(ctx)
         t:eq(ok, nil, "opening is refused")
         t:eq(err, "database_conflict", "the specific conflict is preserved")
         t:eq(session:isAvailable(), false, "page ink stays off")
-        t:check(notes[1] and notes[1]:find("Both JustDraw and FingerInk", 1, true),
-            "the reader gets an actionable explanation")
-        t:check(notes[1]:find("notes databases", 1, true),
+        t:eq(#notes, 0, "nothing is said as the book opens (UX-2)")
+        local text = Session.MESSAGES[err]
+        t:check(text and text:find("Both JustDraw and FingerInk", 1, true),
+            "Draw has an actionable explanation to give")
+        t:check(text:find("notes databases", 1, true),
             "naming the one file honestly: it is not a sheet database")
     end)
 
@@ -197,7 +200,7 @@ return function(ctx)
         local ok, err = session:open()
         t:eq(ok, nil, "refused")
         t:eq(err, "no_identity", "with a reason")
-        t:eq(#notes, 1, "the reader is told")
+        t:eq(#notes, 0, "nothing is said as the book opens; Draw says it (UX-2)")
         t:eq(store.closed, true, "and the connection this session opened is closed")
     end)
 
@@ -691,6 +694,45 @@ return function(ctx)
     connection afterwards. Written twice they drift; these are the ones a
     second copy would have got wrong.
     ]]
+    --[[--
+    A reader who opens a book and never draws in it costs nothing: no `books`
+    row, no UPDATE of its path, no lookup per page turn (audit UX-2). The row
+    is made by the first page note, and a book known to have none is not asked
+    about page by page.
+    ]]
+    t:describe("ink_document_ink_session / costs nothing until used")
+
+    t:case("a book never drawn in gets no row and no lookups", function()
+        local session, store = fixture{ before_open = function(s) s.book_known = false end }
+        store.book_known = false
+        t:eq(session:open(), true, "the session opens")
+        session:setPage(1)
+        session:setPage(2)
+        t:eq(store.calls.book, 0, "no books row was written")
+        t:eq(store.calls.find_page_ink, 0, "and no page was looked up")
+        local ok, err = session:ensureSurface()
+        t:eq(ok, true, "Draw makes the surface: " .. tostring(err))
+        t:eq(store.calls.book, 1, "and the book's row with it")
+        t:eq(#store.canvases, 1, "one page-ink row")
+    end)
+
+    t:case("a known book with no page ink is not asked about page by page", function()
+        local session, store = fixture{}
+        session:open()
+        session:setPage(1)
+        session:setPage(2)
+        session:setPage(3)
+        t:eq(store.calls.find_page_ink, 0, "a count at open answered for every page")
+        t:eq(store.calls.book, 0, "and opening wrote nothing")
+    end)
+
+    t:case("a book with page ink is still looked up as it is read", function()
+        local session, store = fixture{ canvases = { pageRow(1, 2) } }
+        session:open()
+        session:setPage(2)
+        t:check(store.calls.find_page_ink >= 1, "the page with ink is found")
+    end)
+
     t:describe("ink_book_database / the shared way in")
 
     local BookDatabase = require("ink_book_database")
@@ -729,6 +771,7 @@ return function(ctx)
     function()
         local store = support.newCanvasStore({})
         function store:bookId() return nil, "no_identity" end
+        function store:findBookId() return nil, "no_identity" end
         local handle, reason = BookDatabase.open{
             repository = store, identity = IDENTITY, file = "/book.pdf",
         }

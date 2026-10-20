@@ -425,6 +425,31 @@ function Sequence:_desync(edges)
     if self.on_desync then self.on_desync(cut) end
 end
 
+--[[--
+A lift and a down that happened while the capture was blind, with no overflow
+to say so.
+
+`Input:inhibitInput` voids the handler that writes the lift -- a dialog that
+flushes events on show, a Trapper, a short inhibit after a re-render -- and on
+a digitizer whose id is pinned to the pen slot, the next contact then looks
+like the old one. The steer's hook still runs while input is inhibited, so the
+pen's own BTN_TOUCH edges still count: two more of them inside one owned
+contact are exactly that pair. The stroke is finished where it stands and the
+contact handed to the same wait a drop uses, whose edge test then begins the
+new contact from this very frame (audit P1-3).
+]]
+function Sequence:_blindBoundary()
+    if self.effect_active then
+        self:_closeEffect("finish", "blind_lift")
+    end
+    self.effect = nil
+    self.effect_active = false
+    self.point_count = 0
+    self.state = "desync_wait"
+    self.desync_edges = self.contact_edges
+    self:_resetGeometry(true)
+end
+
 --- How many overflows this lease has seen, and how many of them cut a stroke.
 function Sequence:desyncCounts()
     return self.desyncs, self.desync_cuts
@@ -447,6 +472,9 @@ end
 function Sequence:_beginOwner(slot, id, tool, timev, reason)
     self.owner_slot = slot
     self.owner_id = id
+    -- The pen's BTN_TOUCH count as this contact began: two more edges inside
+    -- it are a lift and a down this callback never saw (`_blindBoundary`).
+    self.contact_edges = self.sync_edges
     self.current_tool = tool ~= self.tool_finger and tool or nil
     self.effect = nil
     self.effect_active = false
@@ -506,6 +534,13 @@ function Sequence:_countOwnerSample()
 end
 
 function Sequence:_emitPoint(x, y, is_first)
+    -- A pen at rest repeats its coordinate every frame. That is a sample (the
+    -- sample cap has already counted it) and not ink: handing it on would
+    -- spend the point budget on nothing and abort a slow stroke whole.
+    if self.effect == "ink" and not is_first
+        and x == self.last_ink_x and y == self.last_ink_y then
+        return "append", "duplicate"
+    end
     if self.effect == "ink" and self.point_count >= self.max_open_points then
         self:_closeEffect("abort", "point_budget")
         self.state = "suspended"
@@ -527,6 +562,7 @@ function Sequence:_emitPoint(x, y, is_first)
 
     if self.effect == "ink" then
         self.point_count = self.point_count + 1
+        self.last_ink_x, self.last_ink_y = x, y
     end
     if action == "finish_suspend" then
         self:_closeEffect("finish", "finish_suspend")
@@ -712,6 +748,9 @@ end
 function Sequence:_holdUnstartedReplacement(slot, id, tool)
     self.owner_slot = slot
     self.owner_id = id
+    -- This held contact is measured from here: edges counted before it are
+    -- the previous contact's, and would read as a blind lift (P1-3 review).
+    self.contact_edges = self.sync_edges
     self.current_tool = tool ~= self.tool_finger and tool or nil
     self.physical_started = false
     self.contact_end_called = true
@@ -828,6 +867,13 @@ function Sequence:feed(slot)
     -- with it. Only the trusted pen reaches here, so only the trusted pen ever
     -- moves the boundary.
     self:_noteGeometry(x, y)
+
+    if id >= 0 and self.contact_edges ~= nil and self.sync_edges ~= nil
+        and self.sync_edges - self.contact_edges >= 2
+        and self.state ~= "desync_wait" and self.state ~= "proximity_wait"
+        and not isForwardedState(self.state) then
+        self:_blindBoundary()
+    end
 
     if self.state == "desync_wait" then
         if id < 0 then

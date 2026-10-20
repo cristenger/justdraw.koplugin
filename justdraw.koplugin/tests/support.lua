@@ -991,6 +991,14 @@ function support.newCanvasStore(canvases)
             stroke.id = max_id + 1
         end
         stroke.seq = stroke.seq or (#list + 1)
+        -- `UNIQUE(canvas_id, seq)`, as the schema declares it. Without it a
+        -- session that hands out a seq twice stays green here and fails
+        -- every flush on the device (audit P0-1).
+        for i = 1, #list do
+            if list[i].seq == stroke.seq then
+                error("UNIQUE constraint failed: strokes.canvas_id, strokes.seq", 0)
+            end
+        end
         local min_x, min_y = stroke.points[1], stroke.points[2]
         local max_x, max_y = min_x, min_y
         for i = 2, stroke.n do
@@ -1003,6 +1011,17 @@ function support.newCanvasStore(canvases)
         stroke.point_count = stroke.n
         list[#list + 1] = stroke
         return stroke.id
+    end
+
+    --- `SELECT MAX(seq) + 1`, the repository's own answer: what is stored,
+    --- and nothing that is still waiting in a queue.
+    function store:nextSeq(canvas_id)
+        if self.fail_next_seq then return nil, self.fail_next_seq end
+        local max_seq = 0
+        for _, s in ipairs(self.strokes[canvas_id] or {}) do
+            if s.seq > max_seq then max_seq = s.seq end
+        end
+        return max_seq + 1
     end
 
     function store:listStrokes(canvas_id)
@@ -1175,6 +1194,18 @@ function support.newCanvasStore(canvases)
         self.calls.book = self.calls.book + 1
         if not partial_md5 or not file_size then return nil, "no_identity" end
         self.identity = { partial_md5, file_size, last_path }
+        self.book_known = true
+        return 12
+    end
+
+    --- The read side of `bookId`: the row if there is one, never a write.
+    --- `book_known = false` is a book this database has never seen.
+    store.calls.find_book = 0
+    function store:findBookId(partial_md5, file_size)
+        self.calls.find_book = self.calls.find_book + 1
+        if not partial_md5 or not file_size then return nil, "no_identity" end
+        self.identity = self.identity or { partial_md5, file_size }
+        if self.book_known == false then return nil, "not_found" end
         return 12
     end
 
@@ -1284,7 +1315,9 @@ function support.newCanvasStore(canvases)
         return out
     end
 
+    store.calls.find_page_ink = 0
     function store:findPageInkSurface(_, fixed_page)
+        self.calls.find_page_ink = self.calls.find_page_ink + 1
         if self.fail_find_page_ink then return nil, self.fail_find_page_ink end
         for i = 1, #self.canvases do
             local c = self.canvases[i]

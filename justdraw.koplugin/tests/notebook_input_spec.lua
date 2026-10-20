@@ -117,6 +117,35 @@ return function(ctx)
         t:eq(adapter:hasActiveContact(session), false, "lift clears gate")
     end)
 
+    --[[--
+    The notebook runs its own contact machine, and it has to answer an evdev
+    overflow the way the reader's does (ADR-44): the stroke ends where it
+    stands and nothing is joined across the gap. It used to be built without
+    the steer's counters, so the drop was counted and never read (audit P1-1).
+    ]]
+    t:case("a kernel drop mid-stroke ends the notebook stroke, it does not bridge it", function()
+        -- The steer's counters, as production reads them: through Capture,
+        -- not through a field planted on the machine. Planting it would pass
+        -- whether or not the notebook wires the counters at all.
+        local Capture = require("ink_capture")
+        local drops, edges = 0, 0
+        local real_counts = Capture.steerCounts
+        Capture.steerCounts = function() return 0, 0, drops, edges end
+        local session, _, _, spec = fixture("stylus")
+        spec.stylus_handler{ slot = 4, id = 9, x = 10, y = 10, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 9, x = 20, y = 30, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 9, x = 40, y = 60, tool = 1 }
+        drops = 1
+        spec.stylus_handler{ slot = 4, id = 9, x = 40, y = 600, tool = 1 }
+        spec.stylus_handler{ slot = 4, id = 9, x = 600, y = 600, tool = 1 }
+        edges = 1
+        spec.stylus_handler{ slot = 4, id = -1, x = 600, y = 600, tool = 0 }
+        Capture.steerCounts = real_counts
+        local strokes = session:surface():cache():strokes()
+        t:eq(#strokes, 1, "one stroke")
+        t:eq(strokes[1].point_count, 2, "with the points from before the drop, and no more")
+    end)
+
     t:case("the notebook stores the chosen style, not the hardware tool", function()
         -- Until now the row recorded which physical tool was held; the column
         -- now means style, and phase-1 default style is pen even under a pen
@@ -323,7 +352,11 @@ return function(ctx)
         t:eq(input.stylus_callback, callback,
             "callback remains registered until the safe tick")
         ctx.env.UIManager:flush()
-        t:eq(input.stylus_callback, nil, "safe tick removes the callback")
+        -- The pen on slot 5 is still down: held to its lift (audit P2-4).
+        t:eq(input.stylus_callback, callback, "the held contact keeps the callback")
+        callback(input, { slot = 5, id = -1 })
+        ctx.env.UIManager:flush()
+        t:eq(input.stylus_callback, nil, "the tick after the lift removes the callback")
     end)
 
     t:case("point budget repairs the whole stroke and owns through lift", function()

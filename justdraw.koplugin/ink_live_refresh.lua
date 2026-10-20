@@ -29,9 +29,27 @@ policy is stated in `tests/live_refresh_spec.lua` against a virtual clock.
 local Live = {}
 Live.__index = Live
 
---- DU carries no wait on any mxcfb device; a 20 ms union is invisible
---- behind the panel's own latency.
+--- DU carries no wait on most mxcfb drivers; a 20 ms union is invisible
+--- behind the panel's own latency. Where it does wait, see `fastBlocks`.
 Live.FAST_INTERVAL = 0.02
+
+--[[--
+Whether the fast refresh blocks the process on this framebuffer.
+
+koreader-base e5b068ce made some drivers wait, synchronously, for the display
+pipeline after every fast or A2 update, and announces it by setting
+`mech_wait_update_mdp` on the framebuffer. A wait per live box with the pen
+reporting is the blocking refresh ADR-26 forbids: evdev overflows and the
+next pen-down is lost. So the capability is asked for -- never a model -- and
+live ink then rides `ui` instead.
+]]
+function Live.fastBlocks(screen)
+    if screen == nil then
+        local ok, Device = pcall(require, "device")
+        screen = ok and Device and Device.screen or nil
+    end
+    return screen ~= nil and rawget(screen, "mech_wait_update_mdp") ~= nil
+end
 --- AUTO (`ui`) waits for the previous submission on Kindles and REAGL
 --- (`partial`) fences on completion: ten a second is the budget a
 --- three-minute session with the pen down has to stay inside (ADR-43).

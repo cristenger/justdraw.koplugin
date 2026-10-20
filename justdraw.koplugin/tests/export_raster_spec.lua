@@ -47,6 +47,7 @@ return function(ctx)
             schedule = function(fn) sched:schedule(fn) end,
             on_ready = function(...)
                 seen.ready = seen.ready + 1
+                if opts.ready_raises then error("consumer boom") end
                 local args = { ... }
                 seen.arg = args[1]
                 seen.count = select("#", ...)
@@ -167,6 +168,14 @@ return function(ctx)
         t:eq(seen.arg, job, "and it is the job")
         t:check(job:isReady(), "which is ready")
         t:check(job:buffer() ~= nil, "and holds the raster")
+    end)
+
+    t:case("a consumer that raises on readiness hears it as a failure", function()
+        local _, seen, sched = fixture{ ready_raises = true }
+        local ok, err = pcall(function() sched:drain() end)
+        t:eq(ok, true, "the raise does not escape into the UI loop: " .. tostring(err))
+        t:eq(seen.error, 1, "the consumer is told it failed")
+        t:eq(seen.reason, "raster_failed", "with a reason an export can name")
     end)
 
     t:case("the buffer lives until close, and close is idempotent", function()

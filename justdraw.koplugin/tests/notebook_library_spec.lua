@@ -299,6 +299,22 @@ return function(ctx)
         t:eq(library.batch.items[1].id, 9, "created notebook remains visible")
     end)
 
+    t:case("a new notebook starts with a name the reader can keep", function()
+        ctx.reset()
+        local controller = {}
+        function controller:listNotebookBatch()
+            return { items = {}, has_more = false, writable = true }
+        end
+        local library = Library:new{ controller = controller }
+        library:markShown(); library:startLoading(); ctx.env.UIManager:flush()
+        local dialog = library:showCreateDialog()
+        local text = dialog.fields[1].text
+        t:check(text ~= "" and text:find("^Notebook %d%d%d%d%-%d%d%-%d%d$") ~= nil,
+            "named for the day it was started: " .. tostring(text))
+        t:eq(Library.defaultTitle(0):sub(1, 9), "Notebook ", "the same name the library proposes")
+        library:shutdown()
+    end)
+
     t:case("create controls repaint through the owning dialog", function()
         ctx.reset()
         local controller = {}

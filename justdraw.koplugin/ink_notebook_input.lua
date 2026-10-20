@@ -169,7 +169,10 @@ end
 function Adapter:_dirty(box, kind)
     if box and self.on_dirty then
         local sx, sy = self.transform:fromCache(box.x, box.y)
-        local visible = self.transform:visibleCanvasRect()
+        -- One reused rectangle: this runs once per accepted pen sample.
+        local visible = self._visible_rect
+        if not visible then visible = {}; self._visible_rect = visible end
+        self.transform:visibleCanvasRect(visible)
         local left = math.max(sx, visible.x)
         local top = math.max(sy, visible.y)
         local right = math.min(sx + box.w, visible.x + visible.w)
@@ -833,11 +836,9 @@ function Adapter:_buildStylusMachine(input)
         classify = function(slot) return Capture:physicalSlotRole(slot, input) end,
         retire_touch = function(slot_number) self:_retireTouchSlot(slot_number) end,
     }
-    local spec = {
-        wacom_protocol = input ~= nil and input.wacom_protocol == true,
-        pen_slot = input and input.pen_slot,
-        tool_finger = input and input.TOOL_TYPE_FINGER or 0,
-        to_screen = Capture.toScreen,
+    -- The capture's half comes from Capture, the same as the reader's, so the
+    -- two machines cannot drift apart again (ADR-44, audit P1-1).
+    local spec = Capture:sequenceSpec(input, {
         max_open_points = self.max_open_points,
         max_contact_samples = self.max_contact_samples,
         geometry = self.geometry,
@@ -851,17 +852,12 @@ function Adapter:_buildStylusMachine(input)
         on_finish = function(reason) return self:_finishStylusInk(reason) end,
         on_abort = function(reason) return self:_abortStylusInk(reason) end,
         on_contact_end = function(reason) return self:_stylusContactEnd(reason) end,
-        -- Increments two integers; cannot raise inside the raw callback.
-        on_pending_finish = function(kind)
-            Capture:noteCollapsedContact(kind)
-        end,
         on_domain_error = function(reason)
             if self.on_domain_error then
                 self.on_domain_error(reason, self.active_session)
             end
         end,
-        drop_contact = function(slot) return Capture:dropContact(slot) end,
-    }
+    })
     self.sequence_factory = function()
         local sequence = Sequence.new(spec)
         sequence:setTrace(self.trace_instance)

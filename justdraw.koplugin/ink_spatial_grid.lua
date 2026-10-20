@@ -44,6 +44,10 @@ function Grid.new(opts)
         rows = floor((h - 1) / cell) + 1,
         cells = {},     -- [row * cols + col] = { id, id, ... }
         boxes = {},     -- [id] = { col0, row0, col1, row1 }
+        -- Moves on every insert and remove. A walk paused inside a bucket can
+        -- only resume by position while this has not moved: a remove plus an
+        -- insert keeps a bucket's length and shifts its entries.
+        version = 0,
     }, Grid)
 end
 
@@ -70,6 +74,7 @@ end
 --- so a caller does not have to remember whether it has seen this stroke.
 function Grid:insert(id, min_x, min_y, max_x, max_y)
     if self.boxes[id] then self:remove(id) end
+    self.version = self.version + 1
     local c0, r0, c1, r1 = self:_span(min_x, min_y, max_x, max_y)
     self.boxes[id] = { c0, r0, c1, r1 }
     for r = r0, r1 do
@@ -88,6 +93,7 @@ end
 function Grid:remove(id)
     local box = self.boxes[id]
     if not box then return end
+    self.version = self.version + 1
     self.boxes[id] = nil
     for r = box[2], box[4] do
         for c = box[1], box[3] do

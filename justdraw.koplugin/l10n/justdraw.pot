@@ -24,7 +24,7 @@ msgid "Show note"
 msgstr ""
 
 #: ink_bar.lua ink_document_export_controller.lua ink_document_notes_ui.lua
-#: main.lua
+#: ink_reader_menu.lua main.lua
 msgid "Document notes"
 msgstr ""
 
@@ -278,7 +278,7 @@ msgstr ""
 msgid "Page note"
 msgstr ""
 
-#: ink_document_note.lua ink_document_notes_ui.lua
+#: ink_document_note.lua ink_document_notes_ui.lua ink_reader_menu.lua
 msgid "Legacy ink"
 msgstr ""
 
@@ -311,7 +311,8 @@ msgid "Read from here"
 msgstr ""
 
 #: ink_document_notes_controller.lua ink_document_notes_ui.lua
-#: ink_notebook_editor.lua ink_notebook_library.lua main.lua
+#: ink_notebook_editor.lua ink_notebook_library.lua ink_reader_menu.lua
+#: main.lua
 msgid "Export…"
 msgstr ""
 
@@ -642,7 +643,7 @@ msgstr ""
 msgid "KOReader notes and highlights"
 msgstr ""
 
-#: ink_document_notes_ui.lua main.lua
+#: ink_document_notes_ui.lua ink_reader_menu.lua
 msgid "Page notes"
 msgstr ""
 
@@ -766,6 +767,12 @@ msgstr ""
 #: ink_export_dialog.lua
 msgid ""
 "The exported file couldn’t be put in place. Check the folder and try again."
+msgstr ""
+
+#: ink_export_dialog.lua ink_export_xopp_job.lua
+msgid ""
+"A file with that name appeared while exporting. Nothing was replaced; export "
+"again to choose."
 msgstr ""
 
 #: ink_export_dialog.lua
@@ -992,12 +999,6 @@ msgstr ""
 
 #: ink_export_xopp_job.lua
 msgid "The compressed file didn’t check out, so it wasn’t saved. Try again."
-msgstr ""
-
-#: ink_export_xopp_job.lua
-msgid ""
-"A file with that name appeared while exporting. Nothing was replaced; export "
-"again to choose."
 msgstr ""
 
 #: ink_localsend.lua
@@ -1242,15 +1243,15 @@ msgstr ""
 msgid "Paper style"
 msgstr ""
 
-#: ink_notebook_editor.lua ink_refresh_dialog.lua main.lua
+#: ink_notebook_editor.lua ink_reader_menu.lua ink_refresh_dialog.lua main.lua
 msgid "Drawing refresh"
 msgstr ""
 
-#: ink_notebook_editor.lua main.lua
+#: ink_notebook_editor.lua ink_reader_menu.lua main.lua
 msgid "Input mode"
 msgstr ""
 
-#: ink_notebook_editor.lua main.lua
+#: ink_notebook_editor.lua ink_reader_menu.lua
 msgid "Stylus diagnostics"
 msgstr ""
 
@@ -1270,15 +1271,15 @@ msgstr ""
 msgid "Export “%1”"
 msgstr ""
 
-#: ink_notebook_editor.lua main.lua
+#: ink_notebook_editor.lua ink_reader_menu.lua main.lua
 msgid "Automatic"
 msgstr ""
 
-#: ink_notebook_editor.lua main.lua
+#: ink_notebook_editor.lua ink_reader_menu.lua main.lua
 msgid "Stylus"
 msgstr ""
 
-#: ink_notebook_editor.lua main.lua
+#: ink_notebook_editor.lua ink_reader_menu.lua main.lua
 msgid "Finger"
 msgstr ""
 
@@ -1342,8 +1343,8 @@ msgstr ""
 
 #: ink_notebook_library.lua
 msgid ""
-"Close KOReader, then move one database together with its matching -wal and -"
-"shm files to another directory."
+"Close KOReader, then move one database together with its matching -wal and "
+"-shm files to another directory."
 msgstr ""
 
 #: ink_notebook_library.lua ink_notebook_ui.lua
@@ -1396,7 +1397,7 @@ msgid_plural "%1 selected"
 msgstr[0] ""
 msgstr[1] ""
 
-#: ink_notebook_library.lua main.lua
+#: ink_notebook_library.lua ink_reader_menu.lua main.lua
 msgid "Notebooks"
 msgstr ""
 
@@ -1416,6 +1417,10 @@ msgstr ""
 
 #: ink_notebook_library.lua
 msgid "Back"
+msgstr ""
+
+#: ink_notebook_library.lua
+msgid "Notebook %1"
 msgstr ""
 
 #: ink_notebook_library.lua
@@ -1579,7 +1584,9 @@ msgid ""
 msgstr ""
 
 #: ink_notebook_ui.lua main.lua
-msgid "Stroke was not saved because the write queue is busy. Try again."
+msgid ""
+"That stroke was not kept: the ink before it is still being saved. Draw it "
+"again in a moment."
 msgstr ""
 
 #: ink_notebook_ui.lua main.lua
@@ -1588,39 +1595,39 @@ msgid ""
 "again."
 msgstr ""
 
-#: ink_pen_dialog.lua main.lua
+#: ink_pen_dialog.lua ink_reader_menu.lua
 msgid "Graphite"
 msgstr ""
 
-#: ink_pen_dialog.lua main.lua
+#: ink_pen_dialog.lua ink_reader_menu.lua
 msgid "Ink pen"
 msgstr ""
 
-#: ink_pen_dialog.lua main.lua
+#: ink_pen_dialog.lua ink_reader_menu.lua
 msgid "Marker"
 msgstr ""
 
-#: ink_pen_dialog.lua main.lua
+#: ink_pen_dialog.lua ink_reader_menu.lua
 msgid "Round ink"
 msgstr ""
 
-#: ink_pen_dialog.lua main.lua
+#: ink_pen_dialog.lua ink_reader_menu.lua
 msgid "Highlighter"
 msgstr ""
 
-#: ink_pen_dialog.lua main.lua
+#: ink_pen_dialog.lua ink_reader_menu.lua
 msgid "Textured graphite"
 msgstr ""
 
-#: ink_pen_dialog.lua ink_shape_dialog.lua main.lua
+#: ink_pen_dialog.lua ink_reader_menu.lua ink_shape_dialog.lua
 msgid "Medium"
 msgstr ""
 
-#: ink_pen_dialog.lua main.lua
+#: ink_pen_dialog.lua ink_reader_menu.lua
 msgid "Thick"
 msgstr ""
 
-#: ink_pen_dialog.lua main.lua
+#: ink_pen_dialog.lua ink_reader_menu.lua
 msgid "Thin"
 msgstr ""
 
@@ -1642,6 +1649,119 @@ msgstr ""
 
 #: ink_placement.lua
 msgid "That could not be placed. Try again."
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid "The marker needs a drawing sheet or a page note to draw on."
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid "Pen style"
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid "Pen width"
+msgstr ""
+
+#: ink_reader_menu.lua main.lua
+msgid "Toolbar side"
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid ""
+"Where the reader's toolbar sits. A drawing sheet and a notebook keep their "
+"controls above the paper."
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid "Left"
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid "Right"
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid "Show JustDraw when text is selected"
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid ""
+"Adds a JustDraw button to the menu that appears when you select text, so "
+"drawing can start from there. Turn it off if you never draw."
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid ""
+"Automatic uses the stylus route on devices that report a pen digitizer, and "
+"the finger route everywhere else. On a drawing sheet, finger and palm never "
+"draw; touches above the bounded sheet can still turn pages. With direct ink, "
+"press Stop to return all touch input to reading."
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid "Fast refresh while drawing"
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid ""
+"On: strokes appear with the fastest screen update — quick, but grainy, with "
+"some ghosting until the next page turn. Off: slower, cleaner."
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid ""
+"Shows why the pen route is or is not running. With confirmation, it writes "
+"pen coordinates and decisions to the local log for up to one minute or 8,192 "
+"events. No book or notebook identity is logged."
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid "Start drawing"
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid ""
+"Press Stop on the toolbar to switch drawing off again. Two fingers also work "
+"as usual while drawing is on."
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid "Show toolbar"
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid "Blank sheets anchored to a position in a reflowable book."
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid ""
+"Ink drawn on the pages of a PDF or another fixed layout, stored in the "
+"page's own units so it follows zoom and panning."
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid ""
+"Browse every JustDraw note in this book, read it at full size, go to its "
+"location, or export a selection."
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid ""
+"Writes what you have drawn to a PDF, PNG or JPEG in a folder of your "
+"choosing. Exports the page you are reading, the sheet that is open, or every "
+"sheet in this book. Nothing in the book itself is changed."
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid "Settings"
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid ""
+"Ink drawn by an older JustDraw or FingerInk, in screen pixels. It is shown "
+"and exported as it was stored, and these are the only things that can change "
+"it."
 msgstr ""
 
 #: ink_refresh_dialog.lua
@@ -1855,11 +1975,14 @@ msgid "Input mode is set to Finger. Set it to Automatic or Stylus."
 msgstr ""
 
 #: main.lua
-msgid "This KOReader has no stylus API. The pen route needs v2026.07 or newer."
+msgid ""
+"This KOReader cannot pass the pen to plugins. Drawing with the pen needs "
+"v2026.07 or newer."
 msgstr ""
 
 #: main.lua
-msgid "Another plugin already owns the stylus input callback."
+msgid ""
+"Another plugin is already using the pen. Turn it off to draw with JustDraw."
 msgstr ""
 
 #: main.lua
@@ -1878,6 +2001,10 @@ msgstr ""
 
 #: main.lua
 msgid "Start"
+msgstr ""
+
+#: main.lua
+msgid "Sheets are still being indexed. Try again in a moment."
 msgstr ""
 
 #: main.lua
@@ -1926,10 +2053,6 @@ msgstr ""
 
 #: main.lua
 msgid "Delete sheet"
-msgstr ""
-
-#: main.lua
-msgid "Toolbar side"
 msgstr ""
 
 #: main.lua
@@ -2060,81 +2183,6 @@ msgid ""
 msgstr ""
 
 #: main.lua
-msgid ""
-"Blank sheets anchored to a position in a reflowable book. Not available in "
-"PDFs and other fixed layouts, where drawing goes straight onto the page "
-"instead."
-msgstr ""
-
-#: main.lua
-msgid ""
-"Browse every JustDraw note in this book, read it at full size, go to its "
-"location, or export a selection."
-msgstr ""
-
-#: main.lua
-msgid "Start drawing"
-msgstr ""
-
-#: main.lua
-msgid ""
-"Use the Draw/Stop button on the side toolbar to switch drawing off again. "
-"Two fingers also work as usual while drawing is on."
-msgstr ""
-
-#: main.lua
-msgid "Show toolbar"
-msgstr ""
-
-#: main.lua
-msgid "Left"
-msgstr ""
-
-#: main.lua
-msgid "Right"
-msgstr ""
-
-#: main.lua
-msgid ""
-"Automatic uses the stylus route on devices that report a pen digitizer, and "
-"the finger route everywhere else. On a drawing sheet, finger and palm never "
-"draw; touches above the bounded sheet can still turn pages. With direct ink, "
-"press Stop to return all touch input to reading."
-msgstr ""
-
-#: main.lua
-msgid "Pen style"
-msgstr ""
-
-#: main.lua
-msgid "Pen width"
-msgstr ""
-
-#: main.lua
-msgid "Fast refresh while drawing"
-msgstr ""
-
-#: main.lua
-msgid ""
-"On: strokes appear with the DU waveform — quick, but grainy and it leaves "
-"ghosting until the next page turn. Off: slower, cleaner."
-msgstr ""
-
-#: main.lua
-msgid ""
-"Shows why the pen route is or is not running. With confirmation, it writes "
-"pen coordinates and decisions to the local log for up to one minute or 8,192 "
-"events. No book or notebook identity is logged."
-msgstr ""
-
-#: main.lua
-msgid ""
-"Writes what you have drawn to a PDF, PNG or JPEG in a folder of your "
-"choosing. Exports the page you are reading, the sheet that is open, or every "
-"sheet in this book. Nothing in the book itself is changed."
-msgstr ""
-
-#: main.lua
 msgid "Clear this page"
 msgstr ""
 
@@ -2179,11 +2227,4 @@ msgstr ""
 msgid ""
 "Delete all legacy ink in this book? Drawing sheets and page notes are not "
 "affected."
-msgstr ""
-
-#: main.lua
-msgid ""
-"Ink drawn on the pages of a PDF or another fixed layout, stored in the "
-"page's own units so it follows zoom and panning. Not available in reflowable "
-"books, where a drawing sheet is anchored to the text instead."
 msgstr ""

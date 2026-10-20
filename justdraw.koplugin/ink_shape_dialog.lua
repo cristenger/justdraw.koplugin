@@ -6,6 +6,12 @@ menu -- idempotently, with no checkmark repaint behind it (ADR-35) -- stores
 the options and selects the shape tool; the editor prepares the floating
 preview afterwards, outside any contact. Nothing here draws or places ink.
 
+A size or a direction is usually not the last choice: setting kind, size and
+direction used to cost three trips through the menu (audit UX-6). With
+`reopen`, those two picks come straight back to the menu with the new choice
+marked; picking the kind is what finishes it. A ButtonDialog's rows are fixed
+once built, so "coming back" is a fresh dialog over the stored options.
+
 Kept apart from the editor so its rows can be tested as data: which rows
 exist, which one is marked, and what each one stores.
 ]]
@@ -35,6 +41,8 @@ The dialog's rows for these options.
   opts.options   current {kind, size, angle} (normalized here)
   opts.choose    function(new_options) -- store, select the tool, prepare
   opts.close     function(dialog)      -- idempotent close
+  opts.reopen    optional function(options) -- show the menu again after a
+                 size or direction pick
   opts.checkmark the marker appended to the selected entries
 ]]
 function ShapeDialog.rows(opts)
@@ -42,12 +50,14 @@ function ShapeDialog.rows(opts)
     local mark = opts.checkmark or " ✓"
     local rows = {}
     local dialog_ref = opts.dialog_ref or {}
-    local function pick(change)
+    local function pick(change, again)
         return function()
             opts.close(dialog_ref.dialog)
             local next_opts = { kind = current.kind, size = current.size, angle = current.angle }
             for k, v in pairs(change) do next_opts[k] = v end
-            opts.choose(Shapes.normalize(next_opts))
+            local chosen = Shapes.normalize(next_opts)
+            opts.choose(chosen)
+            if again and opts.reopen then opts.reopen(chosen) end
         end
     end
     local row = {}
@@ -67,7 +77,7 @@ function ShapeDialog.rows(opts)
         sizes[#sizes + 1] = {
             text = SIZE_LABELS[size] .. (size == current.size and mark or ""),
             no_refresh_checkmark = true,
-            callback = pick{ size = size },
+            callback = pick({ size = size }, true),
         }
     end
     rows[#rows + 1] = sizes
@@ -78,7 +88,7 @@ function ShapeDialog.rows(opts)
             line[#line + 1] = {
                 text = ANGLE_GLYPHS[angle] .. (angle == current.angle and mark or ""),
                 no_refresh_checkmark = true,
-                callback = pick{ angle = angle },
+                callback = pick({ angle = angle }, true),
             }
             if #line == 4 then rows[#rows + 1] = line; line = {} end
         end
@@ -96,7 +106,7 @@ function ShapeDialog.new(opts)
         title = _("Shapes"),
         buttons = ShapeDialog.rows{
             options = opts.options, choose = opts.choose, close = opts.close,
-            checkmark = opts.checkmark, dialog_ref = ref,
+            reopen = opts.reopen, checkmark = opts.checkmark, dialog_ref = ref,
         },
     }
     ref.dialog = dialog

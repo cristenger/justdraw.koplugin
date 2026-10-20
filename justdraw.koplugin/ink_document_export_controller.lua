@@ -377,13 +377,16 @@ function Controller:composePageInk(page, result, tracker, done)
         composition = "overlay",
         on_ready = function(raster)
             if delivered then return raster:close() end
-            delivered = true
             local layer = raster:buffer()
             if layer then
                 result.bb:alphablitFrom(layer, rect.x - origin_x,
                     rect.y - origin_y, rect.cache_x or 0, rect.cache_y or 0,
                     rect.w, rect.h)
             end
+            -- Delivered only once the page actually has its ink: a blit that
+            -- raised reaches `on_error` below, and that has to still fail the
+            -- export rather than find it already delivered (audit P2-7).
+            delivered = true
             raster:close()
             done(result)
         end,

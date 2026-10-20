@@ -32,6 +32,74 @@ return function(ctx)
 
     t:describe("ink_surface_session / generic durability")
 
+    --[[--
+    A rebuild re-reads `MAX(seq)` from the database, and the database does not
+    know about a stroke still waiting in the queue. Taking that answer as it
+    stands hands the waiting stroke's seq to the next one, and the flush that
+    carries both then fails `UNIQUE(canvas_id, seq)` on every retry -- every
+    stroke after it lost at close (audit P0-1). A zoom, a rotation or a new
+    paper inside the queue's delay is all it takes.
+    ]]
+    t:case("a rebuild with a stroke still queued never hands its seq out again", function()
+        local session, store, sched = fixture()
+        session:open()
+        t:check(session:addStroke({ 100, 100, 200, 200 }, 2, 4, 1) ~= nil, "first drawn")
+        t:eq(session:flush(), true, "and committed")
+        t:check(session:addStroke({ 300, 300, 400, 400 }, 2, 4, 1) ~= nil, "second drawn, still queued")
+        local before = session:nextSeq()
+        session:setTransform(Transform.new{
+            logical_w = SURFACE.logical_w, logical_h = SURFACE.logical_h,
+            fit_rect = { x = 0, y = 0, w = 1500, h = 2100 },
+            clip_rect = { x = 0, y = 0, w = 1500, h = 2100 },
+        })
+        sched:drain()
+        t:eq(session:isReady(), true, "the rebuilt raster is ready")
+        t:check(session:nextSeq() >= before, "the rebuild did not rewind the sequence")
+        t:check(session:addStroke({ 500, 500, 600, 600 }, 2, 4, 1) ~= nil, "third drawn")
+        t:eq(session:flush(), true, "every queued stroke commits")
+        t:eq(session:saveFailed(), false, "and the surface is not stuck failing")
+        t:eq(#store:listStrokes(SURFACE.id), 3, "all three are stored")
+    end)
+
+    --[[--
+    The insert is already queued when the cache is told its row id. A refusal
+    there returns before the sequence moves on, so the next stroke would be
+    queued under the same seq and the flush could never commit (audit P1-5).
+    ]]
+    --[[--
+    An eraser repairs the same neighbourhood sample after sample. Its repairs
+    read neighbours' chunks through the gesture's LRU, so a stored stroke
+    crossing the cut is read from SQLite once per gesture, not once per pen
+    sample inside the callback (audit P2-5).
+    ]]
+    t:case("an eraser gesture reads a crossing neighbour once, not per sample", function()
+        local session, store = fixture()
+        session:open()
+        session:addStroke({ 100, 100, 300, 100, 500, 100 }, 3, 4, 1)
+        session:addStroke({ 400, 50, 400, 150 }, 2, 4, 1)
+        t:eq(session:flush(), true, "both committed, points dropped from memory")
+        local before = store.calls.stroke_chunk
+        local ctx = session:beginErase()
+        for x = 120, 220, 20 do session:eraseAt(x, 100, 6, ctx) end
+        session:endErase(ctx)
+        local reads = store.calls.stroke_chunk - before
+        t:check(reads <= 2, "the cut stroke and its neighbour, each read once (" .. reads .. " reads)")
+    end)
+
+    t:case("a stroke that is queued always consumes its seq", function()
+        local session = fixture()
+        session:open()
+        local seq = session:nextSeq()
+        local cache = session:cache()
+        local mark = cache.markPersisted
+        cache.markPersisted = function() return nil, "probe" end
+        session.queue.realId = function() return 999 end
+        session:addStroke({ 100, 100, 200, 200 }, 2, 4, 1)
+        cache.markPersisted = mark
+        session.queue.realId = nil
+        t:check(session:nextSeq() > seq, "the seq the queued stroke took is not handed out again")
+    end)
+
     t:case("erase fragments inherit visual order without repainting above later ink", function()
         local session, store = fixture()
         session:open()

@@ -161,11 +161,21 @@ return function(ctx)
 
     t:case("the sheet menu is off without a session", function()
         ctx.reset()
-        local p = support.newPlugin(ctx.JustDraw, env, {})
+        local p = support.newPlugin(ctx.JustDraw, env, {
+            document = support.newDocument{},
+        })
         env.UIManager:flush()
         local item = ctx.menuItem(p, "Drawing sheet")
-        t:check(item ~= nil, "the entry is there")
-        t:eq(item.enabled_func(), false, "and greyed out")
+        t:check(item ~= nil, "a reflowable book has the entry")
+        t:eq(item.enabled_func(), false, "greyed out until its session opens")
+    end)
+
+    t:case("a fixed layout has no sheet row at all", function()
+        ctx.reset()
+        local p = support.newPlugin(ctx.JustDraw, env, { paging = true })
+        env.UIManager:flush()
+        t:eq(ctx.menuItem(p, "Drawing sheet"), nil,
+            "absent, not greyed: a PDF can never hold a sheet (UX-3)")
     end)
 
     t:case("the sheet menu is on with one", function()
@@ -798,6 +808,28 @@ return function(ctx)
     -- =================================================================
     t:describe("main / drawing on a sheet")
 
+    --[[--
+    Undo and Redo show whether they would do anything, rather than answering
+    a tap with "Nothing to undo" (audit UX-4) -- and they follow the sheet as
+    strokes come and go, not only when the bar happens to be rebuilt.
+    ]]
+    t:case("the sheet's Undo and Redo show what they would do", function()
+        local p = canvasPlugin()
+        openForPen(p)
+        local bar = p.bar
+        t:eq(bar.undo_btn.enabled, false, "nothing to undo on a fresh sheet")
+        t:eq(bar.redo_btn.enabled, false, "nor to redo")
+        penDown(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 40, SHEET.y + 40)
+        penLift(p, SHEET.x + 40, SHEET.y + 40)
+        -- Refreshed on the tick after the lift, never inside the pen callback.
+        env.UIManager:flush()
+        t:eq(bar.undo_btn.enabled, true, "a stroke can be taken back")
+        p:onJustDrawUndo()
+        t:eq(bar.undo_btn.enabled, false, "and once it is, Undo has nothing left")
+        t:eq(bar.redo_btn.enabled, true, "while Redo can bring it back")
+    end)
+
     t:case("the pen inks on the sheet and the stroke is queued on lift", function()
         local p = canvasPlugin()
         openForPen(p)
@@ -863,6 +895,32 @@ return function(ctx)
             "fallback coverage is copied and refreshed")
     end)
 
+    --[[--
+    A framebuffer whose fast refresh waits for the display pipeline says so
+    with `mech_wait_update_mdp` (koreader-base e5b068ce). A wait per live box
+    with the pen reporting is the blocking refresh ADR-26 forbids, so live ink
+    rides `ui` there whatever the preference says. Asked of the capability,
+    never of a model.
+    ]]
+    t:case("live ink never rides a fast refresh that blocks", function()
+        local p = canvasPlugin()
+        openForPen(p)
+        Device.screen.mech_wait_update_mdp = function() return 0 end
+        local mark = #Device.screen.refreshes
+        penDown(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 40, SHEET.y)
+        penLift(p, SHEET.x + 40, SHEET.y)
+        Device.screen.mech_wait_update_mdp = nil
+        local kinds = {}
+        for i = mark + 1, #Device.screen.refreshes do
+            kinds[#kinds + 1] = Device.screen.refreshes[i][1]
+        end
+        kinds = table.concat(kinds, ",")
+        t:check(kinds:find("fast", 1, true) == nil, "no fast refresh: " .. kinds)
+        t:check(kinds:find("ui", 1, true) ~= nil, "ui instead")
+        t:eq(p:liveFast(), true, "and the preference is untouched once it no longer blocks")
+    end)
+
     t:case("gray ink refreshes ride ui: grayscale, and no fence under the pen", function()
         -- On device the fast refresh is forced monochrome and drops gray
         -- (ADR-36) -- but partial is REAGL, whose completion fence with the
@@ -905,12 +963,21 @@ return function(ctx)
 
         p:setPenStyle(1)
         mark = #Device.screen.refreshes
-        penDown(p, SHEET.x, SHEET.y)
-        penFrame(p, SHEET.x + 40, SHEET.y)
-        penLift(p, SHEET.x + 40, SHEET.y)
+        penDown(p, SHEET.x + 20, SHEET.y + 30)
+        penFrame(p, SHEET.x + 20, SHEET.y + 50)
+        penLift(p, SHEET.x + 20, SHEET.y + 50)
         t:check(kindsAfter(mark):find("fast", 1, true) == nil
             and kindsAfter(mark):find("partial", 1, true) == nil,
-            "a sheet holding gray ink refreshes even pen boxes through ui")
+            "a pen box that crosses the gray stroke refreshes through ui")
+
+        -- Gray is asked of the box, not the sheet: black ink well away from
+        -- the graphite keeps DU (audit, stroke quality).
+        mark = #Device.screen.refreshes
+        penDown(p, SHEET.x + 300, SHEET.y)
+        penFrame(p, SHEET.x + 340, SHEET.y)
+        penLift(p, SHEET.x + 340, SHEET.y)
+        t:check(kindsAfter(mark):find("fast", 1, true) ~= nil,
+            "a pen box far from any gray keeps the fast refresh: " .. kindsAfter(mark))
 
         p:setEraser(true)
         mark = #Device.screen.refreshes
@@ -1010,6 +1077,44 @@ return function(ctx)
             "toast uncover consumes the pending repaint")
     end)
 
+    t:case("a toast in a corner does not hide ink elsewhere on the sheet", function()
+        local p = canvasPlugin()
+        p:openCanvasHere()
+        local tr = p.session:transform()
+        local sx, sy = tr:fromCache(100, 100)
+        local toast = { toast = true, handleEvent = function() return false end,
+            dimen = { x = sx + 200, y = sy + 200, w = 50, h = 20 } }
+        env.UIManager:show(toast)
+        local before = #Device.screen.bb.blits
+        p:blitCanvasBox({ x = 100, y = 100, w = 10, h = 10 }, tr)
+        t:check(#Device.screen.bb.blits > before, "ink away from the toast is drawn")
+        t:eq(p.canvas_pending_repaint, nil, "nothing held back")
+        toast.dimen = { x = sx + 2, y = sy + 2, w = 50, h = 20 }
+        before = #Device.screen.bb.blits
+        p:blitCanvasBox({ x = 100, y = 100, w = 10, h = 10 }, tr)
+        t:eq(#Device.screen.bb.blits, before, "ink under the toast waits for it")
+        env.UIManager:close(toast)
+    end)
+
+    t:case("an uncover with the pen still down never asks for partial", function()
+        local p = canvasPlugin()
+        local overlay = openForPen(p)
+        local cache = p.session:cache()
+        penDown(p, SHEET.x, SHEET.y)
+        penFrame(p, SHEET.x + 40, SHEET.y + 40)
+        cache.generation = cache.generation + 1
+        local modal = { handleEvent = function() return true end }
+        env.UIManager:show(modal)
+        penFrame(p, SHEET.x + 60, SHEET.y + 60)
+        env.UIManager:close(modal)
+        local before_dirty = #env.UIManager.dirty
+        overlay:paintTo(Device.screen.bb, 0, 0)
+        local dirty = env.UIManager.dirty[before_dirty + 1]
+        t:check(dirty ~= nil, "the uncover asked for a refresh")
+        t:eq(dirty and dirty[2], "ui", "and not partial, with the pen still down")
+        penLift(p, SHEET.x + 60, SHEET.y + 60)
+    end)
+
     t:case("canvas backpressure repairs ink and recovers after urgent commit", function()
         local p = canvasPlugin()
         openForPen(p)
@@ -1029,7 +1134,7 @@ return function(ctx)
         env.UIManager:flush()
         t:eq(surface:pendingWrites(), 0, "urgent action committed the admitted work")
         t:eq(#env.notifications, 1, "one deferred warning is shown")
-        t:check(env.notifications[1]:find("write queue is busy", 1, true) ~= nil,
+        t:check(env.notifications[1]:find("still being saved", 1, true) ~= nil,
             "warning names the recoverable condition")
 
         penDown(p, SHEET.x, SHEET.y + 80)
@@ -1117,7 +1222,11 @@ return function(ctx)
         t:eq(input.stylus_callback, callback,
             "callback identity survives until the safe tick")
         env.UIManager:flush()
-        t:eq(input.stylus_callback, nil, "safe tick removes callback")
+        -- The pen on slot 5 is still down: held to its lift (audit P2-4).
+        t:eq(input.stylus_callback, callback, "the held contact keeps the callback")
+        callback(input, { slot = 5, id = -1 })
+        env.UIManager:flush()
+        t:eq(input.stylus_callback, nil, "safe tick after the lift removes callback")
         t:eq(p.drawing, false, "visible drawing state follows teardown")
         t:eq(p.router:touchCount(), 0,
             "lease teardown releases the same-frame palm latch")
@@ -1238,6 +1347,10 @@ return function(ctx)
         t:eq(continued, true,
             "a later sample of the same contact is safe: " .. tostring(continue_err))
         env.UIManager:flush()
+        -- The eraser's next frame arrived while the capture was already inert
+        -- and went to GestureDetector, which now owns that contact: holding
+        -- it on would take its lift away and strand a hold timer. Nothing is
+        -- held, so the callback goes on the safe tick (audit P2-4 review).
         t:eq(input.stylus_callback, nil, "it unhooks on the safe tick")
         t:eq(p.drawing, false, "the failed sheet no longer captures")
         t:eq(p.bar.draw_btn.text, "Retry", "recovery remains reachable")

@@ -228,14 +228,48 @@ return function(ctx)
     -- =================================================================
     t:describe("main / legacy ink / the gate is true")
 
-    t:case("Draw in an EPUB with no sheet is refused and creates nothing", function()
+    --[[--
+    Draw in a reflowable book means the sheet here (audit P0-3). The refusal
+    this used to be pointed the reader at the menu path that does exactly
+    this, from the button they had just pressed -- and the selection menu's
+    entry led to the same dead end. The sidecar stays frozen either way:
+    the ink lands on the sheet.
+    ]]
+    t:case("Draw in an EPUB with no sheet opens the sheet here", function()
         local p, store = epubPlugin()
         t:eq(p:legacyInkFrozen(), true, "the runtime has the new surfaces")
         p:setDrawing(true)
+        env.UIManager:flush()
+        t:eq(#store.canvases, 1, "a sheet was made at this position")
+        t:eq(p.canvas_open, true, "and opened")
+        t:eq(p.drawing, true, "with drawing on")
+        t:check(env.notifications[#env.notifications] ~= FROZEN_EPUB,
+            "and nobody was sent to the menu for it")
+    end)
+
+    t:case("why a book has no sheets is said when the reader asks, not when it opens", function()
+        local p = epubPlugin()
+        local before = #env.notifications
+        p.session = nil
+        p.canvas_open_error = "database_conflict"
+        t:eq(#env.notifications, before, "opening said nothing")
+        p:setDrawing(true)
+        local said = env.notifications[#env.notifications]
+        t:check(said and said:find("Both JustDraw and FingerInk", 1, true),
+            "Draw names the actual reason: " .. tostring(said))
+        p:onJustDrawSheet()
+        said = env.notifications[#env.notifications]
+        t:check(said and said:find("Both JustDraw and FingerInk", 1, true),
+            "and so does the sheet action")
+    end)
+
+    t:case("an EPUB that cannot hold a sheet is still told where sheets live", function()
+        local p, store = epubPlugin()
+        p.session.available = false
+        p:setDrawing(true)
         t:eq(p.drawing, false, "drawing did not start")
-        t:eq(env.notifications[#env.notifications], FROZEN_EPUB,
-            "and the reader is told where the ink goes now")
-        t:eq(#store.canvases, 0, "no sheet was created behind their back")
+        t:eq(env.notifications[#env.notifications], FROZEN_EPUB, "the reason is said")
+        t:eq(#store.canvases, 0, "no sheet was created")
         t:eq(p.input_lease, nil, "and no capture was installed")
     end)
 
@@ -409,6 +443,7 @@ return function(ctx)
 
     t:case("the frozen entries replace the old two and name what goes", function()
         local p = pdfPlugin{ canvases = { pageRow(1, 1) } }
+        p.store:add(3, stroke(10, 10))
         t:eq(ctx.menuItem(p, "Clear this page"), nil, "the old entry is gone")
         t:eq(ctx.menuItem(p, "Clear whole document"), nil, "and so is the other")
         t:check(ctx.menuItem(p, "Clear legacy ink on this stored page") ~= nil,
@@ -417,13 +452,23 @@ return function(ctx)
             "and so does the book entry")
     end)
 
-    t:case("both entries are grey with nothing stored", function()
+    --[[--
+    Absent rather than greyed (audit UX-3): a reader who never had legacy ink
+    has nothing to manage, and two permanently grey rows were a promise about
+    ink they do not have.
+    ]]
+    t:case("with nothing stored there is no legacy row at all", function()
         local p = pdfPlugin()
+        t:eq(ctx.menuItem(p, "Legacy ink"), nil, "no submenu")
+        t:eq(ctx.menuItem(p, "Clear all legacy ink"), nil, "and no entry inside it")
+    end)
+
+    t:case("with legacy ink stored the page entry follows the page", function()
+        local p = pdfPlugin()
+        p.store:add(3, stroke(10, 10))
         local page = ctx.menuItem(p, "Clear legacy ink on this stored page")
         local all = ctx.menuItem(p, "Clear all legacy ink")
-        t:eq(page.enabled_func(), false, "no ink on this page")
-        t:eq(all.enabled_func(), false, "and none in the book")
-        p.store:add(3, stroke(10, 10))
+        t:check(ctx.menuItem(p, "Legacy ink") ~= nil, "the submenu is there")
         t:eq(page.enabled_func(), false, "ink on another page does not enable this one")
         t:eq(all.enabled_func(), true, "but it does enable the book entry")
         p.store:add(1, stroke(10, 10))

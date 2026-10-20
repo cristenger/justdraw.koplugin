@@ -103,6 +103,7 @@ return function(ctx)
             end,
             flush = opts.no_flush and nil or function()
                 log.order[#log.order + 1] = "flush"
+                if opts.flush_raises then error("flush boom") end
                 if opts.flush_fail then return nil, "ink not saved" end
                 return true
             end,
@@ -122,6 +123,19 @@ return function(ctx)
     end
 
     -- =================================================================
+    t:describe("export / job / what the encoder says")
+
+    t:case("an encoder that reports a failed write is a failure, with its message", function()
+        t:eq(Export.imageWriteResult(true, nil), true, "an older writer that says nothing")
+        t:eq(Export.imageWriteResult(true, true), true, "a writer that says it wrote")
+        local ok, err = Export.imageWriteResult(true, false, "No space left on device")
+        t:eq(ok, nil, "a writer that says it failed, inside writeToFile's pcall")
+        t:eq(err, "No space left on device", "keeps the encoder's own words")
+        ok, err = Export.imageWriteResult(false, "boom")
+        t:eq(ok, nil, "a raise")
+        t:eq(err, "boom", "with the raise's message")
+    end)
+
     t:describe("export / job / naming and collisions")
 
     t:case("one file needs no number; several are numbered to their total", function()
@@ -458,6 +472,14 @@ return function(ctx)
         t:check(not Export.isRunning(), "nothing is running now")
     end)
 
+    t:case("a flush that raises refuses the export instead of raising", function()
+        local ok, f = pcall(fixture, { flush_raises = true })
+        t:eq(ok, true, "nothing escapes into the dialog's callback: " .. tostring(f))
+        t:eq(f and f.job, nil, "the export never started")
+        t:eq(f and f.err, "flush_failed", "and says the ink was not saved")
+        t:check(not Export.isRunning(), "the running slot is free")
+    end)
+
     t:case("a rename failure is a failure, and its temporary goes", function()
         local temp = DIR .. "/" .. PREFIX .. "TOKEN-1.png"
         local f = fixture{ fail_rename = { [temp] = "cross-device link" } }
@@ -465,6 +487,39 @@ return function(ctx)
         t:eq(f.log.result.status, "failed", "failed")
         t:eq(f.log.result.error, "rename_failed", "reason")
         t:eq(#f.fs.temporaries(PREFIX), 0, "no debris")
+    end)
+
+    --[[--
+    The collision question is asked once, at the start, and a long export
+    gives the world time to change. `rename` replaces whatever is at the
+    target without asking, so a file that appeared since -- a sync, another
+    export, the reader in another app -- was silently overwritten by images
+    and PDFs, though the Xournal++ path already refused (audit P1-6).
+    ]]
+    for _, format in ipairs({ "png", "pdf" }) do
+        t:case(format .. ": a file that appears at the target meanwhile is never replaced", function()
+            local f = fixture{ format = format, items = { { page = 1 } }, manual_render = true }
+            local target = f.job.plan.targets[1]
+            f.sched:drain()
+            f.fs.files[target] = "SOMEONE ELSE'S"
+            f.resume[1]()
+            f.sched:drain()
+            t:eq(f.log.result.status, "failed", "the export stops")
+            t:eq(f.log.result.error, "destination_taken", "and says why")
+            t:eq(f.fs.files[target], "SOMEONE ELSE'S", "the file that appeared is untouched")
+            t:eq(#f.fs.temporaries(PREFIX), 0, "and no temporary is left behind")
+        end)
+    end
+
+    t:case("an agreed overwrite still replaces the target", function()
+        local f = fixture{ format = "png", items = { { page = 1 } }, manual_render = true,
+            overwrite = true }
+        local target = f.job.plan.targets[1]
+        f.sched:drain()
+        f.fs.files[target] = "OLD"
+        f.resume[1]()
+        f.sched:drain()
+        t:eq(f.log.result.status, "done", "the reader agreed to replace it")
     end)
 
     t:case("a renderer that cannot produce a page ends the job with its reason", function()

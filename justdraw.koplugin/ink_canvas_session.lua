@@ -151,8 +151,10 @@ function Session:open()
     -- synchronous listing failure now arrives at `_indexFailed` a tick or more
     -- later (ADR-42). Only the sheet count is still asked for here, so this
     -- refusal is only ever that one query failing.
+    -- A book with no row has no sheets either: nothing to list. Its row is
+    -- made with its first sheet (`createHere`), never by opening it (UX-2).
     local indexed, index_err
-    if empty_read_only then indexed = self.index:openEmpty()
+    if empty_read_only or handle.book_pending then indexed = self.index:openEmpty()
     else indexed, index_err = self.index:open() end
     if not indexed then
         self.index = nil
@@ -186,15 +188,32 @@ function Session:_indexFailed(reason)
     if self.plugin and self.plugin.refreshCanvasPlacement then
         self.plugin:refreshCanvasPlacement()
     end
-    self:_closeOwnedRepository()
+    -- An open sheet still writes through this connection; it goes with the
+    -- session in `close`. Closing it here left that sheet taking ink it could
+    -- only fail to save, and `closeCanvas` indexing a repository that was gone.
+    if not self.canvas then self:_closeOwnedRepository() end
+    -- Kept for whoever asks later why there are no sheets: the reader who
+    -- presses Draw or opens the menu after this (ADR-62).
+    self.unavailable_reason = "list_failed"
     self.notify(MESSAGES.list_failed)
 end
 
+--[[--
+The book cannot have sheets. Said when the reader reaches for one, not when
+the book opens: a conflict or an unreadable database is not news to somebody
+who only came to read, and it used to arrive on every book opened (UX-2). The
+caller keeps the reason and asks `messageFor` when it is time to say it.
+]]
 function Session:_unavailable(reason)
     self.available = false
     self:_closeOwnedRepository()
-    self.notify(MESSAGES[reason])
+    self.unavailable_reason = reason
     return nil, reason
+end
+
+--- The sentence for a reason this session refused with, or nil.
+function Session.messageFor(reason)
+    return reason and MESSAGES[reason] or nil
 end
 
 function Session:_closeOwnedRepository()
@@ -432,6 +451,13 @@ function Session:createHere(page)
     -- The paper under the sheet's header, not the screen: a screen-shaped
     -- canvas is fitted beneath the header narrower than the screen (ADR-51).
     spec.logical_w, spec.logical_h = Overlay.paperSize()
+    if not self.book_id then
+        -- The first sheet in this book is the first thing that needs its row.
+        local book_id, berr = BookDatabase.ensureBook(self.repository, self.identity, self.file)
+        if not book_id then return nil, berr or "no_identity" end
+        self.book_id = book_id
+        self.index.book_id = book_id
+    end
     local canvas, cerr = self.repository:createCanvas(self.book_id, spec)
     if not canvas then return nil, cerr end
 
@@ -615,7 +641,12 @@ function Session:closeCanvas()
         -- This is ordering metadata, not ink durability. Do it only after the
         -- queue committed, and never keep a safely written canvas open merely
         -- because its recency marker could not be updated.
-        local touched, terr = self.repository:touchCanvas(self.canvas.id)
+        local touched, terr
+        if self.repository then
+            touched, terr = self.repository:touchCanvas(self.canvas.id)
+        else
+            terr = "closed"
+        end
         if not touched then
             logger.warn("JustDraw: could not update canvas recency:", terr)
         end

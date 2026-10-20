@@ -187,6 +187,13 @@ return function(ctx)
         t:eq(ok, false, "flashui is not a live mode")
     end)
 
+    t:case("a framebuffer announces a blocking fast refresh by capability", function()
+        local Live = require("ink_live_refresh")
+        t:eq(Live.fastBlocks({}), false, "no flag, no wait")
+        t:eq(Live.fastBlocks({ mech_wait_update_mdp = function() end }), true,
+            "the driver's wait is seen")
+    end)
+
     t:describe("ink_live_refresh / lifetime")
 
     t:case("flush is explicit at a stroke end and idempotent", function()

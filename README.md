@@ -41,7 +41,8 @@ Stylus drawing, page notes and drawing sheets need KOReader v2026.07 or newer.
 On older development builds only the plugin's original mode works: drawing
 directly on the screen with a finger, saved alongside the book's settings. That
 older ink is still shown and exported on newer builds, but nothing is added to
-it any more; **Clear all legacy ink** removes it.
+it any more; **JustDraw → Legacy ink → Clear all legacy ink** removes it (the
+entry appears only while there is some).
 
 ## Install
 
@@ -82,8 +83,9 @@ and stays with it: turn the page and you get that page's own layer. Manage them
 under **JustDraw → Page notes**, which offers *Delete this page note* and
 *Delete all page notes*.
 
-**In an EPUB,** open a panel first: **JustDraw → Drawing sheet → Open sheet
-here**. The sheet is anchored to the passage you were reading. Its controls sit
+**In an EPUB,** you draw on a sheet: **Start drawing**, the selection menu's
+**JustDraw** button, or **JustDraw → Drawing sheet → Open sheet here** opens one
+at the page you are reading. The sheet is anchored to that passage. Its controls sit
 across its top, above the paper, so neither hand rests on them:
 **Draw** and a ✕ that puts the sheet away, with the current pen between them,
 then icons for **Pen · Eraser · Edit · Undo · Redo · More**. **More** starts
@@ -97,9 +99,13 @@ page it belongs to and it stops accepting ink. **JustDraw → Drawing sheet** th
 offers both ways out: **Go to this sheet's page**, or **Open a sheet here
 instead**.
 
-Other useful entries in the same menu: **Toolbar side** (left or right, for the
-reader's toolbar; a sheet keeps its controls on top), **Input mode**
-(*Automatic*, *Stylus* or *Finger*) and **Drawing refresh**.
+The settings live one level down, in **JustDraw → Settings**: **Pen style**,
+**Pen width**, **Toolbar side** (left or right, for the reader's toolbar; a
+sheet keeps its controls on top), **Show JustDraw when text is selected**,
+**Input mode** (*Automatic*, *Stylus* or *Finger*), **Drawing refresh**, **Fast
+refresh while drawing** and **Stylus diagnostics**. In a reflowable book, **Start drawing** — like the
+selection menu's **JustDraw** button — opens a drawing sheet at the page you
+are reading and starts drawing on it.
 
 ## Notebooks
 
@@ -186,8 +192,9 @@ sheet at end** extends it and **Organize sheets…** reorders them.
 
 ## Pens and erasing
 
-Six styles, each in **Thin**, **Medium** or **Thick**: **Ink pen**,
-**Graphite**, **Marker**, **Round ink**, **Highlighter** and **Textured
+Six styles, each in **Thin**, **Medium** or **Thick**: **Round ink** (the
+default until you choose another; where only the original direct ink exists it
+draws as the ink pen), **Ink pen**, **Graphite**, **Marker**, **Highlighter** and **Textured
 graphite**. The highlighter is black at 20% opacity and leaves the text under it
 readable. Your choice is shared between notebooks and documents.
 
@@ -273,7 +280,7 @@ turn the setting off and they come back.
 
 ### Reporting a problem
 
-**JustDraw → Stylus diagnostics** records a short trace of the plugin's pen
+**JustDraw → Settings → Stylus diagnostics** records a short trace of the plugin's pen
 decisions into KOReader's log, then stops on its own. If you also switch
 KOReader's own debug logging on, switch it off again once you have reproduced
 the problem: it records all raw input and grows very quickly.

@@ -64,6 +64,34 @@ function Stack.visualAbove(widget)
 end
 
 --[[--
+The window above `widget` that actually covers the screen box `x, y, w, h`.
+
+`visualAbove` answers for the whole window, and that is right for a modal:
+anything written to the framebuffer under it punches through. A toast is not a
+modal. It sits in a corner, so treating it as an occluder hid every live stroke
+on the sheet for as long as one was up -- the plugin's own backpressure and
+budget notices included (audit P2-1). A toast covers only what its `dimen`
+says; a toast that has not been laid out yet still covers everything, because
+not knowing where it is is not the same as knowing it is elsewhere.
+]]
+function Stack.coveringAbove(widget, x, y, w, h)
+    local stack = UIManager._window_stack
+    local covering
+    for i = #stack, 1, -1 do
+        local above = stack[i].widget
+        -- Only an answer once `widget` is found below it: a widget not on
+        -- the stack at all is covered by nothing, as `visualAbove` says.
+        if above == widget then return covering end
+        if not covering then
+            local d = above.toast and above.dimen
+            local clear = d and d.x and d.y and d.w and d.h
+                and (d.x + d.w <= x or x + w <= d.x or d.y + d.h <= y or y + h <= d.y)
+            if not clear then covering = above end
+        end
+    end
+end
+
+--[[--
 Pass an input event on to the window underneath, if this is one of the events
 that would otherwise stop here.
 

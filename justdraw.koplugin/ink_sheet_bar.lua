@@ -110,8 +110,9 @@ function SheetBar:init()
     -- Six tools, as before (D-S1, ADR-57): Document notes and the height
     -- stop moved to the top of More, so the bar keeps its height and no sheet
     -- changes shape.
+    -- The selected pen opens its settings whether or not Draw is on (UX-5).
     self.pen_btn = tool(_("Pen"), 1, function()
-        if (p.tool or "pen") == "pen" and not p.eraser and p.drawing then p:showPenSettingsDialog()
+        if (p.tool or "pen") == "pen" and not p.eraser then p:showPenSettingsDialog()
         else p:setTool("pen") end
     end, "pen")
     self.eraser_btn = tool(_("Eraser"), 2, function() p:setEraser(true) end, "eraser")
@@ -152,6 +153,10 @@ function SheetBar:update(refresh)
     ToolButton.setState(self.edit_btn, edit_label or _("Edit"), edit_label ~= nil)
     self:_setStatus(tool == "eraser" and _("Eraser") or edit_label or label)
 
+    -- Undo and Redo show whether they would do anything (audit UX-4).
+    local can_undo = type(p.canUndo) == "function" and p:canUndo() or false
+    local can_redo = type(p.canRedo) == "function" and p:canRedo() or false
+    self.undo_shown, self.redo_shown = can_undo, can_redo
     if self.note_context and session then
         local ready = cache and cache:isReady()
         self.draw_btn:enableDisable(p.drawing or session:loadFailed()
@@ -159,9 +164,12 @@ function SheetBar:update(refresh)
         local editing = p.drawing and ready and session:isWritable() and not p.canvas_off_page
         self.pen_btn:enableDisable(editing)
         self.eraser_btn:enableDisable(editing)
-        self.undo_btn:enableDisable(editing)
+        self.undo_btn:enableDisable(editing and can_undo)
         self.edit_btn:enableDisable(editing)
-        self.redo_btn:enableDisable(editing)
+        self.redo_btn:enableDisable(editing and can_redo)
+    else
+        self.undo_btn:enableDisable(can_undo)
+        self.redo_btn:enableDisable(can_redo)
     end
     if refresh then UIManager:setDirty(self.parent, "ui", self.dimen) end
 end

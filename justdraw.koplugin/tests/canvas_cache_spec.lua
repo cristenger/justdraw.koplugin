@@ -271,6 +271,25 @@ return function(ctx)
         t:eq(pen_only:hasGrayInk(), false, "a pen-only sheet keeps the fast path")
     end)
 
+    t:case("gray is known by where it is, not only whether it is", function()
+        local graphite = bar(200, 200)
+        graphite.tool = 65
+        local cache = readyCache{ strokes = { bar(10, 10), graphite } }
+        local tr = cache.transform
+        local gx, gy = tr:toCache(200, 200)
+        t:eq(cache:hasGrayInkIn(gx - 2, gy - 2, gx + 2, gy + 2), true,
+            "a box on the graphite asks for the grayscale pass")
+        local fx, fy = tr:toCache(10, 10)
+        t:eq(cache:hasGrayInkIn(fx - 2, fy - 2, fx + 2, fy + 2), false,
+            "a box far from it keeps the fast pass")
+        local live = readyCache()
+        live:drawSegment(400, 400, 410, 400, 4, "gray_6")
+        local lx, ly = live.transform:toCache(405, 400)
+        t:eq(live:hasGrayInkIn(lx - 1, ly - 1, lx + 1, ly + 1), true,
+            "a live gray segment marks where it painted")
+        t:eq(live:hasGrayInkIn(0, 0, 4, 4), false, "and nowhere else")
+    end)
+
     t:case("a matching complete live token registers without repainting", function()
         local cache = readyCache()
         local bb = cache:buffer()
@@ -1036,5 +1055,37 @@ return function(ctx)
         cache.by_id = by_id
         t:eq(#out, 400, "every stroke once")
         t:check(reads <= 400 + steps, "each entry read about once, not once per call (" .. reads .. " reads)")
+    end)
+
+    --[[--
+    A COMMIT between two turns re-keys a stroke the walk has already passed:
+    remove and insert into the same bucket, so its length is unchanged while
+    every later entry has shifted one place down. Resuming by position then
+    skips one stroke, and the lasso leaves it behind (audit P1-4).
+    ]]
+    t:case("a re-key between turns never makes the walk skip a stroke", function()
+        local strokes = {}
+        for i = 1, 10 do strokes[i] = bar(20, 20, 4, 4) end
+        local cache = readyCache{ strokes = strokes }
+        local cursor = assert(cache:openQuery(0, 0, 60, 60))
+        local out = {}
+        cursor:next(5, out)
+        local first = out[1]
+        local old_id = first.id
+        cache.grid:remove(old_id)
+        cache.by_id[old_id] = nil
+        first.id = old_id + 100000
+        cache.by_id[first.id] = first
+        cache.grid:insert(first.id, first.min_x, first.min_y, first.max_x, first.max_y)
+        local steps = 0
+        repeat
+            local _, done = cursor:next(5, out)
+            steps = steps + 1
+        until done or steps > 100
+        local tokens = {}
+        for _, m in ipairs(out) do tokens[m.token] = true end
+        local count = 0
+        for _ in pairs(tokens) do count = count + 1 end
+        t:eq(count, 10, "all ten strokes reached the walk")
     end)
 end

@@ -65,13 +65,16 @@ Connect, if there is nothing connected yet, and resolve the book.
                       of its own to fake the file selection through
 
 Answers a handle -- `{ repository, owns_repository, book_id, empty_read_only,
-read_only }` -- or nil, one of `no_repository`, `database_conflict`,
-`no_identity`, and the underlying driver or lookup error as a third value for
-the log.
+read_only, book_pending }` -- or nil, one of `no_repository`,
+`database_conflict`, `no_identity`, and the underlying driver or lookup error
+as a third value for the log.
 
-`book_id` is nil only together with `empty_read_only`: a newer schema that has
-never heard of this book. There is nothing to read and this plugin must not
-insert the row, but browsing what is there is still fine.
+The book is looked up, never inserted, here. A reader who opens a book and
+never draws in it used to cost a `books` row, or an UPDATE of its path, on
+every open (audit UX-2). So `book_id` is nil when the book has no row yet:
+with `empty_read_only` on a newer schema this plugin must not write to, and
+with `book_pending` otherwise -- nothing to read, and the row is made by
+`ensureBook` when the first sheet or page note is created.
 
 A connection opened *here* is closed again when the book cannot be resolved,
 because nobody else has been told about it yet. One handed in is left alone:
@@ -105,16 +108,11 @@ function BookDatabase.open(opts)
 
     local identity = opts.identity or {}
     local read_only = repository.read_only == true
-    local book_id, err
-    if read_only then
-        book_id, err = repository:findBookId(
-            identity.partial_md5, identity.file_size)
-    else
-        book_id, err = repository:bookId(
-            identity.partial_md5, identity.file_size, opts.file)
-    end
+    local book_id, err = repository:findBookId(
+        identity.partial_md5, identity.file_size)
     local empty_read_only = read_only and err == "not_found"
-    if not book_id and not empty_read_only then
+    local book_pending = not read_only and err == "not_found"
+    if not book_id and not empty_read_only and not book_pending then
         logger.warn("JustDraw: no stable identity for this book:", err)
         BookDatabase.close{
             repository = repository,
@@ -129,7 +127,27 @@ function BookDatabase.open(opts)
         book_id = book_id,
         empty_read_only = empty_read_only,
         read_only = read_only,
+        book_pending = book_pending,
     }
+end
+
+--[[--
+The book's row, made now: the first sheet or page note in a book is the first
+thing that needs one. `bookId` inserts it, or answers the existing one if
+something else made it meanwhile, and records the path for diagnosis.
+]]
+function BookDatabase.ensureBook(repository, identity, file)
+    if not repository then return nil, "no_repository" end
+    if repository.read_only == true then return nil, "read_only" end
+    identity = identity or {}
+    local book_id, err = repository:bookId(identity.partial_md5, identity.file_size, file)
+    if book_id then return book_id end
+    -- `bookId` is a SELECT then an INSERT. Another process sharing this file
+    -- can insert the same book in between, and the INSERT then fails on
+    -- `UNIQUE(partial_md5, file_size)`: the row is there, so read it.
+    local found = repository:findBookId(identity.partial_md5, identity.file_size)
+    if found then return found end
+    return nil, err
 end
 
 --- Close a connection this seam opened. A repository that was handed in is

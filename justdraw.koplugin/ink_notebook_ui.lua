@@ -254,7 +254,7 @@ function NotebookUI:_editorCallbacks(editor, generation)
             editor:onStateChanged()
             local message
             if reason == "queue_backpressure" then
-                message = _("Stroke was not saved because the write queue is busy. Try again.")
+                message = _("That stroke was not kept: the ink before it is still being saved. Draw it again in a moment.")
             elseif reason == "point_budget" or reason == "sample_budget"
                 or reason == "operation_too_large" then
                 message = _("Stroke stopped because the pen contact did not end. Lift the pen and try again.")
@@ -345,7 +345,10 @@ function NotebookUI:openNotebook(item)
         set_drawing_refresh_ms = function(ms)
             return self.plugin:setDrawingRefreshInterval(ms)
         end,
-        get_live_fast = function() return self.plugin.live_fast end,
+        get_live_fast = function()
+            if type(self.plugin.liveFast) == "function" then return self.plugin:liveFast() end
+            return self.plugin.live_fast
+        end,
         get_rail_side = function() return self.plugin.notebook_rail_side end,
         show_stylus_diagnostics = function()
             return self.plugin:showDiagnostics("notebook")

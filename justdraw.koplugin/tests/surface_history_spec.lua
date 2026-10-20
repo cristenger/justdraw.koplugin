@@ -335,6 +335,26 @@ return function(ctx)
         t:eq(why, "batch_too_large", "is refused without I/O")
     end)
 
+    --[[--
+    With a history -- every sheet and notebook page -- a cut is a recorded
+    replacement, and its repaint reads neighbours through the gesture's LRU
+    too: a stored stroke crossing the cut is read once per gesture, not once
+    per pen sample inside the callback (audit P2-5, review).
+    ]]
+    t:case("a recorded erase reads a crossing neighbour once, not per sample", function()
+        local session, store = fixture()
+        session:addStroke({ 100, 100, 300, 100, 500, 100 }, 3, 4, 1)
+        session:addStroke({ 400, 50, 400, 150 }, 2, 4, 1)
+        t:eq(session:flush(), true, "both committed, points dropped from memory")
+        local before = store.calls.stroke_chunk
+        local ctx = session:beginErase()
+        t:check(ctx.group ~= nil, "the erase is recorded as one entry")
+        for x = 120, 220, 20 do session:eraseAt(x, 100, 6, ctx) end
+        session:endErase(ctx)
+        local reads = store.calls.stroke_chunk - before
+        t:check(reads <= 2, "the cut stroke and its neighbour, each read once (" .. reads .. " reads)")
+    end)
+
     t:describe("ink_surface_session / erase contact budget")
 
     t:case("a contact stops cutting at its budget, keeps its cuts and says so once", function()

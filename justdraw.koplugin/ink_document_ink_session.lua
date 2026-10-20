@@ -230,6 +230,15 @@ function Session:open()
     -- insert the row.
     local book_id = handle.book_id
     self.book_id = book_id
+    -- One COUNT now instead of one lookup per page turn for as long as the
+    -- book is read: a book with no page ink is not asked about page by page
+    -- (UX-2). A count that fails leaves the lookups on -- not knowing is not
+    -- the same as knowing there is none.
+    self.no_page_ink = false
+    if book_id and type(self.repository.countPageInkSurfaces) == "function" then
+        local n = self.repository:countPageInkSurfaces(book_id)
+        if tonumber(n) == 0 then self.no_page_ink = true end
+    end
 
     self.available = true
     self:_notifyState()
@@ -237,10 +246,14 @@ function Session:open()
     return true
 end
 
+--[[--
+Page notes are not possible in this book. Said when the reader reaches for
+them -- Draw repeats `document_open_error` -- and not when the book opens: the
+reason is not news to somebody who only came to read (UX-2).
+]]
 function Session:_unavailable(reason)
     self.available = false
     self:_closeOwnedRepository()
-    self.notify(MESSAGES[reason] or Session.FALLBACK_MESSAGE)
     self:_notifyState()
     return nil, reason
 end
@@ -452,9 +465,10 @@ end
 
 function Session:_loadPage()
     self.page_resolved = true
-    -- No book row means a newer schema that has never heard of this book:
-    -- there is nothing to find, and this plugin must not write one.
-    if not self.book_id then
+    -- No book row -- a newer schema that has never heard of this book, or a
+    -- book nobody has drawn in yet -- or a book with no page ink at all:
+    -- there is nothing to find on any page.
+    if not self.book_id or self.no_page_ink then
         self:_notifyState()
         return true
     end
@@ -778,9 +792,17 @@ function Session:ensureSurface()
     -- `units` is not written: what the numbers mean is a property of the
     -- document, re-derived wherever it matters, and a stored copy could only
     -- ever go stale (ADR-38).
+    if not self.book_id then
+        -- The first page note in this book is the first thing that needs its
+        -- row (UX-2).
+        local book_id, berr = BookDatabase.ensureBook(self.repository, self.identity, self.file)
+        if not book_id then return nil, berr or "no_identity" end
+        self.book_id = book_id
+    end
     local row, err = self.repository:createPageInkSurface(
         self.book_id, self.page_no, spec.logical_w, spec.logical_h)
     if not row then return nil, err end
+    self.no_page_ink = false
     return self:_openSurface(row)
 end
 

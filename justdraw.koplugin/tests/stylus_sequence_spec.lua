@@ -577,12 +577,31 @@ return function(ctx)
         t:eq(#log.points, 3, "next physical contact works")
     end)
 
+    --[[--
+    A pen resting still reports the same coordinate frame after frame. Those
+    frames are samples -- the sample cap counts them -- but they are not ink,
+    and counting them against the point budget threw away a whole slow stroke
+    after 8192 frames that held one point (audit P1-2).
+    ]]
+    t:case("a pen at rest spends samples, not the point budget", function()
+        local seq, log = harness{ max_open_points = 3 }
+        seq:feed(pen(1, 1, 1))
+        for _ = 1, 50 do seq:feed(pen(1, 1, 1)) end
+        seq:feed(pen(1, 2, 2))
+        for _ = 1, 50 do seq:feed(pen(1, 2, 2)) end
+        seq:feed(pen(1, 3, 3))
+        t:eq(log.aborts, 0, "a still pen never exhausts the point budget")
+        t:eq(#log.points, 3, "each distinct point is delivered once")
+        seq:feed(pen(1, 4, 4))
+        t:eq(log.aborts, 1, "the fourth distinct point is still over the budget")
+    end)
+
     t:case("sample cap counts duplicates and is effect-aware", function()
         local ink, ilog = harness{ max_contact_samples = 2 }
         ink:feed(pen(1, 1, 1))
         ink:feed(pen(1, 1, 1))
         ink:feed(pen(1, 1, 1))
-        t:eq(#ilog.points, 2, "duplicate over cap not delivered")
+        t:eq(#ilog.points, 1, "a repeated coordinate is a sample, never a second point")
         t:eq(ilog.aborts, 1, "ink repaired")
         t:eq(ink.sample_count, 2, "counter saturates")
         ink:feed(pen(1, 1, 1))
@@ -1076,7 +1095,12 @@ return function(ctx)
         t:eq(#kept, 1, "later slot fails open while capture is inert")
         t:eq(input.stylus_callback, callback, "callback remains installed in-frame")
         ctx.env.UIManager:flush()
-        t:eq(input.stylus_callback, nil, "callback unhooks on the safe tick")
+        -- Slot 4 is still down: the callback holds it to its lift rather than
+        -- handing the rest of the contact to GestureDetector (audit P2-4).
+        t:eq(input.stylus_callback, callback, "the held contact keeps the callback")
+        t:eq(callback(input, { slot = 4, id = -1 }), true, "its lift is still ours")
+        ctx.env.UIManager:flush()
+        t:eq(input.stylus_callback, nil, "callback unhooks on the tick after the lift")
     end)
 
     t:case("integration replay calls wrapped frame handler once per SYN", function()
@@ -1185,6 +1209,92 @@ return function(ctx)
         t:eq(seq:isLifecycleBlocked(), false, "idle again")
         seq:feed(pen(1, 300, 300)); seq:feed(pen(1, 310, 310))
         t:eq(log.starts, 2, "and the next down is an ordinary contact")
+    end)
+
+    --[[--
+    A lift can go missing with no overflow at all: `Input:inhibitInput` voids
+    the handler that would have written it, and a dialog that flushes events
+    on show, a Trapper, or a short inhibit after a re-render all do that. The
+    steer's hook still runs, so the pen's own BTN_TOUCH edges still count:
+    two of them inside one owned contact are a lift and a down this callback
+    never saw, and the frames after them belong to a new contact (audit P1-3).
+    ]]
+    t:case("a lift and a down nobody saw end the stroke without a drop", function()
+        local seq, log, c = synced()
+        c.edges = 1                                -- BTN_TOUCH 1 of the first contact
+        seq:feed(pen(1, 10, 10)); seq:feed(pen(1, 20, 20)); seq:feed(pen(1, 30, 30))
+        t:eq(#log.points, 3, "the first stroke")
+        c.edges = 3                                -- BTN_TOUCH 0 and 1, both unseen
+        seq:feed(pen(1, 400, 400))
+        seq:feed(pen(1, 410, 420))
+        t:eq(log.finishes, 1, "the first stroke was finished where it stood")
+        t:eq(log.starts, 2, "and a second contact began")
+        t:eq(#c.desyncs, 0, "with no overflow reported")
+        local joined = false
+        for _, p in ipairs(log.points) do
+            if p.first and p.x == 400 then joined = true end
+        end
+        t:check(joined or log.points[#log.points].x >= 400,
+            "the new contact's ink starts where the pen is now")
+        for i = 2, #log.points do
+            local a, b = log.points[i - 1], log.points[i]
+            t:check(not (a.x == 30 and b.x >= 400 and not b.first),
+                "no segment joins the two strokes")
+        end
+    end)
+
+    --[[--
+    A contact held after a host failure is measured from where it was held,
+    not from the contact before it: otherwise the edges that ended the old
+    contact read as a blind lift inside the held one, and ink resumed mid
+    contact with no lift at all (review of audit P1-3).
+    ]]
+    t:case("a contact held after a failed end never resumes ink mid-contact", function()
+        -- A geometry that accepts every frame, so the only thing that can keep
+        -- ink from resuming is the boundary rule itself.
+        local Sequence = require("ink_stylus_sequence")
+        local drops, edges, fail_end, inked = 0, 0, false, 0
+        local seq = Sequence.new{
+            wacom_protocol = false,
+            geometry = {
+                observe = function(_, x, y) return "accept", x, y end,
+                onLift = function() return "discard" end,
+                reset = function() end, note = function() end,
+            },
+            classify = function() return "draw", "ink" end,
+            on_contact_start = function() return true end,
+            on_point = function() inked = inked + 1; return "continue" end,
+            on_finish = function() return true end,
+            on_abort = function() return true end,
+            on_contact_end = function()
+                if fail_end then fail_end = false; return nil, "boom" end
+                return true
+            end,
+            sync_counts = function() return drops, edges end,
+            on_desync = function() end,
+        }
+        local function frame(x, y)
+            seq:feed{ slot = 0, id = 0, x = x, y = y, tool = 1, timev = 0 }
+            seq:afterFrame()
+        end
+        edges = 1
+        frame(10, 10); frame(11, 10)
+        drops, edges = 1, 2                        -- a drop carrying the lift edge
+        frame(12, 10)
+        edges, fail_end = 3, true                  -- a new down; ending the old fails
+        frame(50, 50)
+        local before = inked
+        frame(51, 50); frame(52, 50); frame(53, 50)
+        t:eq(seq.state, "suspended", "the held contact stays held")
+        t:eq(inked, before, "and inks nothing until a real boundary")
+    end)
+
+    t:case("edges that do not move leave a long stroke alone", function()
+        local seq, log, c = synced()
+        c.edges = 1
+        for i = 1, 40 do seq:feed(pen(1, 10 + i, 10 + i * 2)) end
+        t:eq(log.finishes, 0, "one uninterrupted stroke")
+        t:eq(log.starts, 1, "one contact")
     end)
 
     t:case("a down after a lost lift starts a new contact instead of gluing the strokes", function()

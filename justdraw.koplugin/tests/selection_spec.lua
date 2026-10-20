@@ -94,6 +94,13 @@ return function(ctx)
 
     t:describe("ink_selection / resolving")
 
+    t:case("a selection the history cannot record twice is never offered", function()
+        local Selection = require("ink_selection")
+        local History = require("ink_edit_history")
+        t:check(Selection.MAX_POINTS * 2 <= History.MAX_POINTS,
+            "a move records before and after; both fit the history's budget")
+    end)
+
     t:case("a lasso around a stroke selects it once the pen is up", function()
         local sel, session, p, sched, contact = fixture()
         local a = draw(session, { 200, 200, 300, 200 })

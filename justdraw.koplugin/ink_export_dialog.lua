@@ -99,6 +99,7 @@ local function messages()
         bad_geometry = _("This page’s size can’t be used for an export."),
         contact_active = _("Lift the pen and try again."),
         rename_failed = _("The exported file couldn’t be put in place. Check the folder and try again."),
+        destination_taken = _("A file with that name appeared while exporting. Nothing was replaced; export again to choose."),
         encode_failed = _("The image couldn’t be written. The folder may be full."),
         pdf_failed = _("The PDF couldn’t be written. The folder may be full."),
         write_failed = _("The file couldn’t be written. The folder may be full."),

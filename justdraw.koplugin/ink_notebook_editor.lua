@@ -289,6 +289,11 @@ function Editor:_initQualityRefresh()
         schedule_in = self.live_schedule_in,
         unschedule = self.live_unschedule,
         refresh = function(mode, left, top, right, bottom)
+            -- The union of fast boxes can cross gray none of them touched;
+            -- asked once more of the union (ADR-65).
+            if mode == "fast" and self:_unionHasGray(left, top, right, bottom) then
+                mode = "ui"
+            end
             UIManager:setDirty(nil, mode,
                 Geom:new{ x = left, y = top, w = right - left, h = bottom - top })
         end,
@@ -322,6 +327,17 @@ function Editor:_coveredRepaintValid(pending)
         and pending.transform == surface:transform()
         and pending.cache == cache
         and pending.generation == cache.generation
+end
+
+--- Whether a screen box of the open page crosses gray ink.
+function Editor:_unionHasGray(left, top, right, bottom)
+    local session = self:_currentSession()
+    local surface = session and session:surface()
+    local cache = surface and surface:cache()
+    local tr = surface and surface:transform()
+    if not (cache and tr and type(cache.hasGrayInkIn) == "function") then return false end
+    local ox, oy = tr.offset_x or 0, tr.offset_y or 0
+    return cache:hasGrayInkIn(left - ox, top - oy, right - ox, bottom - oy)
 end
 
 function Editor:_queueCoveredRepaint(box, source, session, transform, cache,
@@ -370,7 +386,11 @@ function Editor:_flushCoveredRepaint(already_painted)
         self.covered_repaint = nil
         return nil, "stale_repaint"
     end
-    if Stack.visualAbove(self) then return nil, "covered" end
+    if Stack.coveringAbove(self, pending.screen_left, pending.screen_top,
+        pending.screen_right - pending.screen_left,
+        pending.screen_bottom - pending.screen_top) then
+        return nil, "covered"
+    end
     local buffer
     if not already_painted and pending.can_blit then
         buffer = pending.cache:buffer()
@@ -1137,6 +1157,8 @@ function Editor:showShapeMenu()
                 self:setTool("shape")
             end
         end,
+        -- A size or a direction comes back to the menu (UX-6).
+        reopen = function() self:showShapeMenu() end,
     }
     return self:showModalSafely(dialog)
 end
@@ -1278,14 +1300,24 @@ function Editor:onDirty(screen_box, kind, session, transform, source_box)
     -- page holding graphite/marker rides the grayscale pass instead (ADR-36).
     -- That pass leaves no DU debt behind, so it takes the plain-partial
     -- branches below and touches no quality bookkeeping.
-    local fast_ok = live_fast and not cache:hasGrayInk()
     local exact_box, exact_source = self:_clipDirtyBox(screen_box, source_box)
     if not exact_box then return end
+    -- Asked of this box, not the page: black ink beside a graphite stroke
+    -- keeps the fast pass.
+    local gray
+    if exact_source then
+        gray = cache:hasGrayInkIn(exact_source.x, exact_source.y,
+            exact_source.x + exact_source.w, exact_source.y + exact_source.h)
+    else
+        gray = cache:hasGrayInk()
+    end
+    local fast_ok = live_fast and not gray
     local live_kind = kind == "ink" or kind == "erase"
-    -- A dirty produced under any visual window, including a toast, cannot be
-    -- copied directly without punching through it. Retain one O(1) union bound
-    -- to this exact page/cache/transform and present it after uncover.
-    if Stack.visualAbove(self) then
+    -- A dirty produced under a visual window cannot be copied directly
+    -- without punching through it. Retain one O(1) union bound to this exact
+    -- page/cache/transform and present it after uncover. A toast covers only
+    -- its own box: one in a corner must not hide the whole stroke (P2-1).
+    if Stack.coveringAbove(self, exact_box.x, exact_box.y, exact_box.w, exact_box.h) then
         self:_queueCoveredRepaint(exact_box, exact_source,
             session, transform, cache, live_kind and fast_ok)
         if live_kind and fast_ok then
@@ -1402,7 +1434,7 @@ function Editor:repaintScreenBox(x0, y0, x1, y1)
     local clip = self._overlay_clip
     if not clip then clip = {}; self._overlay_clip = clip end
     clip.x, clip.y, clip.w, clip.h = left, top, right - left, bottom - top
-    local gray = cache:hasGrayInk()
+    local gray = cache:hasGrayInkIn(sx, sy, sx + right - left, sy + bottom - top)
     if self.overlay_painter then
         self.overlay_painter:paintOverlay(Screen.bb, clip)
         gray = gray or self.overlay_painter:hasGrayInk()
@@ -1956,6 +1988,23 @@ function Editor:requestClose()
 end
 
 function Editor:onClose()
+    self:requestClose()
+    return true
+end
+
+--[[--
+The Home key, answered here and stopped here.
+
+KOReader's `InputContainer:onHome` (#15600, upstream after v2026.07.2) closes
+the top window through its `onClose` and then sends Home on to whatever is on
+top next. On older runtimes Home reaches `ReaderUI:onHome` instead, which this
+also keeps from leaving the reader underneath a notebook. A close this
+editor refuses puts an InfoMessage on top; Home closes that, goes on to the
+editor, which refuses again -- for as long as the page cannot be saved. So the
+editor makes the one attempt and consumes the key: the next press is the
+reader's, not a loop's.
+]]
+function Editor:onHome()
     self:requestClose()
     return true
 end

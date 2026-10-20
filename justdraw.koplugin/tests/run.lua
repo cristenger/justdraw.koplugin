@@ -153,6 +153,106 @@ t:case("callback returning true reaches KOReader as true", function()
     t:eq(input.stylus_callback(input, { slot = 4, id = 4 }), true, "true propagates")
 end)
 
+--[[--
+Taking the capture away with the pen on the glass used to hand the rest of
+that contact to GestureDetector: a contact opened mid-stroke whose lift then
+reads as a swipe or a tap -- a page turn nobody asked for. Stop pressed with a
+finger while the pen writes, an oversized operation, a handler error all get
+there (audit P2-4). The callback stays registered, inert, dominating only that
+contact until its lift, and then lets go.
+]]
+t:case("removing the capture mid-contact keeps that contact until its lift", function()
+    local input = reset()
+    local handled = 0
+    Capture:installStylus(function() handled = handled + 1; return true end,
+        function() return false end)
+    local cb = input.stylus_callback
+    t:eq(cb(input, { slot = 4, id = 4, x = 1, y = 1 }), true, "the pen is ours")
+    Capture:remove()
+    t:eq(input.stylus_callback, cb, "the callback stays while the pen is down")
+    local before = handled
+    t:eq(cb(input, { slot = 4, id = 4, x = 2, y = 2 }), true, "still dominated")
+    t:eq(handled, before, "and the handler is never called again")
+    t:eq(cb(input, { slot = 0, id = 1, x = 5, y = 5 }), false, "other slots are not touched")
+    t:eq(cb(input, { slot = 4, id = -1 }), true, "the lift is ours too")
+    env.UIManager:flush()
+    t:eq(input.stylus_callback, nil, "and after it the callback is gone")
+end)
+
+t:case("removing the capture with nothing on the glass lets go at once", function()
+    local input = reset()
+    Capture:installStylus(function() return true end, function() return false end)
+    local cb = input.stylus_callback
+    cb(input, { slot = 4, id = 4, x = 1, y = 1 })
+    cb(input, { slot = 4, id = -1 })
+    Capture:remove()
+    t:eq(input.stylus_callback, nil, "nothing held, nothing kept")
+end)
+
+t:case("a contact that reached GestureDetector while inert is not held", function()
+    -- `removeDeferred` makes the capture inert at once and removes it a tick
+    -- later. A frame in between goes to GestureDetector, which then owns the
+    -- contact: draining it afterwards would take its lift away and strand
+    -- its hold timer (review of audit P2-4).
+    local input = reset()
+    Capture:installStylus(function() return true end, function() return false end)
+    local cb = input.stylus_callback
+    t:eq(cb(input, { slot = 4, id = 4, x = 1, y = 1 }), true, "ours while active")
+    Capture:removeDeferred()
+    t:eq(cb(input, { slot = 4, id = 4, x = 2, y = 2 }), false, "inert: handed to the detector")
+    env.UIManager:flush()
+    t:eq(input.stylus_callback, nil, "nothing is held, so the callback goes")
+end)
+
+t:case("a palm held beside the pen is drained with it", function()
+    local input = reset{ wacom_protocol = true }
+    -- The harness runs a scheduleIn on the next flush; the limit is not what
+    -- this case is about, so its timer is kept out of the queue.
+    local schedule = env.UIManager.scheduleIn
+    env.UIManager.scheduleIn = function() end
+    Capture:installStylus(function() return true end, function() return false end)
+    local cb = input.stylus_callback
+    cb(input, { slot = 4, id = 4, x = 1, y = 1 })
+    cb(input, { slot = 0, id = 9, x = 50, y = 50 })
+    Capture:remove()
+    env.UIManager.scheduleIn = schedule
+    t:eq(cb(input, { slot = 0, id = 9, x = 51, y = 50 }), true, "the palm stays dominated")
+    t:eq(cb(input, { slot = 4, id = 4, x = 2, y = 2 }), true, "and so does the pen")
+    cb(input, { slot = 4, id = -1 })
+    env.UIManager:flush()
+    t:eq(input.stylus_callback, cb, "one lift is not all of them")
+    cb(input, { slot = 0, id = -1 })
+    env.UIManager:flush()
+    t:eq(input.stylus_callback, nil, "after the last lift the callback goes")
+end)
+
+t:case("a drain whose lift never comes ends at its limit", function()
+    local input = reset()
+    local timers = {}
+    local schedule = env.UIManager.scheduleIn
+    env.UIManager.scheduleIn = function(_, delay, fn) timers[#timers + 1] = { delay, fn } end
+    Capture:installStylus(function() return true end, function() return false end)
+    local cb = input.stylus_callback
+    cb(input, { slot = 4, id = 4, x = 1, y = 1 })
+    Capture:remove()
+    env.UIManager.scheduleIn = schedule
+    t:eq(input.stylus_callback, cb, "draining")
+    t:eq(timers[1] and timers[1][1], Capture.DRAIN_LIMIT, "bounded by DRAIN_LIMIT seconds")
+    timers[1][2]()
+    t:eq(input.stylus_callback, nil, "and gone when the limit passes, lift or not")
+end)
+
+t:case("a new capture takes over from one still draining", function()
+    local input = reset()
+    Capture:installStylus(function() return true end, function() return false end)
+    input.stylus_callback(input, { slot = 4, id = 4, x = 1, y = 1 })
+    Capture:remove()
+    local ok = Capture:installStylus(function() return true end, function() return false end)
+    t:eq(ok, true, "our own draining callback is not somebody else's")
+    Capture:remove()
+    env.UIManager:flush()
+end)
+
 t:case("callback returning false reaches KOReader as false", function()
     local input = reset()
     Capture:installStylus(function() return false end, function() return false end)
@@ -1900,6 +2000,34 @@ t:case("builds six buttons and a screen-relative geometry", function()
     t:check(left.dimen.x < bar.dimen.x, "the left side really is further left")
 end)
 
+t:case("every tool row is a target of at least 10 mm", function()
+    reset()
+    local p = newPlugin()
+    local bar = newRealBar(p)
+    local Layout = require("ink_notebook_layout")
+    local min = Layout.physicalPixels(10)
+    for _, name in ipairs({ "pen_btn", "eraser_btn", "undo_btn", "more_btn", "hide_btn" }) do
+        t:check((bar[name].height or 0) >= min,
+            name .. " is at least 10 mm tall (" .. tostring(bar[name].height) .. " >= " .. min .. ")")
+    end
+end)
+
+t:case("the 10 mm rows never push the column off a short, dense screen", function()
+    reset()
+    local screen = Device.screen
+    local old_w, old_h, old_scale = screen.w, screen.h, screen.scaleByDPI
+    screen.w, screen.h = 800, 600
+    screen.scaleByDPI = function(_, px) return math.floor(px * 320 / 160 + 0.5) end
+    local p = newPlugin()
+    local ok, bar = pcall(newRealBar, p)
+    screen.w, screen.h, screen.scaleByDPI = old_w, old_h, old_scale
+    t:check(ok, "the bar builds: " .. tostring(bar))
+    if ok then
+        t:check(bar.dimen.y >= 0 and bar.dimen.y + bar.dimen.h <= 600,
+            "the whole column is on screen (" .. bar.dimen.y .. " + " .. bar.dimen.h .. ")")
+    end
+end)
+
 t:case("contains() matches its own dimen", function()
     reset()
     local p = newPlugin()
@@ -2196,7 +2324,9 @@ t:case("the selected pen opens its palette without changing drawing ownership", 
     local before = #env.dialogs
     bar.pen_btn.callback()
     t:eq(p.drawing, false, "idle Pen still does not start drawing")
-    t:eq(#env.dialogs, before, "idle Pen does not open settings")
+    -- The selected pen opens its settings whether or not Draw is on: a tap
+    -- that changed nothing was the old answer (audit UX-5).
+    t:eq(#env.dialogs, before + 1, "idle Pen opens its settings")
     p:setDrawing(true)
     bar = p.bar
     local lease = p.input_lease
@@ -2318,11 +2448,18 @@ t:case("the More dialog offers Pen style with the marker gated on a sheet", func
     t:eq(p.pen_style, 65, "the choice reached the plugin")
 end)
 
+t:case("a saved pen choice survives the round-ink default", function()
+    reset()
+    _G.G_reader_settings.data.justdraw_pen_style = 1
+    local p = newPlugin()
+    t:eq(p.pen_style, 1, "the historical pen stays the pen for whoever chose it")
+end)
+
 t:case("the marker toggle dispatcher action flips pen_style 1<->3", function()
     reset()
     _G.G_reader_settings.data.justdraw_pen_style = nil  -- reset to default
     local p = newPlugin()
-    t:eq(p.pen_style, 1, "pen is the initial style")
+    t:eq(p.pen_style, 66, "round ink is the initial style")
     t:eq(p:onJustDrawMarker(), true, "the event is consumed")
     t:eq(p.pen_style, 3, "style flipped to marker")
     t:eq(env.notifications[#env.notifications],
@@ -2399,6 +2536,7 @@ for _, spec in ipairs({
     "i18n_catalog_spec",
     "compat_spec",
     "selection_activation_spec",
+    "audit_followup_spec",
     "conformance_policy_spec",
     "stylus_sequence_spec",
     "wacom_palm_spec",

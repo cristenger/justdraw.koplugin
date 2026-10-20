@@ -37,6 +37,7 @@ memory is what runs out on these devices, and it runs out per page.
 
 local Cache = require("ink_canvas_cache")
 local Transform = require("ink_canvas_transform")
+local logger = require("logger")
 
 local Raster = {}
 
@@ -251,7 +252,19 @@ function Job:_settle(reason)
         if reason then
             if self.on_error then self.on_error(reason, self) end
         elseif self.on_ready then
-            self.on_ready(self)
+            -- Nothing between the UI loop and here is guarded, and a consumer
+            -- that raised used to leave its export holding the one running
+            -- slot until the document closed (audit P2-7). A raise is a
+            -- failure like any other, and the consumer hears it as one.
+            local ok, err = pcall(self.on_ready, self)
+            if not ok then
+                logger.err("JustDraw: export raster consumer failed:", err)
+                if self.on_error and not self.closed then
+                    self.on_error("raster_failed", self)
+                elseif self.on_error then
+                    self.on_error("raster_failed", nil)
+                end
+            end
         end
     end)
     return true

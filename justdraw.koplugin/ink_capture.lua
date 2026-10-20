@@ -504,6 +504,49 @@ own way to retire one, and doing it per slot rather than through
 Returns whether anything was dropped. A runtime without the pair -- or a slot
 with no contact -- is a no-op, not an error.
 ]]
+--[[--
+The half of a contact machine's spec that describes the capture rather than
+the surface.
+
+The reader and the notebook editor each build their own Sequence over the
+same Input, and building the shared half twice is how they drifted: the
+notebook was built without the steer's counters, so an evdev overflow there
+was counted and never answered (ADR-44, audit P1-1). Everything here comes
+from this module, so it is said once. `host` supplies the surface's callbacks
+and budgets; `host.on_desync`, when given, is told after the line that
+`tests/scribe_log_audit.lua` counts against the kernel's drops.
+]]
+function Capture:sequenceSpec(input, host)
+    local spec = {
+        wacom_protocol = input ~= nil and input.wacom_protocol == true,
+        pen_slot = input and input.pen_slot,
+        tool_finger = input and input.TOOL_TYPE_FINGER or 0,
+        to_screen = Capture.toScreen,
+        -- Increments two integers; cannot raise inside the raw callback.
+        on_pending_finish = function(kind) Capture:noteCollapsedContact(kind) end,
+        drop_contact = function(slot) return Capture:dropContact(slot) end,
+        -- Two integer reads; the steer answers zeros when it is not armed,
+        -- and then nothing downstream of them ever fires (ADR-44).
+        sync_counts = function()
+            local _steered_pen, _steered_panel, drops, edges = Capture:steerCounts()
+            return drops, edges
+        end,
+    }
+    local host_desync = host.on_desync
+    for key, value in pairs(host) do
+        if key ~= "on_desync" then spec[key] = value end
+    end
+    spec.on_desync = function(cut)
+        -- One line per overflow, at info: a drop with no line beside it is a
+        -- drop nothing answered.
+        logger.info("JustDraw: evdev desync,",
+            cut and "stroke cut" or "nothing in flight",
+            "waiting for a touch boundary")
+        if host_desync then host_desync(cut) end
+    end
+    return spec
+end
+
 function Capture:dropContact(slot)
     local gd = self.gesture_detector
     if not gd or type(gd.getContact) ~= "function"
@@ -567,9 +610,13 @@ function Capture:installStylus(stylus_handler, residual_frame_handler, on_error)
     local classifiable, classify_err = self:validateStylusInput(input)
     if not classifiable then return false, classify_err end
     -- The callback is a singleton with no chaining and no owner query, so the
-    -- only safe move against another plugin is to refuse. Our own callback is
-    -- always nil here: we return early when active, and every removal path
-    -- clears it.
+    -- only safe move against another plugin is to refuse. The one callback of
+    -- ours that can still be there is a drain holding a contact to its lift
+    -- (`_drain`); a new capture takes that contact over.
+    if self.draining and input.stylus_callback == self.draining then
+        input:unregisterStylusCallback()
+    end
+    self.draining, self.drain_held, self.drain_input = nil, nil, nil
     if input.stylus_callback ~= nil then
         return false, "stylus_callback_busy"
     end
@@ -585,9 +632,29 @@ function Capture:installStylus(stylus_handler, residual_frame_handler, on_error)
 
     local handler = guard(self, stylus_handler, false)
     local callback
+    -- Every slot this callback dominates right now, pen and palm alike: each
+    -- is a contact GestureDetector never opened, and each has to be held to
+    -- its own lift when the capture goes (audit P2-4). One table per install;
+    -- per frame only keys flip.
+    local held = {}
+    self.held = held
     callback = function(_, slot)
-        if not (self.active and self.stylus_callback == callback) then return false end
-        return handler(slot) and true or false
+        local number = slot.slot
+        if not (self.active and self.stylus_callback == callback) then
+            local drained = self:_drain(callback, slot)
+            -- Inert but not draining yet (`fail`/`removeDeferred` wait a
+            -- tick): this frame goes to GestureDetector, which now owns the
+            -- contact. Holding it on after that would take the lift away
+            -- from the detector and strand its hold timer.
+            if not drained and number ~= nil then held[number] = nil end
+            return drained
+        end
+        local dominated = handler(slot) and true or false
+        local id = slot.id
+        if id ~= nil and number ~= nil then
+            if id >= 0 and dominated then held[number] = true else held[number] = nil end
+        end
+        return dominated
     end
     self.stylus_callback = callback
 
@@ -617,6 +684,54 @@ function Capture:installStylus(stylus_handler, residual_frame_handler, on_error)
 end
 
 -- -------------------------------------------------------------- removal
+
+--[[--
+Let go of the stylus callback without letting go of the contacts under it.
+
+Unregistering with the pen on the glass hands the rest of that contact to
+GestureDetector, which opens it mid-stroke and reads its lift as a swipe or a
+tap -- a page turn nobody asked for (audit P2-4). So the callback stays
+registered but inert: it calls no handler, dominates only the contacts it
+held when the capture went -- the pen's, and a palm's beside it -- and
+unregisters itself on the tick after the last of their lifts. A handler that
+raised had already answered "not mine" for its frame, so its contact is
+GestureDetector's and is not held. `DRAIN_LIMIT` bounds the whole thing, in
+case a lift is one the capture never sees.
+]]
+Capture.DRAIN_LIMIT = 10
+
+function Capture:_startDrain(input, callback, held)
+    self.draining, self.drain_held, self.drain_input = callback, held, input
+    UIManager:scheduleIn(Capture.DRAIN_LIMIT, function()
+        if self.draining == callback then self:_endDrain() end
+    end)
+end
+
+function Capture:_endDrain()
+    local input, callback = self.drain_input, self.draining
+    self.draining, self.drain_held, self.drain_input = nil, nil, nil
+    if input and callback and input.stylus_callback == callback then
+        input:unregisterStylusCallback()
+    end
+end
+
+function Capture:_drain(callback, slot)
+    local held = self.drain_held
+    if self.draining ~= callback or not held or not held[slot.slot] then return false end
+    local id = slot.id
+    if id ~= nil and id < 0 then
+        -- The lift is the contact's too: GestureDetector never opened it.
+        -- Unregistered on the next tick, never from inside the routing loop
+        -- that is calling us, and only once every held contact has lifted.
+        held[slot.slot] = nil
+        if next(held) == nil then
+            UIManager:nextTick(function()
+                if self.draining == callback then self:_endDrain() end
+            end)
+        end
+    end
+    return true
+end
 
 function Capture:_forget()
     self.input = nil
@@ -649,11 +764,16 @@ function Capture:remove()
 
     if self.stylus_callback and input then
         if input.stylus_callback == self.stylus_callback then
-            input:unregisterStylusCallback()
+            if self.held and next(self.held) ~= nil then
+                self:_startDrain(input, self.stylus_callback, self.held)
+            else
+                input:unregisterStylusCallback()
+            end
         else
             logger.warn("JustDraw: stylus callback was replaced by someone else; leaving it in place")
         end
     end
+    self.held = nil
 
     if self.slot_steer then
         -- The hook stays registered (there is no unregister); inert from here.

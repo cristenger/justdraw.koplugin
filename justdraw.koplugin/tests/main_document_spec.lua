@@ -127,11 +127,15 @@ return function(ctx)
     end
 
     --- Every `setDirty` carrying a region, from `from` onwards.
+    --- Regional repaints of the page, from `from` onwards. The toolbar's own
+    --- repaint when Undo changes state is not one: it is the bar, not the
+    --- page (audit UX-4).
     local function regionsFrom(from)
         local out = {}
         for i = from, #env.UIManager.dirty do
             local d = env.UIManager.dirty[i]
-            if d[3] ~= nil then out[#out + 1] = d end
+            local bar = type(d[1]) == "table" and d[1].undo_btn ~= nil
+            if d[3] ~= nil and not bar then out[#out + 1] = d end
         end
         return out
     end
@@ -470,6 +474,16 @@ return function(ctx)
         t:check(has(modes, "ui"), "gray ink rides the grayscale pass (ADR-36)")
         t:eq(has(modes, "fast"), false, "fast is forced monochrome and drops it")
         t:eq(has(modes, "partial"), false, "and partial still fences")
+
+        -- Gray is asked of the box (ADR-65): black ink well away from the
+        -- graphite still takes the fast pass on the same page.
+        p:setPenStyle(Style.PEN)
+        from = #Device.screen.refreshes
+        penDown(p, INK_XY.x + 120, INK_XY.y + 180)
+        penFrame(p, INK_XY.x + 160, INK_XY.y + 220)
+        penLift(p, INK_XY.x + 160, INK_XY.y + 220)
+        modes = refreshModes(from + 1)
+        t:check(has(modes, "fast"), "black ink far from the graphite keeps the fast pass: " .. table.concat(modes, ","))
     end)
 
     t:case("undo repaints through the view rather than copying the raster", function()
@@ -1078,7 +1092,7 @@ return function(ctx)
             "which still has its own row")
     end)
 
-    t:case("the page-notes row sits next to the sheet's own", function()
+    t:case("a fixed layout offers page notes where a reflowable book offers sheets", function()
         local p = documentPlugin()
         local items = {}
         p:addToMainMenu(items)
@@ -1088,8 +1102,9 @@ return function(ctx)
             if sub[i].text == "Drawing sheet" then sheet_at = i end
             if sub[i].text == "Page notes" then notes_at = i end
         end
-        t:check(sheet_at ~= nil, "the sheet row is there")
-        t:eq(notes_at, sheet_at + 1, "and page notes directly after it")
+        t:eq(sheet_at, nil, "no sheet row: a fixed layout cannot hold one (UX-3)")
+        t:check(notes_at ~= nil and notes_at <= 4,
+            "page notes near the top, right after the drawing actions")
     end)
 
     t:case("Delete this page note takes only this page's row", function()

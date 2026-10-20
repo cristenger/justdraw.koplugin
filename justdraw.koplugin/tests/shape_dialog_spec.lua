@@ -69,6 +69,29 @@ return function(ctx)
         t:eq(chosen[2].kind, "arrow", "keeps the kind")
     end)
 
+    --[[--
+    Kind, size and direction used to take three trips through the menu
+    (audit UX-6). A size or a direction now comes straight back to it with the
+    new choice marked; the kind is what finishes it.
+    ]]
+    t:case("a size or direction comes back to the menu; a kind finishes it", function()
+        local reopened, chosen = {}, {}
+        local rows = ShapeDialog.rows{
+            options = { kind = "arrow", size = "S", angle = 0 }, checkmark = "*",
+            choose = function(o) chosen[#chosen + 1] = o end,
+            close = function() end,
+            reopen = function(o) reopened[#reopened + 1] = o end,
+        }
+        find(rows, "Large").callback()
+        t:eq(#reopened, 1, "a size reopens the menu")
+        t:eq(reopened[1].size, "L", "over the new choice")
+        find(rows, "↑").callback()
+        t:eq(#reopened, 2, "so does a direction")
+        find(rows, "Circle").callback()
+        t:eq(#reopened, 2, "the kind is the last choice")
+        t:eq(chosen[3].kind, "circle", "and is stored like any other")
+    end)
+
     t:case("corrupt stored options fall back to the defaults", function()
         local rows = build{ kind = 7, size = {}, angle = "x" }
         t:check(find(rows, "Line*") ~= nil, "default kind marked")

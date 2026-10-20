@@ -29,6 +29,7 @@ local VerticalGroup = require("ui/widget/verticalgroup")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local _ = require("ink_i18n")
 
+local Layout = require("ink_notebook_layout")
 local Stack = require("ink_stack")
 local PenDialog = require("ink_pen_dialog")
 local ToolButton = require("ink_tool_button")
@@ -86,13 +87,27 @@ function InkBar:setContextText(button, text)
     PenDialog.fitButton(button)
 end
 
+--[[--
+A row height for `rows` icon rows under a first control `first_h` tall: at
+least 10 mm (the sheet header's target, audit UX-9) and half the column's
+width, but never so tall that the column runs off the screen -- a small screen
+at a high DPI setting would put seven 10 mm rows past its bottom edge. Each
+row costs its budget plus the Button's own chrome (ADR-23).
+]]
+function InkBar.rowHeight(w, first_h, rows)
+    local want = math.max(first_h, math.floor(w / 2), Layout.physicalPixels(10) or 0)
+    local chrome = Layout.buttonChrome and Layout.buttonChrome() or 0
+    local room = math.floor((Screen:getHeight() * 0.9 - first_h) / rows) - chrome
+    return math.max(math.min(want, room), math.floor(w / 4), 1)
+end
+
 function InkBar:init()
     local p = self.plugin
     local w = math.floor(Screen:getWidth() * 0.15)
     local controls = VerticalGroup:new{align="center"}
     if self.note_return then
         self.show_btn = self:mkButton(_("Show note"), w, function() p:showNote() end)
-        local row_h = math.max(self.show_btn.label_widget:getSize().h, math.floor(w / 2))
+        local row_h = InkBar.rowHeight(w, self.show_btn.label_widget:getSize().h, 2)
         self.notes_btn = self:mkIconButton("notes", _("Document notes"), w, row_h,
             function() p:onShowDocumentNotes() end)
         self.dismiss_btn = self:mkIconButton("close", _("Dismiss"), w, row_h,
@@ -110,9 +125,15 @@ function InkBar:init()
         -- pen's full name among them -- only fitted a column this narrow at a
         -- font nobody could read. At least half as tall as the column is wide,
         -- so the glyph is not a speck and the target is not a sliver.
-        local row_h = math.max(self.draw_btn.label_widget:getSize().h, math.floor(w / 2))
+        -- And 10 mm where it fits, the target the sheet's header guarantees:
+        -- on a small low-density screen half of 15 % of the width is about
+        -- 7 mm (audit UX-9). Five rows below Draw, six with Document notes.
+        local row_h = InkBar.rowHeight(w, self.draw_btn.label_widget:getSize().h,
+            self.note_context and 6 or 5)
+        -- The selected pen opens its settings whether or not Draw is on: a
+        -- tap that changed nothing used to be the answer here (audit UX-5).
         self.pen_btn = self:mkIconButton("pen", _("Pen"), w, row_h, function()
-            if not p.eraser and p.drawing then p:showPenSettingsDialog()
+            if not p.eraser then p:showPenSettingsDialog()
             else p:setEraser(false) end
         end)
         self.eraser_btn = self:mkIconButton("eraser", _("Eraser"), w, row_h,
@@ -184,6 +205,12 @@ function InkBar:update(refresh)
     ToolButton.setState(self.pen_btn, pen_label .. "\n"
         .. _("Tap the selected pen to change its style and width."), not p.eraser)
     ToolButton.setState(self.eraser_btn, _("Eraser"), p.eraser)
+    -- Undo shows whether it would do anything, instead of answering a tap
+    -- with "Nothing to undo" (audit UX-4); `refreshHistoryButtons` keeps it
+    -- current and compares against what is shown here.
+    local can_undo = type(p.canUndo) == "function" and p:canUndo() or false
+    self.undo_shown = can_undo
+    self.redo_shown = type(p.canRedo) == "function" and p:canRedo() or false
     if self.note_context and session then
         local ready = cache and cache:isReady()
         self.draw_btn:enableDisable(p.drawing or session:loadFailed()
@@ -191,7 +218,9 @@ function InkBar:update(refresh)
         local editing = p.drawing and ready and session:isWritable() and not p.canvas_off_page
         self.pen_btn:enableDisable(editing)
         self.eraser_btn:enableDisable(editing)
-        self.undo_btn:enableDisable(editing)
+        self.undo_btn:enableDisable(editing and can_undo)
+    else
+        self.undo_btn:enableDisable(can_undo)
     end
     if refresh then
         -- Embedded, the bar is not a window, and UIManager finds nothing to
