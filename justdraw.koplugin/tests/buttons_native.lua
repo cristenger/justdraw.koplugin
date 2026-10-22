@@ -1026,7 +1026,7 @@ else
 
         case("PDF menu: Toolbar side > Left and Right move the toolbar", function()
             for _, side in ipairs({ "Left", "Right" }) do
-                openMenu({ "JustDraw", "Toolbar side", side })
+                openMenu({ "JustDraw", "Settings", "Toolbar side", side })
                 closeMenu()
                 expect(plugin.bar_side == side:lower(), "side is %s after %s",
                     tostring(plugin.bar_side), side)
@@ -1037,7 +1037,7 @@ else
 
         case("PDF menu: Input mode radios apply", function()
             for _, mode in ipairs({ { "Finger", "finger" }, { "Automatic", "auto" } }) do
-                openMenu({ "JustDraw", "Input mode", mode[1] })
+                openMenu({ "JustDraw", "Settings", "Input mode", mode[1] })
                 closeMenu()
                 expect(plugin.input_mode == mode[2], "mode is %s after %s",
                     tostring(plugin.input_mode), mode[1])
@@ -1046,21 +1046,21 @@ else
         end)
 
         case("PDF menu: Pen style and Pen width radios apply", function()
-            openMenu({ "JustDraw", "Pen width", "Thin" })
+            openMenu({ "JustDraw", "Settings", "Pen width", "Thin" })
             closeMenu()
             expect(plugin.pen_width == 2, "width is %s after Thin", tostring(plugin.pen_width))
-            openMenu({ "JustDraw", "Pen width", "Medium" })
+            openMenu({ "JustDraw", "Settings", "Pen width", "Medium" })
             closeMenu()
-            openMenu({ "JustDraw", "Pen style", "Graphite" })
+            openMenu({ "JustDraw", "Settings", "Pen style", "Graphite" })
             closeMenu()
-            openMenu({ "JustDraw", "Pen style", "Ink pen" })
+            openMenu({ "JustDraw", "Settings", "Pen style", "Ink pen" })
             closeMenu()
             settled("Pen style/width")
         end)
 
         case("PDF menu: Drawing refresh opens its chooser, and it closes", function()
             roundTrip("Drawing refresh", function()
-                openMenu({ "JustDraw", "Drawing refresh" })
+                openMenu({ "JustDraw", "Settings", "Drawing refresh" })
                 if stack()[1] == reader.menu.menu_container then
                     error("Drawing refresh left the main menu on top")
                 end
@@ -1070,7 +1070,8 @@ else
         end)
 
         case("PDF menu: Fast refresh while drawing toggles and toggles back", function()
-            local touchmenu = openMenu({ "JustDraw" })
+            -- The settings are one level down (ADR-66).
+            local touchmenu = openMenu({ "JustDraw", "Settings" })
             local item
             for _, entry in ipairs(menuEntries(touchmenu)) do
                 if menuText(entry) == "Fast refresh while drawing" then item = entry end
@@ -1078,10 +1079,10 @@ else
             expect(item and item.checked_func, "no Fast refresh toggle")
             local was = item.checked_func()
             closeMenu()
-            openMenu({ "JustDraw", "Fast refresh while drawing" })
+            openMenu({ "JustDraw", "Settings", "Fast refresh while drawing" })
             expect(item.checked_func() ~= was, "the toggle did not change")
             closeMenu()
-            openMenu({ "JustDraw", "Fast refresh while drawing" })
+            openMenu({ "JustDraw", "Settings", "Fast refresh while drawing" })
             expect(item.checked_func() == was, "the toggle did not change back")
             closeMenu()
             settled("Fast refresh")
@@ -1089,7 +1090,7 @@ else
 
         case("PDF menu: Stylus diagnostics asks first, and Cancel starts nothing", function()
             roundTrip("Stylus diagnostics", function()
-                openMenu({ "JustDraw", "Stylus diagnostics" })
+                openMenu({ "JustDraw", "Settings", "Stylus diagnostics" })
             end)
             closeMenu()
             settled("Stylus diagnostics")
