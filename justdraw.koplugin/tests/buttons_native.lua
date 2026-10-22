@@ -1574,6 +1574,14 @@ else
 
             case("Notes browser: Filter > Chapter… opens and closes", function()
                 ensureBrowser()
+                -- A note in a chapter that starts on a known page: the row
+                -- that names the page is the one that used to raise.
+                local item = notes.catalog.items[1]
+                if item then
+                    item.chapter = item.chapter or "Chapter"
+                    item.chapter_key = item.chapter_key or "chapter-1"
+                    item.chapter_page = item.chapter_page or 1
+                end
                 local before = stack()[1]
                 press("Filter", browser())
                 tap(menuEntry(opened(before, "Filter"), "Chapter…"))

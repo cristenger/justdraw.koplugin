@@ -255,7 +255,9 @@ function Browser:showFilters()
     rows[#rows + 1] = {{text = _("Chapter…"), callback = function()
         self.controller:closeModal(dialog)
         local seen, items, menu = {}, {}
-        for _, item in ipairs(c.items) do
+        -- Not `_`: the loop below calls gettext, and a loop variable named
+        -- `_` would be the number it is called with.
+        for _i, item in ipairs(c.items) do
             local key = item.chapter_key or item.chapter
             if key and not seen[key] then
                 seen[key] = true
