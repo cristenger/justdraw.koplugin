@@ -5003,7 +5003,16 @@ function JustDraw:deleteCanvas(canvas)
         return nil, err
     end
 
-    if self.note_context and self.note_context.surface_id == canvas.id then
+    self:_forgetDeletedSheets({ [canvas.id] = true }, active)
+    UIManager:setDirty(self.ui, "full")
+    return true
+end
+
+--- What the plugin itself holds about sheets the session has just let go of:
+--- the note context that pointed at one, and -- when the open sheet was one
+--- of them -- the open flag, the bar and the router.
+function JustDraw:_forgetDeletedSheets(deleted, active)
+    if self.note_context and deleted[self.note_context.surface_id] then
         self:clearNoteContext()
     end
     if active then
@@ -5018,6 +5027,53 @@ function JustDraw:deleteCanvas(canvas)
         if self.router then self.router:reset() end
         if self.bar_restore then self:setBarShown(true) end
     end
+end
+
+--[[--
+Delete the notes the Document notes browser selected: sheets and page ink of
+this book, all of them or none.
+
+Through the plugin for the reason `deleteCanvas` is: the open sheet or page
+surface may be in the set, and only the plugin knows which toolbar, flags and
+capture belong to it. The repository runs the whole set as one transaction;
+the sessions are then told to forget, not to delete again. Refused while an
+export runs (it is reading these rows) or a pen is down (no SQLite under the
+pen, ADR-42).
+]]
+function JustDraw:deleteDocumentNotes(ids)
+    if Export.isRunning() then return nil, "export_busy" end
+    if self.input_lease and self.input_lease:hasActiveContact() then
+        return nil, "contact_active"
+    end
+    if type(ids) ~= "table" or #ids == 0 then return true end
+    local deleted = {}
+    for _, id in ipairs(ids) do deleted[tonumber(id) or id] = true end
+
+    local session, document = self.session, self.document_session
+    local repository, book_id
+    if session and session:isAvailable() then
+        repository, book_id = session:exportSources(), session.book_id
+    elseif document and document:isAvailable() then
+        repository, book_id = document:exportSources()
+    end
+    if not repository or not book_id then return nil, "no_repository" end
+
+    local open_sheet = self.canvas_open and session and session:activeCanvas()
+    local sheet_active = open_sheet and deleted[open_sheet.id] or false
+    local surface = document and document:surface()
+    if sheet_active then self:abortCanvasStroke() end
+    if surface and deleted[surface.id] then self:abortDocumentStroke() end
+    self:setDrawing(false)
+
+    local durable, ferr = self.export_controller:flushSurfaces()
+    if not durable then return nil, ferr end
+    local ok, err = repository:deleteBookCanvases(book_id, ids)
+    if not ok then return nil, err end
+
+    if session then session:forgetDeletedCanvases(ids) end
+    if document then document:forgetDeletedCanvases(ids) end
+    self:_forgetDeletedSheets(deleted, sheet_active)
+    self.document_ink_count = nil
     UIManager:setDirty(self.ui, "full")
     return true
 end

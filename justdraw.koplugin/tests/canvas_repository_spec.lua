@@ -457,6 +457,42 @@ return function(ctx)
             "and its strokes are not deleted by hand -- that is the cascade's job")
     end)
 
+    t:case("a selection of this book's notes is deleted in one transaction", function()
+        local repo, driver = openRepo{ answers = function(conn)
+            conn:answer("SELECT surface_role FROM canvases", { { "sheet" } })
+        end }
+        t:eq(repo:deleteBookCanvases(12, { 3, 4 }), true, "deleted")
+        local conn = driver.last()
+        t:check(conn:saw("BEGIN"), "one transaction")
+        t:check(conn:saw("COMMIT"), "committed")
+        t:eq(conn:saw("ROLLBACK"), false, "nothing unwound")
+        t:check(conn:statement("DELETE FROM canvases"):find("book_id = ?2", 1, true) ~= nil,
+            "each delete is held to this book")
+        t:check(conn:saw("DELETE FROM document_notes"),
+            "and a note left with no sheet goes with them")
+    end)
+
+    t:case("one row that is not this book's note refuses the whole selection", function()
+        local repo, driver = openRepo{ answers = function(conn)
+            conn:answer("SELECT surface_role FROM canvases", {})
+        end }
+        local ok, err = repo:deleteBookCanvases(12, { 3, 4 })
+        t:eq(ok, nil, "refused")
+        t:eq(err, "foreign_canvas")
+        local conn = driver.last()
+        t:eq(conn:saw("DELETE FROM canvases"), false, "before any row went")
+        t:check(conn:saw("ROLLBACK"), "and the transaction unwound")
+    end)
+
+    t:case("a selection that is not a list of row ids is refused up front", function()
+        local repo, driver = openRepo()
+        t:eq(select(2, repo:deleteBookCanvases(12, { 3, 3 })), "bad_canvases", "a repeat")
+        t:eq(select(2, repo:deleteBookCanvases(12, { 1.5 })), "bad_canvases", "a fraction")
+        t:eq(select(2, repo:deleteBookCanvases(12, "3")), "bad_canvases", "not a list")
+        t:eq(repo:deleteBookCanvases(12, {}), true, "an empty one is nothing to do")
+        t:eq(driver.last():saw("BEGIN"), false, "and none of them opened a transaction")
+    end)
+
     -- =================================================================
     t:describe("ink_canvas_repository / strokes")
 

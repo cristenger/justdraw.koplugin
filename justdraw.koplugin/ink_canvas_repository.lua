@@ -939,6 +939,61 @@ function Repository:deleteAllPageInkSurfaces(book_id)
         { book_id })
 end
 
+--[[--
+Delete a chosen set of this book's sheets and page-ink surfaces, all or none.
+
+The Document notes browser deletes a selection, and a selection is only worth
+confirming if it is also what happens: every id is checked to be a sheet or a
+page-ink surface *of this book* before the first row goes, inside the one
+transaction, so a stale id, another book's row or a role this browser does not
+own refuses the whole set and nothing changes. Strokes, chunks and note
+memberships leave through the schema's cascades; a note whose last sheet went
+with them is removed here, in the same transaction, because a note with no
+sheets is a row nothing can open or delete. Legacy ink is not in this
+database at all (ADR-39).
+]]
+function Repository:deleteBookCanvases(book_id, canvas_ids)
+    local ready, reason = self:_ready(true)
+    if not ready then return nil, reason end
+    if type(canvas_ids) ~= "table" then return nil, "bad_canvases" end
+    local seen, ids = {}, {}
+    for _, value in ipairs(canvas_ids) do
+        local id = tonumber(value)
+        if not id or id ~= id or id < 1 or id ~= math.floor(id) or seen[id] then
+            return nil, "bad_canvases"
+        end
+        seen[id], ids[#ids + 1] = true, id
+    end
+    if #ids == 0 then return true end
+
+    return self:transaction(function(repo)
+        for _, id in ipairs(ids) do
+            local roles, err = repo:_select([[
+                SELECT surface_role FROM canvases
+                 WHERE id = ?1 AND book_id = ?2;]], { id, book_id },
+                function(row) return str(row[1]) end)
+            if not roles then return nil, err end
+            if roles[1] ~= "sheet" and roles[1] ~= "page_ink" then
+                return nil, "foreign_canvas"
+            end
+        end
+        for _, id in ipairs(ids) do
+            local ok, err = repo:_run(
+                "DELETE FROM canvases WHERE id = ?1 AND book_id = ?2;",
+                { id, book_id })
+            if not ok then return nil, err end
+        end
+        local ok, err = repo:_run([[
+            DELETE FROM document_notes
+             WHERE book_id = ?1
+               AND NOT EXISTS (SELECT 1 FROM document_note_sheets s
+                                WHERE s.note_id = document_notes.id);]],
+            { book_id })
+        if not ok then return nil, err end
+        return true
+    end)
+end
+
 -- ------------------------------------------------------------------ strokes
 
 --- One past the highest sequence number on this canvas, and 1 on an empty one.

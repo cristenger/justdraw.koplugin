@@ -511,6 +511,43 @@ msgstr ""
 msgid "Export and selection"
 msgstr ""
 
+#: ink_document_notes_controller.lua
+msgid ""
+"Only JustDraw notes can be deleted here. KOReader annotations and legacy ink "
+"are kept."
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Select at least one note."
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Delete %1 selected JustDraw note and everything drawn on it?"
+msgid_plural "Delete %1 selected JustDraw notes and everything drawn on them?"
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_document_notes_controller.lua
+msgid "%1 KOReader annotation or legacy item is kept."
+msgid_plural "%1 KOReader annotations or legacy items are kept."
+msgstr[0] ""
+msgstr[1] ""
+
+#: ink_document_notes_controller.lua ink_export_dialog.lua ink_localsend.lua
+#: ink_notebook_editor.lua ink_notebook_library.lua ink_selection.lua main.lua
+msgid "Delete"
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Could not delete the selected notes. Nothing was changed."
+msgstr ""
+
+#: ink_document_notes_controller.lua
+msgid "Deleted %1 note."
+msgid_plural "Deleted %1 notes."
+msgstr[0] ""
+msgstr[1] ""
+
 #: ink_document_notes_detail.lua
 msgid "View on page"
 msgstr ""
@@ -553,6 +590,10 @@ msgstr ""
 
 #: ink_document_notes_ui.lua
 msgid "%1 of %2 notes · %3 selected"
+msgstr ""
+
+#: ink_document_notes_ui.lua
+msgid "Delete…"
 msgstr ""
 
 #: ink_document_notes_ui.lua
@@ -907,11 +948,6 @@ msgid_plural ""
 "Delete %1 leftover files from an interrupted export? This frees %2."
 msgstr[0] ""
 msgstr[1] ""
-
-#: ink_export_dialog.lua ink_localsend.lua ink_notebook_editor.lua
-#: ink_notebook_library.lua ink_selection.lua main.lua
-msgid "Delete"
-msgstr ""
 
 #: ink_export_dialog.lua
 msgid "Removed %1 leftover file, freeing %2."

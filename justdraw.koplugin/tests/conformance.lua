@@ -1079,6 +1079,44 @@ else
             true, repo:countPageInkSurfaces(book_id) == 0
                 and repo:countCanvases(book_id) == 1)
 
+        -- The Document notes batch delete: a note of two sheets and a page,
+        -- one transaction, and another book's row refuses the whole set.
+        do
+            local Groups = require("ink_note_repository")
+            local root = repo:createCanvas(book_id, {
+                anchor_key = "batch-root", anchor_raw = "/body/p[9]",
+                anchor_normalized = "/body/p[9]", logical_w = 600, logical_h = 800,
+            })
+            local second = root and Groups.new(repo):append(book_id, root)
+            local page = repo:createPageInkSurface(book_id, 5, 595, 842)
+            local other_book = repo:bookId("other-book", 99, "other.pdf")
+            local foreign = other_book and repo:createPageInkSurface(other_book, 1, 595, 842)
+            local rows = function(sql)
+                return tonumber(conn:rowexec(sql))
+            end
+            local before = rows("SELECT count(*) FROM canvases")
+            local refused, why = repo:deleteBookCanvases(book_id,
+                { root and root.id, page and page.id, foreign and foreign.id })
+            claim("canvas database: a batch with another book's row deletes nothing",
+                true, refused == nil and why == "foreign_canvas"
+                    and rows("SELECT count(*) FROM canvases") == before,
+                tostring(why) .. ", rows " .. tostring(before) .. " -> "
+                    .. tostring(rows("SELECT count(*) FROM canvases")))
+
+            local done = repo:deleteBookCanvases(book_id,
+                { root and root.id, second and second.id, page and page.id })
+            claim("canvas database: a batch takes a whole note, its membership and the page",
+                true, done == true
+                    and rows("SELECT count(*) FROM canvases") == before - 3
+                    and rows("SELECT count(*) FROM document_note_sheets") == 0
+                    and rows("SELECT count(*) FROM document_notes") == 0,
+                string.format("canvases %s, memberships %s, notes %s",
+                    tostring(rows("SELECT count(*) FROM canvases")),
+                    tostring(rows("SELECT count(*) FROM document_note_sheets")),
+                    tostring(rows("SELECT count(*) FROM document_notes"))))
+            if foreign then repo:deleteCanvas(foreign.id) end
+        end
+
         -- A stroke long enough to span chunks, with coordinates that exercise
         -- the whole quantiser range.
         local n = Codec.MAX_POINTS + 77

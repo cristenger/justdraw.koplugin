@@ -1017,6 +1017,11 @@ function Session:deleteAll()
     if not self:isWritable() then return nil, "read_only" end
     local closed, cerr = self:_flushAndClose()
     if not closed then return nil, cerr end
+    -- A page turn held behind the flush must not open a surface of the set
+    -- this is about to delete once the transaction is done.
+    self.pending_page = nil
+    self.holding_save_recovered = false
+    self.deferred_save_recovered = false
     local ok, err = self.repository:deleteAllPageInkSurfaces(self.book_id)
     if not ok then
         self:_notifyState()
@@ -1025,7 +1030,32 @@ function Session:deleteAll()
     self.surface_obj = nil
     self.transform_obj = nil
     self.geometry_ok = false
+    self.load_error = nil
     self:_notifyState()
+    return true
+end
+
+--[[--
+Catch up with page-ink surfaces a batch delete has already removed.
+
+The Document notes browser deletes its selection in one repository
+transaction, sheets and page ink together, so this issues no DELETE of its
+own: it only lets go of the open surface if it was one of them, discarding its
+queue rather than flushing strokes into rows that are gone.
+]]
+function Session:forgetDeletedCanvases(ids)
+    local deleted = {}
+    for _, id in ipairs(ids or {}) do
+        local n = tonumber(id)
+        if n then deleted[n] = true end
+    end
+    if self.surface_obj and deleted[self.surface_obj.id] then
+        if self.surface_session then self.surface_session:close{ discard = true } end
+        self.surface_session, self.surface_obj, self.transform_obj = nil, nil, nil
+        self.geometry_ok, self.load_error = false, nil
+        self.pending_page = nil
+        self:_notifyState()
+    end
     return true
 end
 

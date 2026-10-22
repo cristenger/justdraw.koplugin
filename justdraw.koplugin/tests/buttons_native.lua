@@ -1624,6 +1624,28 @@ else
                 settled("Select")
             end)
 
+            case("Notes browser: Delete… asks first, and Cancel deletes nothing", function()
+                ensureBrowser()
+                press("Select", browser())
+                local delete = findButton(browser(), "Delete…")
+                expect(delete, "selecting offers no Delete…")
+                expect(delete.enabled == false, "Delete… is enabled with nothing selected")
+                tap(rows()[1])
+                settleBrowser()
+                local total = #notes.catalog.items
+                local before = stack()[1]
+                press("Delete…", browser())
+                dismiss(opened(before, "Delete confirmation") and "Delete confirmation")
+                settleBrowser()
+                expect(#notes.catalog.items == total, "Cancel deleted %d notes",
+                    total - #notes.catalog.items)
+                expect(notes.catalog:selectionCount() == 1, "Cancel dropped the selection")
+                tap(rows()[1])
+                settleBrowser()
+                press("Done selecting", browser())
+                settled("Delete… then Cancel")
+            end)
+
             case("Notes browser: Export… fits one page; a scope opens its form, Cancel closes it", function()
                 ensureBrowser()
                 local before = stack()[1]

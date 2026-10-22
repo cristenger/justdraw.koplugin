@@ -1408,6 +1408,33 @@ function support.newCanvasStore(canvases)
         return true
     end
 
+    -- The real one checks every id inside one transaction before deleting
+    -- any; so does this, so a refused set leaves every row in place.
+    function store:deleteBookCanvases(book_id, ids)
+        self.calls.deleteBookCanvases = (self.calls.deleteBookCanvases or 0) + 1
+        if self.fail_delete_canvas then return nil, self.fail_delete_canvas end
+        local wanted = {}
+        for _, id in ipairs(ids) do
+            local found
+            for _, c in ipairs(self.canvases) do
+                if c.id == id then found = c end
+            end
+            if not found or found.book_id ~= book_id
+                or (roleOf(found) ~= "sheet" and roleOf(found) ~= "page_ink") then
+                return nil, "foreign_canvas"
+            end
+            wanted[id] = true
+        end
+        for i = #self.canvases, 1, -1 do
+            local id = self.canvases[i].id
+            if wanted[id] then
+                table.remove(self.canvases, i)
+                self.strokes[id] = nil
+            end
+        end
+        return true
+    end
+
     function store:touchCanvas()
         if self.fail_touch then return nil, self.fail_touch end
         return true

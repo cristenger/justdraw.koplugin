@@ -699,6 +699,44 @@ function Session:deleteCanvas(canvas)
     return true
 end
 
+--[[--
+Catch up with sheets a batch delete has already removed from the database.
+
+`deleteCanvas` deletes and then forgets; the Document notes browser deletes a
+whole selection in one repository transaction (it can span page ink, which this
+session does not own), so all that is left here is the forgetting -- a second
+DELETE would only be a second chance to fail after the first one committed.
+The open sheet, if it was among them, is dropped with its queue *discarded*:
+its rows are gone, and flushing strokes into them is a write to nothing.
+]]
+function Session:forgetDeletedCanvases(ids)
+    local deleted = {}
+    for _, id in ipairs(ids or {}) do
+        local n = tonumber(id)
+        if n then deleted[n] = true end
+    end
+    if self.canvas and deleted[self.canvas.id] then
+        if self.surface_session then self.surface_session:close{ discard = true } end
+        if self.overlay_widget then
+            UIManager:close(self.overlay_widget)
+            self.overlay_widget = nil
+        end
+        self.cache_obj = nil
+        self.queue = nil
+        self.surface_session = nil
+        self.canvas = nil
+        self:_placeOpenCanvas()
+        self.next_seq = nil
+        self.edited = false
+    end
+    for id in pairs(deleted) do
+        self:_releaseHistory{ id = id }
+        if self.index then self.index:forget(id) end
+    end
+    self.marks_here = {}
+    return true
+end
+
 function Session:activeCanvas()
     return self.canvas
 end

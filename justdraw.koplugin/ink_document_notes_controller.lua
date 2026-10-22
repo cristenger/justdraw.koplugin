@@ -11,6 +11,7 @@ local UIManager = require("ui/uimanager")
 local Event = require("ui/event")
 local Device = require("device")
 local _ = require("ink_i18n")
+local N_ = _.ngettext
 local T = require("ffi/util").template
 local Controller = {}
 Controller.__index = Controller
@@ -1127,6 +1128,67 @@ function Controller:showExportOptions()
         end,
     }
     self:showModal(dialog)
+end
+
+--- The rows a deletion of the current selection would remove: every sheet of
+--- a selected drawing note and every selected page-ink surface. KOReader's own
+--- annotations and legacy ink are counted and left alone -- they are not this
+--- database's to delete (ADR-39).
+function Controller:selectedDeletion()
+    local ids, seen, notes, skipped = {}, {}, 0, 0
+    local function take(leaf)
+        local id = leaf.surface and tonumber(leaf.surface.id)
+        if id and not seen[id] then seen[id], ids[#ids + 1] = true, id end
+    end
+    for _, item in ipairs(self.catalog and self.catalog.items or {}) do
+        if self.catalog.selected[item.id] then
+            if item.kind == "sheet" then
+                notes = notes + 1
+                for _, leaf in ipairs(item.sheets or { item }) do take(leaf) end
+            elseif item.kind == "page_ink" then
+                notes = notes + 1
+                take(item)
+            else
+                skipped = skipped + 1
+            end
+        end
+    end
+    return ids, notes, skipped
+end
+
+function Controller:confirmDeleteSelected()
+    local ids, notes, skipped = self:selectedDeletion()
+    if notes == 0 then
+        return self:notify(skipped > 0
+            and _("Only JustDraw notes can be deleted here. KOReader annotations and legacy ink are kept.")
+            or _("Select at least one note."))
+    end
+    local text = T(N_("Delete %1 selected JustDraw note and everything drawn on it?",
+        "Delete %1 selected JustDraw notes and everything drawn on them?", notes), notes)
+    if skipped > 0 then
+        text = text .. "\n\n" .. T(N_("%1 KOReader annotation or legacy item is kept.",
+            "%1 KOReader annotations or legacy items are kept.", skipped), skipped)
+    end
+    -- No cancel_callback and no close in ok_callback: a ConfirmBox closes
+    -- itself either way, and a second close is the stale repaint ADR-28 is
+    -- about.
+    self:showModal(require("ui/widget/confirmbox"):new{
+        text = text,
+        ok_text = _("Delete"),
+        ok_callback = function()
+            local ok, err = self.host:deleteDocumentNotes(ids)
+            if not ok then
+                if err == "export_busy" or err == "contact_active" then
+                    return self:notify(ExportDialog.reason(err))
+                end
+                return self:notify(_("Could not delete the selected notes. Nothing was changed."))
+            end
+            self.catalog.selected = {}
+            self.focus_id, self.surface_id, self.focus_sheet_index = nil, nil, nil
+            self:notify(T(N_("Deleted %1 note.", "Deleted %1 notes.", notes), notes))
+            self:retry()
+        end,
+    })
 end
 
 return Controller

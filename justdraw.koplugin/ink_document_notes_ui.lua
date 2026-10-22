@@ -87,10 +87,17 @@ function Browser:_rebuild()
     end
     local row_h = math.floor(list_h / self.per_page)
     local content = VerticalGroup:new{ align = "left", title }
-    content[#content + 1] = self:_actions({
-        { text = c.state == "error" and _("Retry") or next(c.filter) and _("Filtered") or _("Filter"),
+    -- While selecting, the filter's slot deletes: the selection is what a
+    -- deletion acts on, and a filter change mid-selection would hide rows that
+    -- are still selected.
+    local first = self.select_mode
+        and { text = _("Delete…"), enabled = ready and c:selectionCount() > 0,
+              callback = function() self.controller:confirmDeleteSelected() end }
+        or { text = c.state == "error" and _("Retry") or next(c.filter) and _("Filtered") or _("Filter"),
           enabled = ready or c.state == "error",
-          callback = function() if c.state == "error" then self.controller:retry() else self:showFilters() end end },
+          callback = function() if c.state == "error" then self.controller:retry() else self:showFilters() end end }
+    content[#content + 1] = self:_actions({
+        first,
         { text = self.select_mode and _("Done selecting") or _("Select"), enabled = ready,
           callback = function() self.select_mode = not self.select_mode; self:_rebuild() end },
         { text = _("Export…"), enabled = ready,

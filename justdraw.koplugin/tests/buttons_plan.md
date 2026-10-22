@@ -127,6 +127,7 @@ cell, refusals, stale dialogs).
 | Filter → KOReader annotations | Closes the browser and opens KOReader's own list | Auto |
 | Filter menu | No Close row: its title bar ✕ closes it | Auto |
 | Select / Done selecting | Rows toggle ☑/☐ and the count follows | Auto |
+| Delete… (while selecting) | Disabled with nothing selected; asks with the count; Cancel deletes nothing | Auto |
 | Export… | Menu of scopes, one page; a scope prepares, then opens the export form | Auto |
 | Page counter (1 / N) | Asks for a list page; Cancel closes it | Auto |
 | Previous / Next | Disabled on a single page | Auto (state), Device (paging) |

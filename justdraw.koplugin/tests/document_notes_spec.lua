@@ -105,6 +105,32 @@ return function(ctx)
         t:check(Note.before(legacy,sheet),"legacy order preserved")
         t:check(not Note.before(sheet,sheet),"strict comparator")
     end)
+    t:case("deleting a selection takes every sheet of a note and nothing KOReader owns", function()
+        local Controller = require("ink_document_notes_controller")
+        local group = {id = "note:1", kind = "sheet", surface = {id = 3},
+            sheets = {{surface = {id = 3}}, {surface = {id = 4}}}}
+        local lone = {id = "sheet:5", kind = "sheet", surface = {id = 5}}
+        local page = {id = "page:6", kind = "page_ink", surface = {id = 6}}
+        local native = {id = "native:x", kind = "native_highlight"}
+        local legacy = {id = "legacy:2", kind = "legacy_page"}
+        local unselected = {id = "sheet:9", kind = "sheet", surface = {id = 9}}
+        local c = Controller.new{}
+        c.catalog = {items = {group, lone, page, native, legacy, unselected}, selected = {
+            [group.id] = true, [lone.id] = true, [page.id] = true,
+            [native.id] = true, [legacy.id] = true}}
+        local ids, notes, skipped = c:selectedDeletion()
+        table.sort(ids)
+        t:eq(table.concat(ids, ","), "3,4,5,6", "both sheets of the note, the lone sheet and the page")
+        t:eq(notes, 3, "three notes")
+        t:eq(skipped, 2, "the annotation and the legacy page are kept")
+
+        local asked
+        c.host = {notify = function(_, text) asked = text end,
+            deleteDocumentNotes = function() error("must not be reached") end}
+        c.catalog.selected = {[native.id] = true}
+        c:confirmDeleteSelected()
+        t:check(asked ~= nil, "a selection with nothing deletable says so instead of asking")
+    end)
     t:describe("document notes / native annotations and logical sheets")
     t:case("native identity survives edits and duplicate anchors span batches", function()
         local Native=require("ink_native_annotations")
