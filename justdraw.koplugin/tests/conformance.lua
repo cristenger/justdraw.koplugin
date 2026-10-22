@@ -1094,6 +1094,16 @@ else
             local rows = function(sql)
                 return tonumber(conn:rowexec(sql))
             end
+            local third = root and Groups.new(repo):append(book_id, second or root)
+            local pages = root and repo:listNotePages(book_id, root.id) or {}
+            local order = {}
+            for i, row in ipairs(pages) do order[i] = row.canvas_id end
+            claim("canvas database: a note's sheets come back in order, by any of them",
+                true, root ~= nil and second ~= nil and third ~= nil and #pages == 3
+                    and order[1] == root.id and order[2] == second.id and order[3] == third.id
+                    and #(repo:listNotePages(book_id, third.id) or {}) == 3,
+                table.concat(order, ","))
+            if third then repo:deleteCanvas(third.id) end
             local before = rows("SELECT count(*) FROM canvases")
             local refused, why = repo:deleteBookCanvases(book_id,
                 { root and root.id, page and page.id, foreign and foreign.id })

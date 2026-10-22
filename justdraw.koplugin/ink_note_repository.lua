@@ -14,76 +14,26 @@ function Groups:memberships(book)
         end
     )
 end
+--- Add a sheet to the end of `surface`'s note; the transaction lives with the
+--- rest of the canvas SQL (`Repository:appendNoteSheet`).
 function Groups:append(book, surface)
-    local r = self.repository
-    return r:transaction(function()
-        local rows, err = r:_select(
-            "SELECT id FROM canvases WHERE id=?1 AND book_id=?2 AND surface_role='sheet';",
-            { surface.id, book },
-            function(row)
-                return tonumber(row[1])
-            end
-        )
-        if not rows or not rows[1] then
-            return nil, err or "bad_surface"
-        end
-        local members, merr = self:memberships(book)
-        if not members then
-            return nil, merr
-        end
-        local note
-        for _, m in ipairs(members) do
-            if m.canvas_id == surface.id then
-                note = m.note_id
-            end
-        end
-        if not note then
-            local ok, why = r:_run("INSERT INTO document_notes(book_id) VALUES (?1);", { book })
-            if not ok then
-                return nil, why
-            end
-            note = assert(r:_lastId())
-            ok, why = r:_run(
-                "INSERT INTO document_note_sheets(canvas_id,note_id,position) VALUES (?1,?2,1);",
-                { surface.id, note }
-            )
-            if not ok then
-                return nil, why
-            end
-        end
-        local position = 1
-        for _, m in ipairs(members) do
-            if m.note_id == note then
-                position = math.max(position, m.position)
-            end
-        end
-        position = position + 1
-        local spec = {}
-        for k, v in pairs(surface) do
-            spec[k] = v
-        end
-        -- Identity for the extra surface is distinct; its durable xpointer stays identical.
-        local nonce = r:_select("SELECT COALESCE(MAX(id),0)+1 FROM canvases;", nil, function(row)
-            return tonumber(row[1])
-        end)
-        if not nonce then
-            return nil, "list_failed"
-        end
-        spec.anchor_key = "justdraw-note:" .. note .. ":" .. nonce[1]
-        local canvas, why = r:createCanvas(book, spec)
-        if not canvas then
-            return nil, why
-        end
-        local ok
-        ok, why = r:_run(
-            "INSERT INTO document_note_sheets(canvas_id,note_id,position) VALUES (?1,?2,?3);",
-            { canvas.id, note, position }
-        )
-        if not ok then
-            return nil, why
-        end
-        return canvas
-    end)
+    return self.repository:appendNoteSheet(book, surface)
+end
+
+--[[--
+The sheets of `surface`'s note in reading order, the position of `surface`
+among them, and the note's id -- or a note of one for a sheet that has never
+had a second, which is presented as such without writing anything.
+]]
+function Groups:pages(book, surface)
+    if not surface then return nil, "bad_surface" end
+    local rows, err = self.repository:listNotePages(book, surface.id)
+    if not rows then return nil, err end
+    if #rows == 0 then return { { canvas_id = surface.id, position = 1 } }, 1 end
+    for i, row in ipairs(rows) do
+        if row.canvas_id == surface.id then return rows, i, row.note_id end
+    end
+    return nil, "bad_surface"
 end
 function Groups:reorder(book, note, ids)
     local r = self.repository

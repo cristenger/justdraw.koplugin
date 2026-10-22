@@ -29,6 +29,7 @@ local _ = require("ink_i18n")
 local Anchor = require("ink_anchor")
 local BookDatabase = require("ink_book_database")
 local Index = require("ink_anchor_index")
+local NoteGroups = require("ink_note_repository")
 local PageIndex = require("ink_page_index")
 local Overlay = require("ink_canvas_overlay")
 local History = require("ink_edit_history")
@@ -556,6 +557,9 @@ function Session:openCanvas(canvas, opts)
 
     self.canvas = canvas
     self:_placeOpenCanvas()
+    -- Before the overlay: its header is laid out for a note of one sheet or
+    -- of several, and reads this once, as it is built.
+    self:refreshNotePages()
     if not self:isWritable() then self.notify(MESSAGES.read_only) end
     local history = self:_historyFor(canvas)
     self.surface_session = SurfaceSession.new{
@@ -758,6 +762,7 @@ function Session:deleteCanvas(canvas)
     end
     self:_releaseHistory(canvas)
     if self.index then self.index:forget(canvas.id) end
+    if self.canvas then self:refreshNotePages() end
     self.marks_here = {}
     return true
 end
@@ -796,12 +801,54 @@ function Session:forgetDeletedCanvases(ids)
         self:_releaseHistory{ id = id }
         if self.index then self.index:forget(id) end
     end
+    if self.canvas then self:refreshNotePages() end
     self.marks_here = {}
     return true
 end
 
 function Session:activeCanvas()
     return self.canvas
+end
+
+--[[--
+Which sheet of its note the open sheet is, read once per open and per change
+to the note -- never from paint or the pen path, which only read
+`notePageState`. One bounded query (`listNotePages`); a sheet that has never
+had a second is a note of one and costs nothing to say so.
+]]
+function Session:refreshNotePages()
+    local canvas = self.canvas
+    self.note_pages = nil
+    if not canvas or not self.book_id or not self.repository
+        or type(self.repository.listNotePages) ~= "function" then
+        return nil, "closed"
+    end
+    local rows, current, note_id = NoteGroups.new(self.repository)
+        :pages(self.book_id, canvas)
+    if not rows then
+        logger.warn("JustDraw: cannot read this sheet's note:", current)
+        return nil, current
+    end
+    local ids = {}
+    for i, row in ipairs(rows) do ids[i] = row.canvas_id end
+    self.note_pages = {
+        canvas_id = canvas.id,
+        ids = ids,
+        position = current,
+        total = #ids,
+        note_id = note_id,
+        previous_id = ids[current - 1],
+        next_id = ids[current + 1],
+    }
+    return self.note_pages
+end
+
+--- The open sheet's place in its note: `{ position, total, ids, note_id,
+--- previous_id, next_id }`, or a note of one when nothing says otherwise.
+function Session:notePageState()
+    local pages = self.note_pages
+    if pages and self.canvas and pages.canvas_id == self.canvas.id then return pages end
+    return { position = 1, total = 1 }
 end
 
 --[[--

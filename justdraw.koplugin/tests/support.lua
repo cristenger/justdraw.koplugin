@@ -1447,7 +1447,67 @@ function support.newCanvasStore(canvases)
             if self.canvases[i].id == canvas_id then table.remove(self.canvases, i) end
         end
         self.strokes[canvas_id] = nil
+        if self.note_sheets then
+            for i = #self.note_sheets, 1, -1 do
+                if self.note_sheets[i].canvas_id == canvas_id then table.remove(self.note_sheets, i) end
+            end
+        end
         return true
+    end
+
+    -- Notes of several sheets (schema v4): memberships keyed by canvas, and
+    -- the cascade a canvas delete performs on them, as the schema does.
+    store.note_sheets = store.note_sheets or {}
+    store.next_note_id = store.next_note_id or 0
+    local function dropMemberships(self, id)
+        for i = #self.note_sheets, 1, -1 do
+            if self.note_sheets[i].canvas_id == id then table.remove(self.note_sheets, i) end
+        end
+    end
+
+    function store:listNotePages(_, canvas_id)
+        if self.fail_note_pages then return nil, self.fail_note_pages end
+        local note
+        for _, m in ipairs(self.note_sheets) do
+            if m.canvas_id == canvas_id then note = m.note_id end
+        end
+        local out = {}
+        if not note then return out end
+        for _, m in ipairs(self.note_sheets) do
+            if m.note_id == note then
+                out[#out + 1] = { canvas_id = m.canvas_id, note_id = m.note_id, position = m.position }
+            end
+        end
+        table.sort(out, function(a, b)
+            if a.position ~= b.position then return a.position < b.position end
+            return a.canvas_id < b.canvas_id
+        end)
+        return out
+    end
+
+    function store:appendNoteSheet(book_id, surface)
+        self.calls.appendNoteSheet = (self.calls.appendNoteSheet or 0) + 1
+        if self.fail_append then return nil, self.fail_append end
+        local members = self:listNotePages(book_id, surface.id)
+        local note, position = nil, 1
+        for _, m in ipairs(members) do
+            note = m.note_id
+            if m.position > position then position = m.position end
+        end
+        if not note then
+            self.next_note_id = self.next_note_id + 1
+            note = self.next_note_id
+            self.note_sheets[#self.note_sheets + 1] =
+                { canvas_id = surface.id, note_id = note, position = 1 }
+        end
+        local spec = {}
+        for k, v in pairs(surface) do spec[k] = v end
+        spec.anchor_key = "justdraw-note:" .. note .. ":" .. (self.next_canvas_id + 1)
+        local canvas, err = self:createCanvas(book_id, spec)
+        if not canvas then return nil, err end
+        self.note_sheets[#self.note_sheets + 1] =
+            { canvas_id = canvas.id, note_id = note, position = position + 1 }
+        return canvas
     end
 
     -- The real one checks every id inside one transaction before deleting
@@ -1473,6 +1533,7 @@ function support.newCanvasStore(canvases)
             if wanted[id] then
                 table.remove(self.canvases, i)
                 self.strokes[id] = nil
+                dropMemberships(self, id)
             end
         end
         return true

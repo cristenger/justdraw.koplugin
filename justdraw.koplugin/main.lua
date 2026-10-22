@@ -28,6 +28,7 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local logger = require("logger")
 local time = require("ui/time")
 local _ = require("ink_i18n")
+local N_ = _.ngettext
 local T = require("ffi/util").template
 
 local CanvasSession = require("ink_canvas_session")
@@ -1885,10 +1886,185 @@ function JustDraw:openPageSheetHere()
         return nil, "unavailable"
     end
     local page = self:currentPage()
-    local canvas, err = session:canvasesHere(page)[1], nil
+    local first = self:notesAmong(session:canvasesHere(page))[1]
+    local canvas, err = first and self:noteSheetToOpen(first), nil
     if not canvas then canvas, err = session:createHere(page) end
     if not canvas then return nil, err end
     return self:openCanvas(canvas)
+end
+
+-- ------------------------------------------- notes of several sheets (ADR-68)
+
+--- Doc setting: the sheet each note was last turned to, by note id.
+local NOTE_SHEET_SETTING = "note_sheet_selection"
+
+--[[--
+The sheets in `list`, gathered into the notes they belong to, in the order
+their first sheet appears. `{ note_id, canvases }`; a sheet alone is a note of
+one with no id.
+
+One bounded query per note present (`listNotePages`), never the book's whole
+membership table: this runs when the reader opens a sheet or a menu, and a
+position holds a handful of sheets.
+]]
+function JustDraw:notesAmong(list)
+    local notes, placed = {}, {}
+    local by_id = {}
+    for _, canvas in ipairs(list) do by_id[canvas.id] = canvas end
+    local Groups = require("ink_note_repository")
+    local session = self.session
+    for _, canvas in ipairs(list) do
+        if not placed[canvas.id] then
+            local rows, _current, note_id
+            if session and session.book_id and session.repository
+                and type(session.repository.listNotePages) == "function" then
+                rows, _current, note_id = Groups.new(session.repository)
+                    :pages(session.book_id, canvas)
+            end
+            local note = { note_id = note_id, canvases = {} }
+            for _, row in ipairs(rows or { { canvas_id = canvas.id } }) do
+                local member = by_id[row.canvas_id]
+                if member and not placed[member.id] then
+                    placed[member.id] = true
+                    note.canvases[#note.canvases + 1] = member
+                end
+            end
+            notes[#notes + 1] = note
+        end
+    end
+    return notes
+end
+
+--- The sheet of `note` to open: the one the reader last turned to, while it is
+--- still one of the note's, else its first. Remembered per book, written only
+--- when the reader turns a sheet (never by opening one, ADR-62).
+function JustDraw:noteSheetToOpen(note)
+    local first = note.canvases[1]
+    if not note.note_id or self.is_docless or not self.ui.doc_settings then return first end
+    local remembered = Compat.readSetting(self.ui.doc_settings, NOTE_SHEET_SETTING, {})
+    local id = type(remembered) == "table" and tonumber(remembered[tostring(note.note_id)])
+    for _, canvas in ipairs(note.canvases) do
+        if canvas.id == id then return canvas end
+    end
+    return first
+end
+
+function JustDraw:rememberNoteSheet(note_id, canvas_id)
+    if not note_id or self.is_docless or not self.ui.doc_settings then return end
+    local remembered = Compat.readSetting(self.ui.doc_settings, NOTE_SHEET_SETTING, {})
+    if type(remembered) ~= "table" then remembered = {} end
+    remembered[tostring(note_id)] = canvas_id
+    Compat.saveSetting(self.ui.doc_settings, NOTE_SHEET_SETTING, remembered)
+end
+
+--- A picker row: a lone sheet keeps its old name; a note says how many.
+function JustDraw:noteLabel(note, i)
+    if #note.canvases == 1 then return string.format(_("Sheet %d"), i) end
+    return T(N_("Note %1 · %2 sheet", "Note %1 · %2 sheets", #note.canvases),
+        i, #note.canvases)
+end
+
+--[[--
+Whether the open sheet's note may be turned or added to right now, and why
+not. Never with a contact live (a turn closes the sheet, which flushes, ADR-42),
+never off the sheet's page (ADR-45), never with a write still failing.
+]]
+function JustDraw:noteTurnRefusal()
+    if not (self.canvas_open and self.session and self.session:activeCanvas()) then
+        return "no_canvas"
+    end
+    if self.input_lease and self.input_lease:hasActiveContact() then return "contact_active" end
+    if self.session:saveFailed() then return "save_failed" end
+    local cache = self.session:cache()
+    if not cache or not cache:isReady() then return "loading" end
+    return nil
+end
+
+--- Open sheet `id` of the open sheet's note in its place, keeping the sheet's
+--- height, its note context and whether the reader was drawing.
+function JustDraw:openNoteSheet(id)
+    local refused = self:noteTurnRefusal()
+    if refused then return nil, refused end
+    local session = self.session
+    local target = session.index and session.index:get(id) or session:canvasById(id)
+    if not target then return nil, "no_sheet" end
+    local pages = session:notePageState()
+    local overlay = session:overlay()
+    local context = self.note_context
+    if context then
+        context.surface_id, context.anchor_key = target.id, target.anchor_key
+        context.anchor_raw, context.fixed_page = target.anchor_raw, target.fixed_page
+    end
+    local mode = self.canvas_intent == "edit" and "edit" or "view"
+    local opened, err = self:openCanvas(target, {
+        mode = mode,
+        height_pct = overlay and overlay.height_pct,
+        remember_height = false,
+        note_context = context,
+    })
+    if opened then self:rememberNoteSheet(pages.note_id, target.id) end
+    return opened, err
+end
+
+function JustDraw:turnNoteSheet(delta)
+    local pages = self.session and self.session:notePageState()
+    local id = pages and (delta < 0 and pages.previous_id or pages.next_id)
+    if not id then return nil, "no_sheet" end
+    return self:openNoteSheet(id)
+end
+
+--[[--
+Add a sheet to the end of the open sheet's note and turn to it.
+
+Refused off the sheet's page (it would make a sheet that cannot take ink) and
+read-only; the open sheet is flushed first, so the transaction that makes the
+note never runs beside a pending write of the same surface.
+]]
+function JustDraw:addNoteSheet()
+    local refused = self:noteTurnRefusal()
+    if refused then return nil, refused end
+    local session = self.session
+    if not session:isWritable() then return nil, "read_only" end
+    if self.canvas_off_page then return nil, "away" end
+    local active = session:activeCanvas()
+    local flushed, ferr = session:flush()
+    if not flushed then return nil, ferr end
+    local canvas, err = require("ink_note_repository").new(session.repository)
+        :append(session.book_id, active)
+    if not canvas then
+        self:notify(_("Could not add a sheet to this note."))
+        return nil, err
+    end
+    if session.index then
+        session.index:add(canvas, session.index:pageOf(active.id) or active.fixed_page)
+    end
+    return self:openNoteSheet(canvas.id)
+end
+
+--- Which sheet of the note, as a list; the open one is marked in its text.
+function JustDraw:showNoteSheetPicker()
+    if self:noteTurnRefusal() then return end
+    local pages = self.session:notePageState()
+    if pages.total < 2 then return end
+    local dialog
+    local buttons = {}
+    for i, id in ipairs(pages.ids) do
+        -- The mark is in the text: a close-on-pick row must not carry a
+        -- checked_func, whose repaint lands after the dialog is gone (ADR-35).
+        local text = T(_("Sheet %1"), i)
+        if i == pages.position then text = text .. "  ✓" end
+        buttons[#buttons + 1] = { {
+            text = text,
+            callback = function()
+                self:closeReaderModal(dialog)
+                if i ~= pages.position then self:openNoteSheet(id) end
+            end,
+        } }
+    end
+    buttons[#buttons + 1] = { { text = _("Close"),
+        callback = function() self:closeReaderModal(dialog) end } }
+    dialog = ButtonDialog:new{ title = _("Sheets of this note"), buttons = buttons }
+    return self:showReaderModal(dialog)
 end
 
 -- ----------------------------------------------------------------- toolbar
@@ -3848,12 +4024,14 @@ function JustDraw:openSheetForDrawing()
     return self:openCanvasHere()
 end
 
---- Open the sheet at the reader's position, or make one there.
+--- Open the sheet at the reader's position, or make one there. Several sheets
+--- of one note are one choice, not several (ADR-68).
 function JustDraw:openCanvasHere()
     if not (self.session and self.session:isAvailable()) then return end
     local here = self.session:canvasesHere(self:currentPage())
-    if #here == 1 then return self:openCanvas(here[1]) end
-    if #here > 1 then return self:showCanvasPicker(here) end
+    local notes = self:notesAmong(here)
+    if #notes == 1 then return self:openCanvas(self:noteSheetToOpen(notes[1])) end
+    if #notes > 1 then return self:showCanvasPicker(notes) end
     local canvas, err = self.session:createHere(self:currentPage())
     if not canvas then
         if err ~= "indexing" then
@@ -5119,6 +5297,9 @@ function JustDraw:showBarMenu()
             callback = pick(function()
                 if self.note_context then self:hideNote() else self:closeCanvas() end
             end) } }
+        rows[#rows + 1] = { { text = _("Add sheet"),
+            enabled = self.session:isWritable() and not self.canvas_off_page,
+            callback = pick(function() self:addNoteSheet() end) } }
         rows[#rows + 1] = { { text = _("Delete sheet"),
             enabled = self.session:isWritable(),
             callback = pick(function() self:confirmDeleteCanvas(active) end) } }
@@ -5145,18 +5326,18 @@ Opening the first one silently is the failure worth avoiding: the reader would
 write into a sheet they cannot see the identity of, and find their earlier
 notes in the other one later.
 ]]
-function JustDraw:showCanvasPicker(list)
+function JustDraw:showCanvasPicker(notes)
     local buttons = {}
-    for i = 1, #list do
-        local canvas = list[i]
+    for i = 1, #notes do
+        local note = notes[i]
         buttons[i] = { {
-            text = string.format(_("Sheet %d"), i),
+            text = self:noteLabel(note, i),
             callback = function()
                 if self.canvas_picker then
                     UIManager:close(self.canvas_picker)
                     self.canvas_picker = nil
                 end
-                self:openCanvas(canvas)
+                self:openCanvas(self:noteSheetToOpen(note))
             end,
         } }
     end
@@ -5184,7 +5365,21 @@ function JustDraw:deleteCanvas(canvas)
     if not (self.session and canvas) then return nil, "no_canvas" end
     local active = self.canvas_open and self.session:activeCanvas()
         and self.session:activeCanvas().id == canvas.id
+    -- The open sheet of a note of several: the reader turns to its neighbour
+    -- rather than to nothing, the way a page torn out of a pad leaves the next
+    -- one on top (ADR-68). Read before the delete, which forgets the note.
+    local neighbour, reopen
     if active then
+        local pages = self.session:notePageState()
+        neighbour = pages.total > 1 and (pages.next_id or pages.previous_id) or nil
+        if neighbour then
+            local overlay = self.session:overlay()
+            reopen = {
+                mode = self.canvas_intent == "edit" and "edit" or "view",
+                height_pct = overlay and overlay.height_pct,
+                remember_height = false,
+            }
+        end
         self:abortCanvasStroke()
         self:setDrawing(false)
     end
@@ -5196,6 +5391,10 @@ function JustDraw:deleteCanvas(canvas)
     end
 
     self:_forgetDeletedSheets({ [canvas.id] = true }, active)
+    if neighbour then
+        local target = self.session.index and self.session.index:get(neighbour)
+        if target then self:openCanvas(target, reopen) end
+    end
     UIManager:setDirty(self.ui, "full")
     return true
 end
@@ -5328,6 +5527,15 @@ function JustDraw:canvasMenu()
             callback = function() self:openCanvasHereInstead() end,
         }
         items[#items + 1] = {
+            -- Closes the menu: the new sheet opens in this one's place.
+            text = _("Add a sheet to this note"),
+            enabled_func = function()
+                return self.session:isWritable() and not self.canvas_off_page
+            end,
+            callback = function() self:addNoteSheet() end,
+            help_text = _([[Adds a blank sheet after the last one of this note, at the same place in the book, and turns to it. The sheet header then shows which sheet of how many is open.]]),
+        }
+        items[#items + 1] = {
             text = _("Delete this sheet"),
             enabled_func = function() return self.session:isWritable() end,
             keep_menu_open = true,
@@ -5392,11 +5600,12 @@ function JustDraw:canvasMenu()
     local here = self.session:canvasesHere(self:currentPage())
     if #here > 1 then
         local sub = {}
-        for i = 1, #here do
-            local canvas = here[i]
+        local notes = self:notesAmong(here)
+        for i = 1, #notes do
+            local note = notes[i]
             sub[i] = {
-                text = string.format(_("Sheet %d"), i),
-                callback = function() self:openCanvas(canvas) end,
+                text = self:noteLabel(note, i),
+                callback = function() self:openCanvas(self:noteSheetToOpen(note)) end,
             }
         end
         items[#items + 1] = {

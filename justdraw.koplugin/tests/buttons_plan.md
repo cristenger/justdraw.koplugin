@@ -84,6 +84,10 @@ cell, refusals, stale dialogs).
 | Dragging the strip above the controls | Resizes | Device |
 | Drawing sheet → Open sheet here / Close sheet | Reopens the same sheet here; closes it | Auto |
 | Go to this sheet's page / Open a sheet here instead | Only after reading on with a sheet open | Device |
+| More → Add sheet | A new sheet of this note opens in place; the header counts the sheets | Auto (suite) |
+| ‹ / › (a note of several sheets) | Turn to the previous / next sheet; disabled at the ends | Auto (suite) |
+| N / M (hold: Sheet N of M) | Lists the note's sheets, the open one marked; a pick turns to it | Auto (suite) |
+| Draw on a refused PDF view → Open drawing sheet | A sheet hung on this page opens; Cancel opens nothing | Auto (suite) |
 
 ## Notebooks
 

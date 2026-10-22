@@ -15,6 +15,12 @@ is aligned with the page rather than with a sheet, are unchanged.
 
 Rows are sized in physical millimetres and never shrunk: a screen too narrow
 for six 10 mm targets gets its tools in two rows of three instead.
+
+A note of several sheets (ADR-68) turns its first row into Draw, previous,
+"2 / 3" (a hold says "Sheet 2 of 3"), next and the way out. Same row, same height: the bar's height
+is part of every sheet's shape (ADR-51), and a note gaining a sheet must not
+reshape the paper. The bar is rebuilt with every sheet opened, so the layout
+is decided once, here.
 ]]
 
 local Blitbuffer = require("ffi/blitbuffer")
@@ -94,17 +100,32 @@ function SheetBar:init()
     end
 
     -- First row: the state control, what the pen will do (painted between
-    -- them by update), and the way out.
-    self.draw_btn = place(_("Draw"), 0, 1, 3, function()
+    -- them by update), and the way out. A note of several sheets puts its
+    -- previous / which / next between them instead.
+    local pages = p.session and p.session.notePageState and p.session:notePageState()
+    self.pages = pages and pages.total > 1 and pages or nil
+    local slots = self.pages and 5 or 3
+    self.draw_btn = place(_("Draw"), 0, 1, slots, function()
         if p.canvas_open and p.session and p.session:loadFailed() then
             p:retryCanvasLoad()
         else
             p:setDrawing(not p.drawing)
         end
     end)
+    if self.pages then
+        self.previous_btn = place(_("Previous sheet"), 0, 2, slots,
+            function() p:turnNoteSheet(-1) end, "previous")
+        -- "2 / 3", not "Sheet 2 of 3": a fifth of a 600 px row holds the
+        -- short form at any count, and a hold still says it in full.
+        self.sheet_btn = place(T("%1 / %2", self.pages.position, self.pages.total),
+            0, 3, slots, function() p:showNoteSheetPicker() end)
+        self.sheet_btn.help_text = T(_("Sheet %1 of %2"), self.pages.position, self.pages.total)
+        self.next_btn = place(_("Next sheet"), 0, 4, slots,
+            function() p:turnNoteSheet(1) end, "next")
+    end
     -- The way out is the cross every panel closes with; a hold names it,
     -- and the name differs between a sheet and a note.
-    self.hide_btn = place(self.note_context and _("Hide note") or _("Close sheet"), 0, 3, 3,
+    self.hide_btn = place(self.note_context and _("Hide note") or _("Close sheet"), 0, slots, slots,
         function() p:setBarShown(false) end, "close")
 
     -- Six tools, as before (D-S1, ADR-57): Document notes and the height
@@ -138,6 +159,13 @@ function SheetBar:update(refresh)
         end
     end
     self:setContextText(self.draw_btn, draw_text)
+    if self.pages then
+        -- Turning closes this sheet, which flushes: never with a write failing.
+        local turnable = cache and cache:isReady() and session and not session:saveFailed()
+        self.previous_btn:enableDisable(turnable and self.pages.previous_id ~= nil)
+        self.next_btn:enableDisable(turnable and self.pages.next_id ~= nil)
+        self.sheet_btn:enableDisable(turnable or false)
+    end
 
     local label = PenDialog.label(p:effectiveStyle(), p.pen_width)
     local tool = p.toolFor and p:toolFor("sheet") or (p.eraser and "eraser" or "pen")
@@ -151,7 +179,11 @@ function SheetBar:update(refresh)
         ToolButton.decorate(self.edit_btn, edit_icon, edit_label ~= nil, edit_label or _("Edit"))
     end
     ToolButton.setState(self.edit_btn, edit_label or _("Edit"), edit_label ~= nil)
-    self:_setStatus(tool == "eraser" and _("Eraser") or edit_label or label)
+    -- With a note's sheets in the row there is no room for the words, and the
+    -- selected tool already shows itself below.
+    if not self.pages then
+        self:_setStatus(tool == "eraser" and _("Eraser") or edit_label or label)
+    end
 
     -- Undo and Redo show whether they would do anything (audit UX-4).
     local can_undo = type(p.canUndo) == "function" and p:canUndo() or false

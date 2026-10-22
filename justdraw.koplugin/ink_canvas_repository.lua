@@ -988,6 +988,80 @@ function Repository:deleteAllPageInkSurfaces(book_id)
 end
 
 --[[--
+The sheets of the note `canvas_id` belongs to, in reading order, or an empty
+list for a sheet that has never had a second one.
+
+One query bounded by the note, not the book: it runs every time a sheet
+opens, to label its header, and a book's whole membership table is not what
+"which sheet of how many" needs. Rows are `{ canvas_id, note_id, position }`.
+]]
+function Repository:listNotePages(book_id, canvas_id)
+    local ready, reason = self:_ready(false)
+    if not ready then return nil, reason end
+    return self:_select([[
+        SELECT s2.canvas_id, s2.note_id, s2.position
+          FROM document_note_sheets s1
+          JOIN document_notes n ON n.id = s1.note_id
+          JOIN document_note_sheets s2 ON s2.note_id = s1.note_id
+         WHERE s1.canvas_id = ?1 AND n.book_id = ?2
+         ORDER BY s2.position, s2.canvas_id;]], { canvas_id, book_id },
+        function(row)
+            return { canvas_id = num(row[1]), note_id = num(row[2]), position = num(row[3]) }
+        end)
+end
+
+--[[--
+Add a sheet to the end of the note `surface` belongs to, making the note first
+when the sheet has been alone until now. Answers the new canvas row.
+
+All in one transaction: a membership without its canvas, or a canvas no note
+owns, is a sheet the reader can see and cannot place. The new sheet copies the
+surface's anchor and geometry, with a key of its own -- `UNIQUE(book_id,
+anchor_key)` holds one sheet per anchor, and this is the second.
+]]
+function Repository:appendNoteSheet(book_id, surface)
+    return self:transaction(function(r)
+        local rows, err = r:_select(
+            "SELECT id FROM canvases WHERE id = ?1 AND book_id = ?2 AND surface_role = 'sheet';",
+            { surface.id, book_id }, function(row) return num(row[1]) end)
+        if not rows or not rows[1] then return nil, err or "bad_surface" end
+        local members
+        members, err = r:listNotePages(book_id, surface.id)
+        if not members then return nil, err end
+        local note, position = nil, 1
+        for _, m in ipairs(members) do
+            note = m.note_id
+            if m.position > position then position = m.position end
+        end
+        if not note then
+            local ok, why = r:_run("INSERT INTO document_notes(book_id) VALUES (?1);", { book_id })
+            if not ok then return nil, why end
+            note = r:_lastId()
+            if not note then return nil, "insert_failed" end
+            ok, why = r:_run([[
+                INSERT INTO document_note_sheets(canvas_id, note_id, position)
+                VALUES (?1, ?2, 1);]], { surface.id, note })
+            if not ok then return nil, why end
+        end
+        position = position + 1
+        local spec = {}
+        for k, v in pairs(surface) do spec[k] = v end
+        local nonce = r:_select("SELECT COALESCE(MAX(id), 0) + 1 FROM canvases;", nil,
+            function(row) return num(row[1]) end)
+        if not nonce or not nonce[1] then return nil, "list_failed" end
+        spec.anchor_key = "justdraw-note:" .. note .. ":" .. nonce[1]
+        local canvas, why = r:createCanvas(book_id, spec)
+        if not canvas then return nil, why end
+        local ok
+        ok, why = r:_run([[
+            INSERT INTO document_note_sheets(canvas_id, note_id, position)
+            VALUES (?1, ?2, ?3);]], { canvas.id, note, position })
+        if not ok then return nil, why end
+        return canvas
+    end)
+end
+
+--[[--
 Delete a chosen set of this book's sheets and page-ink surfaces, all or none.
 
 The Document notes browser deletes a selection, and a selection is only worth

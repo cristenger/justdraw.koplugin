@@ -302,7 +302,7 @@ msgstr ""
 msgid "Page %1"
 msgstr ""
 
-#: ink_document_note.lua ink_document_notes_controller.lua
+#: ink_document_note.lua ink_document_notes_controller.lua ink_sheet_bar.lua
 msgid "Sheet %1 of %2"
 msgstr ""
 
@@ -342,11 +342,11 @@ msgstr ""
 msgid "Locating…"
 msgstr ""
 
-#: ink_document_notes_controller.lua
+#: ink_document_notes_controller.lua ink_sheet_bar.lua
 msgid "Previous sheet"
 msgstr ""
 
-#: ink_document_notes_controller.lua
+#: ink_document_notes_controller.lua ink_sheet_bar.lua
 msgid "Next sheet"
 msgstr ""
 
@@ -2028,6 +2028,29 @@ msgid "Could not open a drawing sheet on this page."
 msgstr ""
 
 #: main.lua
+#, lua-format
+msgid "Sheet %d"
+msgstr ""
+
+#: main.lua
+msgid "Note %1 · %2 sheet"
+msgid_plural "Note %1 · %2 sheets"
+msgstr[0] ""
+msgstr[1] ""
+
+#: main.lua
+msgid "Could not add a sheet to this note."
+msgstr ""
+
+#: main.lua
+msgid "Sheet %1"
+msgstr ""
+
+#: main.lua
+msgid "Sheets of this note"
+msgstr ""
+
+#: main.lua
 msgid "This sheet is read-only"
 msgstr ""
 
@@ -2121,12 +2144,11 @@ msgid "Sheet height: %1 %"
 msgstr ""
 
 #: main.lua
-msgid "Delete sheet"
+msgid "Add sheet"
 msgstr ""
 
 #: main.lua
-#, lua-format
-msgid "Sheet %d"
+msgid "Delete sheet"
 msgstr ""
 
 #: main.lua
@@ -2154,6 +2176,17 @@ msgstr ""
 
 #: main.lua
 msgid "Open a sheet here instead"
+msgstr ""
+
+#: main.lua
+msgid "Add a sheet to this note"
+msgstr ""
+
+#: main.lua
+msgid ""
+"Adds a blank sheet after the last one of this note, at the same place in the "
+"book, and turns to it. The sheet header then shows which sheet of how many "
+"is open."
 msgstr ""
 
 #: main.lua

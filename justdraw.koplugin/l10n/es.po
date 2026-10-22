@@ -277,7 +277,7 @@ msgstr "Página guardada %1"
 msgid "Page %1"
 msgstr "Página %1"
 
-#: ink_document_note.lua ink_document_notes_controller.lua
+#: ink_document_note.lua ink_document_notes_controller.lua ink_sheet_bar.lua
 msgid "Sheet %1 of %2"
 msgstr "Hoja %1 de %2"
 
@@ -317,11 +317,11 @@ msgstr "Nota %1 de %2 · %3"
 msgid "Locating…"
 msgstr "Localizando…"
 
-#: ink_document_notes_controller.lua
+#: ink_document_notes_controller.lua ink_sheet_bar.lua
 msgid "Previous sheet"
 msgstr "Hoja anterior"
 
-#: ink_document_notes_controller.lua
+#: ink_document_notes_controller.lua ink_sheet_bar.lua
 msgid "Next sheet"
 msgstr "Hoja siguiente"
 
@@ -1933,6 +1933,29 @@ msgid "Could not open a drawing sheet on this page."
 msgstr "No se pudo abrir una hoja de dibujo en esta página."
 
 #: main.lua
+#, lua-format
+msgid "Sheet %d"
+msgstr "Hoja %d"
+
+#: main.lua
+msgid "Note %1 · %2 sheet"
+msgid_plural "Note %1 · %2 sheets"
+msgstr[0] "Nota %1 · %2 hoja"
+msgstr[1] "Nota %1 · %2 hojas"
+
+#: main.lua
+msgid "Could not add a sheet to this note."
+msgstr "No se pudo añadir una hoja a esta nota."
+
+#: main.lua
+msgid "Sheet %1"
+msgstr "Hoja %1"
+
+#: main.lua
+msgid "Sheets of this note"
+msgstr "Hojas de esta nota"
+
+#: main.lua
 msgid "This sheet is read-only"
 msgstr "Esta hoja es de solo lectura"
 
@@ -2020,13 +2043,12 @@ msgid "Sheet height: %1 %"
 msgstr "Altura de la hoja: %1 %"
 
 #: main.lua
-msgid "Delete sheet"
-msgstr "Borrar hoja"
+msgid "Add sheet"
+msgstr "Añadir hoja"
 
 #: main.lua
-#, lua-format
-msgid "Sheet %d"
-msgstr "Hoja %d"
+msgid "Delete sheet"
+msgstr "Borrar hoja"
 
 #: main.lua
 msgid "Sheets at this position"
@@ -2051,6 +2073,14 @@ msgstr "La hoja sigue abierta mientras sigues leyendo y no acompaña a la págin
 #: main.lua
 msgid "Open a sheet here instead"
 msgstr "Abrir una hoja aquí en su lugar"
+
+#: main.lua
+msgid "Add a sheet to this note"
+msgstr "Añadir una hoja a esta nota"
+
+#: main.lua
+msgid "Adds a blank sheet after the last one of this note, at the same place in the book, and turns to it. The sheet header then shows which sheet of how many is open."
+msgstr "Añade una hoja en blanco después de la última de esta nota, en el mismo lugar del libro, y pasa a ella. La cabecera de la hoja muestra entonces cuál de cuántas hojas está abierta."
 
 #: main.lua
 msgid "Delete this sheet"
