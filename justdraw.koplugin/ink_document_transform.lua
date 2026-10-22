@@ -19,9 +19,12 @@ three lines in the reader wiring. That formula is a lie in every mode where a
 page is not one rigid rectangle scaled onto the screen: CREngine, which has no
 native page at all; scroll mode, where one screen can hold parts of two pages;
 a page state that says it is rotated; a KOPT reflow (`text_wrap`), where what
-is on the screen is a re-laid-out page; a KOPT-optimised page, whose tile is
-not the page either; and a view whose `state.offset` does not exist yet
-because `recalculate` has not run. Each refusal answers its own reason so the
+is on the screen is a re-laid-out page; a KOPT page that is straightened, or
+optimised for a reason this module cannot name; and a view whose
+`state.offset` does not exist yet because `recalculate` has not run. The two
+optimisations that only filter pixels -- dewatermark (`page_opt`) and the
+white threshold -- leave every point where it was, and are let through
+(`optimisingReason`). Each refusal answers its own reason so the
 caller can tell the reader which one it is -- "not supported" with no
 explanation is what makes a reader try the same thing again. Auto-crop and the
 footer need no refusal: both are already inside `visible_area`, which the
@@ -122,6 +125,43 @@ function DocumentTransform.geometryMatches(surface, spec)
 end
 
 --[[--
+Why a page KOReader says it is optimising cannot take page ink, or nil when it
+can.
+
+`KoptInterface:is_optimizing_page` is true for any of three settings, and only
+one of them moves anything. Dewatermark (`page_opt`) and the white threshold
+are filters on pixels: the optimised tile is the native page at the same zoom,
+point for point, because `k2pdfopt_optimize_bmp` zeroes the trim and the
+margins `createContext` asks for. Auto Straighten turns the content inside
+that frame, and no translate-and-scale describes a turn. All three were
+measured against the runtime (ADR-38), and `tests/conformance.lua` restates
+it on a real page.
+
+So this does not decide on its own that a page is plain -- KOReader has
+already said it is not. It only accepts that answer when the pixel filters
+explain it and straightening is off. A yes it cannot account for, which is
+what a fourth condition added upstream would look like, still refuses: guessing
+that an unknown optimisation keeps the geometry is how ink drifts off the
+page with no error at all.
+]]
+function DocumentTransform.optimisingReason(configurable)
+    if type(configurable) ~= "table" then return "unsupported_optimizing" end
+    local straighten = configurable.auto_straighten
+    if straighten ~= nil and straighten ~= false then
+        straighten = tonumber(straighten)
+        if not finite(straighten) or straighten < 0 then
+            return "unsupported_optimizing"
+        end
+        if straighten > 0 then return "unsupported_straightening" end
+    end
+    local filtered = tonumber(configurable.page_opt) == 1
+        or (configurable.white_threshold ~= nil
+            and tonumber(configurable.white_threshold) ~= 255)
+    if not filtered then return "unsupported_optimizing" end
+    return nil
+end
+
+--[[--
   ui, view                 the live ReaderUI and ReaderView
   surface                  the stored page-ink surface (logical_w, logical_h)
   opts.screen              { w, h } -- the caller's `Screen:getWidth/Height`
@@ -129,8 +169,9 @@ end
 
 Returns an `ink_canvas_transform` for this page at this zoom and pan, or nil
 plus one of `no_view`, `unsupported_document`, `unsupported_mode`,
-`unsupported_rotation`, `unsupported_reflow`, `unsupported_optimizing`,
-`bad_geometry`, `zoom_too_large` -- checked in that order, so the reason a
+`unsupported_rotation`, `unsupported_reflow`, `unsupported_straightening`,
+`unsupported_optimizing`, `bad_geometry`, `zoom_too_large` -- checked in
+that order, so the reason a
 reader is shown is the first thing wrong rather than the last.
 
 `fit_rect` is the whole page at zoom, placed where KOReader placed it: the
@@ -192,7 +233,11 @@ function DocumentTransform.fromView(ui, view, surface, opts)
         -- for a document that has none. Not being able to tell is not the
         -- same as a plain page, so it refuses the same way a yes does.
         local answered, optimizing = pcall(kopt.is_optimizing_page, kopt, document)
-        if not answered or optimizing then return nil, "unsupported_optimizing" end
+        if not answered then return nil, "unsupported_optimizing" end
+        if optimizing then
+            local reason = DocumentTransform.optimisingReason(configurable)
+            if reason then return nil, reason end
+        end
     end
 
     local logical_w = type(surface) == "table" and tonumber(surface.logical_w) or nil

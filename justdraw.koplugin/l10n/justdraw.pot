@@ -227,6 +227,10 @@ msgid "Turn off page optimisation to draw page notes."
 msgstr ""
 
 #: ink_document_ink_session.lua
+msgid "Turn off auto straighten to draw page notes."
+msgstr ""
+
+#: ink_document_ink_session.lua
 msgid "Page notes need the page unrotated."
 msgstr ""
 

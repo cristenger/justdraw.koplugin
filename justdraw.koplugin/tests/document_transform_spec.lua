@@ -219,11 +219,65 @@ return function(ctx)
             "text_wrap 0 is the ordinary page")
     end)
 
-    t:case("an optimised page is not the page either", function()
+    t:case("an optimisation nothing explains is not the page either", function()
         local _, reason = from(reader{ koptinterface = kopt(true) })
         t:eq(reason, "unsupported_optimizing")
         t:check(from(reader{ koptinterface = kopt(false) }) ~= nil,
             "a koptinterface that says no is fine")
+    end)
+
+    -- KOReader's own predicate, word for word (koptinterface.lua), so the
+    -- cases below are decided by the settings and not by a canned verdict.
+    local real_kopt = {
+        is_optimizing_page = function(_, doc)
+            local c = doc.configurable
+            return c.page_opt == 1 or c.auto_straighten > 0
+                or c.white_threshold ~= 255
+        end,
+    }
+    local function optimised(settings)
+        local c = { text_wrap = 0, page_opt = 0, auto_straighten = 0,
+            white_threshold = 255 }
+        for k, v in pairs(settings) do c[k] = v end
+        return from(reader{ configurable = c, koptinterface = real_kopt })
+    end
+
+    t:case("dewatermark and the white threshold keep the page's points", function()
+        t:check(optimised{} ~= nil, "nothing optimised")
+        t:check(optimised{ page_opt = 1 } ~= nil, "dewatermark draws")
+        t:check(optimised{ white_threshold = 192 } ~= nil, "a threshold draws")
+        t:check(optimised{ page_opt = 1, white_threshold = 64 } ~= nil,
+            "both together draw")
+    end)
+
+    t:case("auto straighten turns the content and is refused by name", function()
+        local _, alone = optimised{ auto_straighten = 5 }
+        t:eq(alone, "unsupported_straightening")
+        local _, with_filters = optimised{ auto_straighten = 2, page_opt = 1,
+            white_threshold = 192 }
+        t:eq(with_filters, "unsupported_straightening",
+            "the filters do not excuse it")
+    end)
+
+    t:case("a yes KOReader cannot explain to this module still refuses", function()
+        -- A condition added upstream would look exactly like this: KOReader
+        -- says optimising while every setting this module knows is off.
+        local _, unknown = from(reader{
+            configurable = { text_wrap = 0, page_opt = 0, auto_straighten = 0,
+                white_threshold = 255 },
+            koptinterface = kopt(true),
+        })
+        t:eq(unknown, "unsupported_optimizing")
+        local _, odd = optimised{ auto_straighten = "x", page_opt = 1 }
+        t:eq(odd, "unsupported_optimizing", "a setting it cannot read")
+        local _, negative = optimised{ auto_straighten = -1, page_opt = 1 }
+        t:eq(negative, "unsupported_optimizing", "a straighten below zero")
+        local _, raised = from(reader{
+            configurable = { text_wrap = 0 },
+            koptinterface = real_kopt,
+        })
+        t:eq(raised, "unsupported_optimizing",
+            "a predicate that raises is not a no")
     end)
 
     t:case("a document with neither configurable nor koptinterface passes", function()
@@ -275,6 +329,9 @@ return function(ctx)
         rv.view.state.rotation = 0
         t:eq(reason(), "unsupported_reflow", "then reflow")
         rv.view.document.configurable.text_wrap = 0
+        rv.view.document.configurable.auto_straighten = 3
+        t:eq(reason(), "unsupported_straightening", "then straightening")
+        rv.view.document.configurable.auto_straighten = 0
         t:eq(reason(), "unsupported_optimizing", "then optimisation")
         rv.view.document.koptinterface = nil
         rv.view.state.zoom = 0

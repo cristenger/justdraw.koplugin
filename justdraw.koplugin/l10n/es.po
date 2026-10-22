@@ -202,6 +202,10 @@ msgid "Turn off page optimisation to draw page notes."
 msgstr "Desactiva la optimización de página para dibujar notas de página."
 
 #: ink_document_ink_session.lua
+msgid "Turn off auto straighten to draw page notes."
+msgstr "Desactiva el enderezado automático para dibujar notas de página."
+
+#: ink_document_ink_session.lua
 msgid "Page notes need the page unrotated."
 msgstr "Las notas de página necesitan la página sin rotar."
 

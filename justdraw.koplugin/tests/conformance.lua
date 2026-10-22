@@ -2059,6 +2059,114 @@ else
         claim("page ink: KoptInterface:is_optimizing_page is the optimisation gate",
             true, type(KoptInterface.is_optimizing_page) == "function")
 
+        -- Why dewatermark and the white threshold may take page ink and Auto
+        -- Straighten may not (ADR-38): draw the same rectangle of the same
+        -- page, at the same zoom, through KOReader's own drawPage, plain and
+        -- optimised, and compare where the dark pixels are. A filter may
+        -- whiten some of them; it may not move the ones it keeps.
+        if type(fixed.configurable) == "table" and fixed.koptinterface then
+            local BB = require("ffi/blitbuffer")
+            local DocCache = require("document/doccache")
+            local saved = {}
+            for k, v in pairs(fixed.configurable) do saved[k] = v end
+            local probe_page = 1
+            local function render(settings)
+                for k, v in pairs(saved) do fixed.configurable[k] = v end
+                fixed.configurable.text_wrap = 0
+                fixed.configurable.page_opt = 0
+                fixed.configurable.auto_straighten = 0
+                fixed.configurable.white_threshold = 255
+                for k, v in pairs(settings) do fixed.configurable[k] = v end
+                DocCache:clear()
+                local bb = BB.new(320, 420, BB.TYPE_BB8)
+                bb:fill(BB.COLOR_WHITE)
+                local ok = pcall(fixed.drawPage, fixed, bb, 7, 11,
+                    Geom:new{ x = 53, y = 97, w = 300, h = 400 }, probe_page, 1.5, 0, 1.0, 1.0)
+                return ok and bb or nil
+            end
+            -- The dark pixels of `b` that are not dark in `a`, and the box
+            -- around the dark pixels of each.
+            local function compare(a, b)
+                local added = 0
+                local ax0, ay0, ax1, ay1 = math.huge, math.huge, -1, -1
+                local bx0, by0, bx1, by1 = math.huge, math.huge, -1, -1
+                for y = 0, 419 do
+                    for x = 0, 319 do
+                        local da = a:getPixel(x, y):getColor8().a < 128
+                        local db = b:getPixel(x, y):getColor8().a < 128
+                        if da then
+                            if x < ax0 then ax0 = x end
+                            if y < ay0 then ay0 = y end
+                            if x > ax1 then ax1 = x end
+                            if y > ay1 then ay1 = y end
+                        end
+                        if db then
+                            if x < bx0 then bx0 = x end
+                            if y < by0 then by0 = y end
+                            if x > bx1 then bx1 = x end
+                            if y > by1 then by1 = y end
+                            if not da then added = added + 1 end
+                        end
+                    end
+                end
+                return added, string.format("dark box %d,%d-%d,%d vs %d,%d-%d,%d",
+                    ax0, ay0, ax1, ay1, bx0, by0, bx1, by1)
+            end
+
+            -- The first page with something on it: a blank one would make
+            -- every claim below hold vacuously.
+            local plain, dark = nil, 0
+            local last = math.min(8, tonumber(fixed:getPageCount()) or 1)
+            for page = 1, last do
+                probe_page = page
+                plain = render{}
+                dark = 0
+                if plain then
+                    for y = 0, 419 do
+                        for x = 0, 319 do
+                            if plain:getPixel(x, y):getColor8().a < 128 then dark = dark + 1 end
+                        end
+                    end
+                end
+                if dark > 0 then break end
+                if plain then plain:free(); plain = nil end
+            end
+            claim("page ink: a page has dark pixels to compare optimisations on",
+                dark > 0, dark > 0,
+                string.format("page %d, %d dark pixels", probe_page, dark))
+            if plain then
+                for _, case in ipairs{
+                    { "dewatermark", { page_opt = 1 } },
+                    { "a white threshold", { white_threshold = 192 } },
+                } do
+                    local filtered = render(case[2])
+                    local added, boxes = 0, "drawPage raised"
+                    if filtered then added, boxes = compare(plain, filtered) end
+                    claim("page ink: " .. case[1] .. " moves no point of the page",
+                        true, filtered ~= nil and added == 0,
+                        string.format("%d dark pixels the plain page lacks; %s",
+                            added, boxes))
+                    if filtered then filtered:free() end
+                end
+                -- And the converse, so the claim above is not passing because
+                -- nothing the optimiser does is visible in this rectangle.
+                -- A page with nothing to straighten stays where it is, so a
+                -- zero here is unchecked rather than wrong.
+                local turned = render{ auto_straighten = 5 }
+                if turned then
+                    local added, boxes = compare(plain, turned)
+                    claim("page ink: auto straighten does move the page's content",
+                        added > 0, added > 0,
+                        string.format("%d dark pixels moved in; %s", added, boxes))
+                    turned:free()
+                end
+                plain:free()
+            end
+            for k in pairs(fixed.configurable) do fixed.configurable[k] = nil end
+            for k, v in pairs(saved) do fixed.configurable[k] = v end
+            DocCache:clear()
+        end
+
         fixed:close()
     end
 end
