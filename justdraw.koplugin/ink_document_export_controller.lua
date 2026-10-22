@@ -38,6 +38,8 @@ local ExportReader = require("ink_export_reader")
 local ExportSource = require("ink_export_source")
 
 local _ = require("ink_i18n")
+local N_ = _.ngettext
+local T = require("ffi/util").template
 
 local Controller = {}
 Controller.__index = Controller
@@ -440,9 +442,13 @@ unsupported document, a sheet index still building, a pen still on the panel --
 is found before the reader has been shown a progress dialog or a single byte
 has been written.
 ]]
-function Controller:build(scope)
+function Controller:build(scope, _format, export_options)
+    export_options = export_options or {}
     local lease = self.lease()
     if lease and lease:hasActiveContact() then return nil, "contact_active" end
+    local Full = require("ink_document_export_full")
+    local with_source = export_options.include_source_pages == true
+    if with_source and not Full.supports(self.ui) then return nil, "unsupported_document" end
 
     if scope == "page" then
         local supported, reason = ExportReader.supports(self.ui, self.view)
@@ -454,11 +460,27 @@ function Controller:build(scope)
         local legacy = self.legacy and self.legacy()
         local strokes = legacy and legacy:strokes(page) or {}
         local tracker = {}
+        -- The same product `ExportReader.supports` measured against the
+        -- pixel budget: the page is rasterised at its own screen size.
+        local pixels = math.floor(self.view.dimen.w) * math.floor(self.view.dimen.h)
+        local items = { { page = page } }
+        local clean
+        if with_source then
+            -- The book's page as the book has it, before the page as the
+            -- reader sees it with their ink: off-screen, through MuPDF, the
+            -- way the full-document export reads pages (ADR-30).
+            table.insert(items, 1, { kind = "source_page", page = page,
+                location_label = T(_("Page %1"), page) })
+            pixels = pixels + ExportRaster.MAX_PIXELS
+            clean = Full.renderer{
+                schedule = self.schedule, tracker = tracker,
+                document = self.ui.document, dpi = 150,
+                header = { title = self:bookName(), paint_text = ExportHeader.textPainter() },
+            }
+        end
         return {
-            items = { { page = page } },
-            -- The same product `ExportReader.supports` measured against the
-            -- pixel budget: the page is rasterised at its own screen size.
-            pixels = math.floor(self.view.dimen.w) * math.floor(self.view.dimen.h),
+            items = items,
+            pixels = pixels,
             -- No `title`: `ExportDialog.run` falls back to the name the reader
             -- actually chose, which is a better `/Title` than a stem
             -- regenerated here -- and one that cannot disagree with the file
@@ -469,6 +491,7 @@ function Controller:build(scope)
             -- however the run ends.
             flush = function() return self:flushSurfaces() end,
             render = function(item, index, done)
+                if item.kind == "source_page" then return clean(item, index, done) end
                 local result, render_err = ExportReader.render{
                     ui = self.ui, view = self.view,
                     strokes = strokes, ink = self.ink,
@@ -490,7 +513,7 @@ function Controller:build(scope)
         if not spec then return nil, spec_err end
         local items, items_err = DocumentSource.documentNotes(spec)
         if not items then return nil, items_err end
-        return self:buildNotes(items, "notes")
+        return self:buildNotes(items, "notes", nil, export_options)
     end
 
     local session = self.session()
@@ -509,6 +532,22 @@ function Controller:build(scope)
         local ordered, order_err = ExportSource.orderedCanvases(canvases, index)
         if not ordered then return nil, order_err end
         items = ordered
+    end
+
+    if with_source then
+        -- With the book's pages the sheets become a dossier: the same
+        -- descriptors the notes scope uses, each placed by its page.
+        local notes = {}
+        for _i, canvas in ipairs(items) do
+            local page = index and index:pageOf(canvas.id) or tonumber(canvas.fixed_page)
+            notes[#notes + 1] = {
+                kind = "sheet", page = page, surface = canvas, repository = repository,
+                logical_w = tonumber(canvas.logical_w), logical_h = tonumber(canvas.logical_h),
+                units = "px",
+                location_label = page and T(_("Page %1"), page) or _("Location unavailable"),
+            }
+        end
+        return self:buildNotes(notes, "notes", nil, export_options)
     end
 
     local tracker = {}
@@ -537,7 +576,8 @@ function Controller:build(scope)
 end
 
 --- Browser supplies a frozen selection of descriptors, never just visible rows.
-function Controller:buildNotes(notes, mode, dpi)
+function Controller:buildNotes(notes, mode, dpi, export_options)
+    export_options = export_options or {}
     local lease = self.lease()
     if lease and lease:hasActiveContact() then return nil, "contact_active" end
     local items = {}
@@ -582,9 +622,27 @@ function Controller:buildNotes(notes, mode, dpi)
         pixels = #items * ExportRaster.MAX_PIXELS
     else
         if #items == 0 then return nil, "empty" end
-        render = DocumentSource.renderer(opts)
         pixels = DocumentSource.totalPixels(items)
         warning = DocumentSource.includesLegacy(items) and Controller.LEGACY_WARNING or nil
+        if export_options.include_source_pages then
+            local Full = require("ink_document_export_full")
+            if not Full.supports(self.ui) then return nil, "unsupported_document" end
+            local sourced, unplaced = Full.withSourcePages(self.ui.document:getPageCount(), items)
+            if not sourced then return nil, unplaced end
+            -- The notes cost what they cost; each book page is bounded by the
+            -- raster ceiling, which is the forecast the full export makes too.
+            pixels = pixels + (#sourced - #items) * ExportRaster.MAX_PIXELS
+            items = sourced
+            render = Full.renderer(opts)
+            if unplaced > 0 then
+                local line = T(N_("%1 note has no page in this book and is exported after the others, without a book page.",
+                    "%1 notes have no page in this book and are exported after the others, without a book page.",
+                    unplaced), unplaced)
+                warning = warning and (line .. "\n\n" .. warning) or line
+            end
+        else
+            render = DocumentSource.renderer(opts)
+        end
     end
     if #items > ExportSource.MAX_PAGES then return nil, "too_many_pages" end
     return {items = items, pixels = pixels, render = render,
@@ -607,8 +665,11 @@ function Controller:showDialog()
         title = _("Export"),
         stem = function(scope) return self:stem(scope, stamp) end,
         scopes = scopes,
-        build = function(scope) return self:build(scope) end,
+        build = function(scope, format, export_options)
+            return self:build(scope, format, export_options)
+        end,
         settings = self.settings(),
+        offer_source_pages = require("ink_document_export_full").supports(self.ui),
         show_modal = function(widget) return self.show_modal(widget) end,
         close_modal = function(widget) return self.close_modal(widget) end,
         notify = function(text) self.notify(text) end,

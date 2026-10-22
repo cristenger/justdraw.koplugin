@@ -26,6 +26,7 @@ local ConfirmBox = require("ui/widget/confirmbox")
 local Device = require("device")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
 local RadioButtonTable = require("ui/widget/radiobuttontable")
+local CheckButton = require("ui/widget/checkbutton")
 local ButtonDialog = require("ui/widget/buttondialog")
 local UIManager = require("ui/uimanager")
 local logger = require("logger")
@@ -286,8 +287,11 @@ function Dialog.run(opts)
         return
     end
     -- The format goes along because a notebook builds a producer for
-    -- Xournal++ and a renderer for everything else.
-    local built, build_err = opts.build(opts.scope, opts.format)
+    -- Xournal++ and a renderer for everything else; the options are the
+    -- dialog's per-run choices (`include_source_pages`).
+    local built, build_err = opts.build(opts.scope, opts.format, {
+        include_source_pages = opts.include_source_pages == true,
+    })
     if not built then
         opts.notify(Dialog.reason(build_err))
         return nil, build_err
@@ -512,6 +516,9 @@ function Dialog.show(opts)
         -- three different answers to "where" would be three different bugs.
         dir = Dialog.rememberedDirectory(settings, opts.fs),
         scope = opts.scopes and opts.scopes[1] and opts.scopes[1].value or nil,
+        -- Per run, never remembered: a reader who once wanted the book's
+        -- pages beside their notes has not said they want them every time.
+        include_source_pages = false,
     }
     local active_job = {}
     local dialog
@@ -553,6 +560,7 @@ function Dialog.show(opts)
             build_async = opts.build_async,
             scope = state.scope,
             format = state.format,
+            include_source_pages = state.include_source_pages,
             dir = state.dir,
             stem = stem,
             notify = opts.notify,
@@ -652,6 +660,25 @@ function Dialog.show(opts)
         radio_buttons = format_rows,
         button_select_callback = function(entry) state.format = entry.value end,
     })
+
+    -- Only where the caller can render the book's own pages (MuPDF, paging):
+    -- each note is preceded by a clean copy of the page it belongs to. A
+    -- toggle that never closes the dialog, so no checkmark repaint lands on a
+    -- dialog already gone (ADR-35).
+    if opts.offer_source_pages then
+        local source_pages
+        source_pages = CheckButton:new{
+            text = _("Include the book's pages"),
+            checked = false,
+            width = width,
+            parent = dialog,
+            show_parent = dialog,
+            callback = function()
+                state.include_source_pages = source_pages.checked == true
+            end,
+        }
+        dialog:addWidget(source_pages)
+    end
 
     if opts.scopes and #opts.scopes > 1 then
         local scope_buttons = {}

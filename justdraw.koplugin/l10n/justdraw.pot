@@ -175,6 +175,15 @@ msgid ""
 "geometry were not stored. Its layout cannot be guaranteed."
 msgstr ""
 
+#: ink_document_export_controller.lua ink_document_export_full.lua
+#: ink_document_note.lua ink_document_notes_ui.lua ink_notebook_library.lua
+msgid "Page %1"
+msgstr ""
+
+#: ink_document_export_controller.lua ink_document_note.lua
+msgid "Location unavailable"
+msgstr ""
+
 #: ink_document_export_controller.lua
 msgid ""
 "This creates document pages as grayscale images. Text will not be selectable "
@@ -188,9 +197,23 @@ msgid ""
 "original position cannot be reconstructed."
 msgstr ""
 
+#: ink_document_export_controller.lua
+msgid ""
+"%1 note has no page in this book and is exported after the others, without a "
+"book page."
+msgid_plural ""
+"%1 notes have no page in this book and are exported after the others, "
+"without a book page."
+msgstr[0] ""
+msgstr[1] ""
+
 #: ink_document_export_controller.lua ink_export_dialog.lua
 #: ink_notebook_library.lua
 msgid "Export"
+msgstr ""
+
+#: ink_document_export_full.lua
+msgid "Book page"
 msgstr ""
 
 #: ink_document_ink_session.lua
@@ -291,15 +314,7 @@ msgid "Drawing sheet"
 msgstr ""
 
 #: ink_document_note.lua
-msgid "Location unavailable"
-msgstr ""
-
-#: ink_document_note.lua
 msgid "Stored page %1"
-msgstr ""
-
-#: ink_document_note.lua ink_document_notes_ui.lua ink_notebook_library.lua
-msgid "Page %1"
 msgstr ""
 
 #: ink_document_note.lua ink_document_notes_controller.lua ink_sheet_bar.lua
@@ -965,6 +980,10 @@ msgstr ""
 
 #: ink_export_dialog.lua
 msgid "File type"
+msgstr ""
+
+#: ink_export_dialog.lua
+msgid "Include the book's pages"
 msgstr ""
 
 #: ink_export_dialog.lua

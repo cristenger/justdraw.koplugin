@@ -160,6 +160,15 @@ msgstr "Notas"
 msgid "This export includes legacy ink whose original zoom, rotation and screen geometry were not stored. Its layout cannot be guaranteed."
 msgstr "Esta exportación incluye tinta antigua cuyo zoom, rotación y geometría de pantalla originales no se guardaron. No se puede garantizar su disposición."
 
+#: ink_document_export_controller.lua ink_document_export_full.lua
+#: ink_document_note.lua ink_document_notes_ui.lua ink_notebook_library.lua
+msgid "Page %1"
+msgstr "Página %1"
+
+#: ink_document_export_controller.lua ink_document_note.lua
+msgid "Location unavailable"
+msgstr "Ubicación no disponible"
+
 #: ink_document_export_controller.lua
 msgid "This creates document pages as grayscale images. Text will not be selectable and links will not be preserved. Native annotations are included as text pages in an appendix."
 msgstr "Esto crea las páginas del documento como imágenes en escala de grises. El texto no se podrá seleccionar y los enlaces no se conservarán. Las anotaciones nativas se incluyen como páginas de texto en un apéndice."
@@ -168,10 +177,20 @@ msgstr "Esto crea las páginas del documento como imágenes en escala de grises.
 msgid "Legacy ink is included separately after the document pages, because its original position cannot be reconstructed."
 msgstr "La tinta antigua se incluye aparte, después de las páginas del documento, porque no se puede reconstruir su posición original."
 
+#: ink_document_export_controller.lua
+msgid "%1 note has no page in this book and is exported after the others, without a book page."
+msgid_plural "%1 notes have no page in this book and are exported after the others, without a book page."
+msgstr[0] "%1 nota no tiene página en este libro y se exporta después de las demás, sin página del libro."
+msgstr[1] "%1 notas no tienen página en este libro y se exportan después de las demás, sin página del libro."
+
 #: ink_document_export_controller.lua ink_export_dialog.lua
 #: ink_notebook_library.lua
 msgid "Export"
 msgstr "Exportar"
+
+#: ink_document_export_full.lua
+msgid "Book page"
+msgstr "Página del libro"
 
 #: ink_document_ink_session.lua
 msgid "Page notes are unavailable for this book"
@@ -266,16 +285,8 @@ msgid "Drawing sheet"
 msgstr "Hoja de dibujo"
 
 #: ink_document_note.lua
-msgid "Location unavailable"
-msgstr "Ubicación no disponible"
-
-#: ink_document_note.lua
 msgid "Stored page %1"
 msgstr "Página guardada %1"
-
-#: ink_document_note.lua ink_document_notes_ui.lua ink_notebook_library.lua
-msgid "Page %1"
-msgstr "Página %1"
 
 #: ink_document_note.lua ink_document_notes_controller.lua ink_sheet_bar.lua
 msgid "Sheet %1 of %2"
@@ -935,6 +946,10 @@ msgstr "Nombre de archivo"
 #: ink_export_dialog.lua
 msgid "File type"
 msgstr "Tipo de archivo"
+
+#: ink_export_dialog.lua
+msgid "Include the book's pages"
+msgstr "Incluir las páginas del libro"
 
 #: ink_export_dialog.lua
 msgid "What to export"

@@ -165,6 +165,56 @@ return function(ctx)
             2, "two scopes, a chooser")
     end)
 
+    t:case("the book's pages are a per-run choice, offered only when they can be", function()
+        local function show(offer)
+            return Dialog.show{
+                title = "Export", stem = "N", settings = settings(),
+                offer_source_pages = offer,
+                build = function() return { items = {}, render = function() end } end,
+                show_modal = function(w) return w end,
+                close_modal = function() end, notify = function() end,
+            }
+        end
+        t:eq(#show(false).added_widgets, 1, "not offered: only the file types")
+        local dialog = show(true)
+        t:eq(#dialog.added_widgets, 2, "offered: a box below the file types")
+        local box = dialog.added_widgets[2]
+        t:eq(box.checked, false, "off to begin with")
+        t:eq(box.text, "Include the book's pages", "named for what it adds")
+        box:tap()
+        t:eq(box.checked, true, "on")
+        t:eq(show(true).added_widgets[2].checked, false,
+            "and the next dialog starts off again: never remembered")
+    end)
+
+    t:case("the choice reaches the build that runs", function()
+        local fs = support.newExportFs{ dirs = { ["/mnt/us/exports"] = true } }
+        local s = settings()
+        s:saveSetting("justdraw_export_dir", "/mnt/us/exports")
+        local sched = support.newScheduler()
+        local asked
+        local dialog = Dialog.show{
+            title = "Export", stem = "N", settings = s, offer_source_pages = true,
+            build = function(_scope, _format, options)
+                asked = options
+                return { items = { {} }, render = function(_, _, done)
+                    local bb = support.newBlitbuffer(2, 2)
+                    done({ bb = bb, width_pt = 10, height_pt = 10,
+                        release = function() bb:free() end })
+                end }
+            end,
+            show_modal = function(w) return w end,
+            close_modal = function() end, notify = function() end,
+            schedule = function(fn) sched:schedule(fn) end,
+            fs = fs,
+        }
+        dialog.added_widgets[2]:tap()
+        local row = dialog.buttons[#dialog.buttons]
+        row[#row].callback()
+        sched:drain()
+        t:eq(asked and asked.include_source_pages, true, "the build was asked for the pages")
+    end)
+
     -- =================================================================
     t:describe("export / dialog / the name follows the scope")
 

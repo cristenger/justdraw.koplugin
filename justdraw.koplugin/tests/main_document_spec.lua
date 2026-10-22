@@ -1379,6 +1379,50 @@ return function(ctx)
         t:check(notes.enabled ~= false, "and it is live")
     end)
 
+    --- What `Full.supports` asks of a document: MuPDF, with a backend that
+    --- opens pages. The suite's fake page draws nothing.
+    local function renderableBook(p, pages)
+        local doc = p.ui.document
+        doc.provider = "mupdf"
+        doc._document = { openPage = function() error("not drawn in the suite") end }
+        doc.getPageCount = function() return pages or 10 end
+    end
+
+    t:case("the dossier with the book's pages puts each page before its notes", function()
+        local p = documentPlugin{
+            canvases = { pageRow(1, 3), pageRow(2, 1) },
+            strokes = { [1] = { bar_stroke() }, [2] = { bar_stroke() } },
+        }
+        renderableBook(p)
+        local plain = assert(p:buildExport("notes", "pdf", {}))
+        local built = assert(p:buildExport("notes", "pdf", { include_source_pages = true }))
+        local shape = {}
+        for i, item in ipairs(built.items) do
+            shape[i] = item.kind == "source_page" and ("book" .. item.page) or (item.kind .. item.page)
+        end
+        t:eq(table.concat(shape, ","), "book1,page_ink1,book3,page_ink3",
+            "each book page once, then its notes")
+        t:check(built.pixels > plain.pixels, "and the forecast counts the pages")
+        local again = assert(p:buildExport("notes", "pdf", { include_source_pages = true }))
+        t:eq(#again.items, #built.items, "a second run plans the same")
+    end)
+
+    t:case("this page with the book's page is two pages: the clean one first", function()
+        local p = documentPlugin{ canvases = { pageRow(1, 1) }, strokes = { [1] = { bar_stroke() } } }
+        drawablePage(p)
+        renderableBook(p)
+        local built = assert(p:buildExport("page", "pdf", { include_source_pages = true }))
+        t:eq(#built.items, 2, "two pages")
+        t:eq(built.items[1].kind, "source_page", "the book's page first")
+        t:eq(built.items[1].page, p:currentPage(), "this page")
+    end)
+
+    t:case("the book's pages are refused where they cannot be rendered", function()
+        local p = documentPlugin{ canvases = { pageRow(1, 1) }, strokes = { [1] = { bar_stroke() } } }
+        local _, err = p:buildExport("notes", "pdf", { include_source_pages = true })
+        t:eq(err, "unsupported_document", "no MuPDF backend, no book pages")
+    end)
+
     t:case("a book with nothing in it offers no dossier", function()
         local p = documentPlugin()
         t:eq(scopeNamed(p, "notes"), nil, "nothing to gather")

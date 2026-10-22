@@ -234,4 +234,40 @@ return function(ctx)
         t:eq(select(2,Full.items(5,{bad,bad},true)),"bad_surface","ambiguous overlay refused")
         t:eq(#assert(Full.items(1000000,{bad},true)),1,"context does not scan all source pages")
     end)
+    t:case("a sheet hung on a page follows that page in a full export", function()
+        local ink = Note.new{kind="page_ink",page=2,surface={id=20}}
+        local hung = {kind="sheet",page=2,surface={id=21,anchor_kind="page"}}
+        local epub_sheet = {kind="sheet",page=1,surface={id=22,anchor_kind="xpointer"}}
+        local all = assert(Full.items(3,{ink,hung,epub_sheet},false))
+        t:eq(all[2].kind,"document_page","page 2")
+        t:eq(all[2].note,ink,"with its ink")
+        t:eq(all[3],hung,"then the sheet hung on it")
+        t:eq(all[4].page,3,"then page 3")
+        t:eq(all[5],epub_sheet,"a sheet with no page of its own keeps to the end")
+        local context = assert(Full.items(3,{hung},true))
+        t:eq(#context,2,"context: the page the sheet hangs on, and the sheet")
+    end)
+    t:case("the book's pages go before their notes, in a new list", function()
+        local p3 = {kind="page_ink",page=3,surface={id=30}}
+        local s3 = {kind="sheet",page=3,surface={id=31}}
+        local p1 = {kind="page_ink",page=1,surface={id=10}}
+        local lost = {kind="sheet",surface={id=40}}
+        local notes = {p3,s3,p1,lost}
+        local out, unplaced = assert(Full.withSourcePages(5,notes))
+        local shape = {}
+        for i,item in ipairs(out) do
+            shape[i] = item.kind=="source_page" and ("book"..item.page) or tostring(item.surface.id)
+        end
+        t:eq(table.concat(shape,","),"book1,10,book3,30,31,40","each page once, its notes after it")
+        t:eq(unplaced,1,"the note with no page is counted")
+        t:check(out ~= notes,"a new list")
+        for _,item in ipairs(notes) do
+            local keys = 0
+            for _ in pairs(item) do keys = keys + 1 end
+            t:check(keys <= 3,"the catalogue's descriptors are not written into")
+        end
+        local again = assert(Full.withSourcePages(5,notes))
+        t:eq(#again,#out,"a second run plans exactly the same")
+        t:eq(select(2,Full.withSourcePages(0,notes)),"bad_geometry","a book with no pages")
+    end)
 end

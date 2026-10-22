@@ -913,13 +913,16 @@ function Controller:export(items, mode, dpi, prepared)
                     or _("Document pages containing the selected notes"),
             },
         },
-        build = function()
-            return export:buildNotes(items, mode, dpi)
+        build = function(_scope, _format, export_options)
+            return export:buildNotes(items, mode, dpi, export_options)
         end,
         build_async = mode == "epub" and function(done)
             self:buildEPUB(items, dpi, done)
         end or nil,
         settings = export.settings(),
+        -- The full and context exports already are the book's pages.
+        offer_source_pages = mode == "notes"
+            and require("ink_document_export_full").supports(self.host.ui),
         show_modal = function(w)
             return self:showModal(w)
         end,

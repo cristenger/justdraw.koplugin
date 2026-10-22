@@ -2885,6 +2885,21 @@ function support.install()
     end
     package.preload["ui/widget/radiobuttontable"] = function() return RadioButtonTable end
 
+    --- The real one flips `checked` and only then calls `callback`; `tap` is
+    --- that, so a spec reads the box the way the dialog's callback does.
+    local CheckButton = {}
+    function CheckButton:new(o)
+        o = o or {}
+        o.checked = o.checked == true
+        function o:getSize() return { w = self.width or 400, h = 40 } end
+        function o:tap()
+            self.checked = not self.checked
+            if self.callback then self.callback() end
+        end
+        return o
+    end
+    package.preload["ui/widget/checkbutton"] = function() return CheckButton end
+
     local Event = {}
     function Event:new(name, ...)
         return { handler = "on" .. name, args = { ... } }

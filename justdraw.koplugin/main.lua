@@ -5868,8 +5868,8 @@ function JustDraw:exportStem(scope, stamp)
     return self.export_controller:stem(scope, stamp)
 end
 
-function JustDraw:buildExport(scope)
-    return self.export_controller:build(scope)
+function JustDraw:buildExport(scope, format, export_options)
+    return self.export_controller:build(scope, format, export_options)
 end
 
 function JustDraw:showExportDialog()
