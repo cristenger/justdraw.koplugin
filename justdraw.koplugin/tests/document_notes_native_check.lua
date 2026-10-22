@@ -62,6 +62,13 @@ reader:handleEvent(Event:new("SetScrollMode",false))
 local host = assert(reader.justdraw or require("pluginloader"):getPluginInstance("justdraw"))
 pump(function() return host.document_session and host.document_session:isAvailable() end)
 local repo, book = host.document_session:exportSources()
+-- Opening a book no longer makes its row (ADR-62): the first page note does.
+-- Make it the way that first note would, so the session knows it too.
+if repo and not book then
+    local session = host.document_session
+    book = assert(require("ink_book_database").ensureBook(repo, session.identity, session.file))
+    session.book_id = book
+end
 assert(repo and book)
 local ink_page = math.min(2,doc:getPageCount())
 local size = doc:getNativePageDimensions(ink_page)
@@ -195,7 +202,10 @@ assert(notes:navigate(item,"view"))
 pump(function() return not notes.pending_navigation
     and host.document_session:cache() and host.document_session:cache():isReady() end)
 assert(host:currentPage() == ink_page and not host.drawing,"PDF view did not stay in reading mode")
-assert(not host.canvas_open and not host.session,"PDF view created an EPUB panel/session")
+-- A PDF has a sheet session beside page ink since ADR-67, hung on pages;
+-- viewing a page note must still open no sheet over it.
+assert(not host.canvas_open,"PDF view opened a sheet")
+assert(not host.session or host.session.anchor_mode == "page","PDF view made an xpointer session")
 assert(host.document_session:surface().id == surface.id,"PDF view opened a different surface")
 assert(host:onShowDocumentNotes())
 pump(function() return notes.catalog.state == "ready" and not notes.catalog.busy end)
