@@ -105,6 +105,37 @@ return function(ctx)
         t:check(Note.before(legacy,sheet),"legacy order preserved")
         t:check(not Note.before(sheet,sheet),"strict comparator")
     end)
+    t:case("a fixed layout lists its page notes and the sheets on its pages", function()
+        local PageIndex = require("ink_page_index")
+        local rows = {
+            {id = 1, fixed_page = 4, logical_w = 600, logical_h = 800,
+             surface_role = "page_ink", anchor_kind = "page", updated_at = 1},
+            {id = 2, fixed_page = 2, logical_w = 600, logical_h = 800,
+             surface_role = "sheet", anchor_kind = "page", anchor_key = "page:2", updated_at = 2},
+        }
+        local store, sched = support.newCanvasStore(rows), support.newScheduler()
+        local index = PageIndex.new{repository = store, book_id = 1,
+            schedule = function(fn) sched:schedule(fn) end}
+        index:open()
+        sched:drain()
+        local c = Catalog.new{repository = store, sheet_repository = store, book_id = 1,
+            index = index, units = "pt", screen = {w = 600, h = 800},
+            schedule = function(fn) sched:schedule(fn) end,
+            chapter = function() return "First" end}
+        c:start()
+        sched:drain()
+        t:eq(c.state, "ready", "loaded")
+        local kinds, sheet = {}, nil
+        for _, item in ipairs(c.result) do
+            kinds[item.kind] = (kinds[item.kind] or 0) + 1
+            if item.kind == "sheet" then sheet = item end
+        end
+        t:eq(kinds.page_ink, 1, "the page note")
+        t:eq(kinds.sheet, 1, "and the sheet")
+        t:eq(sheet and sheet.page, 2, "placed by its own page, not by locating")
+        t:eq(c.result[1].kind, "sheet", "in page order: page 2 before page 4")
+    end)
+
     t:case("deleting a selection takes every sheet of a note and nothing KOReader owns", function()
         local Controller = require("ink_document_notes_controller")
         local group = {id = "note:1", kind = "sheet", surface = {id = 3},

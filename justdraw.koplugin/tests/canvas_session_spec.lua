@@ -63,6 +63,8 @@ return function(ctx)
             identity = opts.identity == false and {} or IDENTITY,
             file = "/mnt/us/documents/book.epub",
             dom_version = 20240114,
+            anchor_mode = opts.anchor_mode,
+            borrow_repository = opts.borrow_repository,
             repository = repository,
             plugin = { drawing = false, eraser = false, pen_width = 4,
                        effectiveStyle = function() return 1 end,
@@ -91,6 +93,86 @@ return function(ctx)
             logical_h = Screen.h,
         }
     end
+
+    -- =================================================================
+    t:describe("ink_canvas_session / sheets hung on a fixed page (ADR-67)")
+
+    local function pageSheetRow(id, page)
+        return { id = id, anchor_kind = "page", anchor_key = "page:" .. page,
+            fixed_page = page, surface_role = "sheet", book_id = 12,
+            logical_w = Screen.w, logical_h = Screen.h }
+    end
+
+    t:case("a page session lists only the sheets hung on pages", function()
+        local session, store, sched = fixture{
+            anchor_mode = "page",
+            canvases = { canvasAt(1, "/p1"), pageSheetRow(2, 4) },
+        }
+        session:open()
+        sched:drain()
+        t:eq(#session:canvasesHere(4), 1, "the page's sheet")
+        t:eq(session:canvasesHere(4)[1].id, 2, "and not the xpointer one")
+        t:eq(#session:allCanvases(), 1, "the whole book, page sheets only")
+        t:eq(store.calls.stroke_read, 0, "no ink read to find them")
+    end)
+
+    t:case("a page has one anchor: making a sheet there twice finds the first", function()
+        local session, store, sched = fixture{ anchor_mode = "page" }
+        session:open()
+        sched:drain()
+        session:setPage(3)
+        local first = session:createHere(3)
+        t:eq(first and first.anchor_kind, "page", "hung on a page")
+        t:eq(first and first.fixed_page, 3, "this page")
+        t:eq(first and first.anchor_raw, nil, "with no xpointer")
+        t:eq(session:createHere(3), first, "the same sheet the second time")
+        t:eq(#store.canvases, 1, "one row")
+    end)
+
+    t:case("an open page sheet is here on its page and away elsewhere", function()
+        local session, _, sched = fixture{
+            anchor_mode = "page", canvases = { pageSheetRow(2, 4) },
+        }
+        session:open()
+        sched:drain()
+        session:setPage(4)
+        session:openCanvas(session:canvasById(2))
+        sched:drain()
+        t:eq(session:openCanvasPlacement(), "here", "on its page")
+        session:setPage(9)
+        local placement, page = session:openCanvasPlacement()
+        t:eq(placement, "away", "away from it")
+        t:eq(page, 4, "and it knows which page it belongs to")
+        local destination = session:openCanvasDestination()
+        t:eq(destination and destination.page, 4, "Go to its page goes to the page")
+        t:eq(session:openCanvasAnchor(), nil, "never an xpointer")
+    end)
+
+    t:case("the page's sheets stack their marks from the top", function()
+        local session, _, sched = fixture{
+            anchor_mode = "page",
+            canvases = { pageSheetRow(2, 4), pageSheetRow(3, 4) },
+        }
+        session:open()
+        sched:drain()
+        session:setPage(4)
+        local marks = session:marks()
+        t:eq(#marks, 2, "one per sheet")
+        t:check(marks[1].y < marks[2].y, "stacked, not on top of each other")
+    end)
+
+    t:case("a borrowed connection is left open when the session closes", function()
+        local session, store, sched = fixture{ anchor_mode = "page", borrow_repository = true }
+        session:open()
+        sched:drain()
+        session:close()
+        t:check(not store.closed, "page ink's connection outlives the sheets")
+        local own, own_store, own_sched = fixture{}
+        own:open()
+        own_sched:drain()
+        own:close()
+        t:eq(own_store.closed, true, "an ordinary session still closes its own")
+    end)
 
     -- =================================================================
     t:describe("ink_canvas_session / opening a book")

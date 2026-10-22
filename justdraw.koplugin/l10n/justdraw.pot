@@ -1732,6 +1732,17 @@ msgid ""
 msgstr ""
 
 #: ink_reader_menu.lua
+msgid "Open drawing sheets without asking"
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid ""
+"For this book only. When page notes cannot be drawn in the current view "
+"(scrolling, reflow, straightening, a zoom too large), Draw opens a drawing "
+"sheet on the page instead of asking first."
+msgstr ""
+
+#: ink_reader_menu.lua
 msgid ""
 "Automatic uses the stylus route on devices that report a pen digitizer, and "
 "the finger route everywhere else. On a drawing sheet, finger and palm never "
@@ -1768,6 +1779,12 @@ msgstr ""
 
 #: ink_reader_menu.lua
 msgid "Show toolbar"
+msgstr ""
+
+#: ink_reader_menu.lua
+msgid ""
+"Blank sheets hung on a page of this book, over the page. Page notes stay the "
+"default; a sheet is offered where the view cannot place them."
 msgstr ""
 
 #: ink_reader_menu.lua
@@ -1996,6 +2013,18 @@ msgstr ""
 
 #: main.lua
 msgid "JustDraw: toggle marker/pen"
+msgstr ""
+
+#: main.lua
+msgid "Draw on a drawing sheet for this page instead?"
+msgstr ""
+
+#: main.lua
+msgid "Open drawing sheet"
+msgstr ""
+
+#: main.lua
+msgid "Could not open a drawing sheet on this page."
 msgstr ""
 
 #: main.lua

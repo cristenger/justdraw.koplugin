@@ -1664,6 +1664,14 @@ msgid "Adds a JustDraw button to the menu that appears when you select text, so 
 msgstr "Añade un botón JustDraw al menú que aparece al seleccionar texto, para empezar a dibujar desde ahí. Desactívalo si nunca dibujas."
 
 #: ink_reader_menu.lua
+msgid "Open drawing sheets without asking"
+msgstr "Abrir hojas de dibujo sin preguntar"
+
+#: ink_reader_menu.lua
+msgid "For this book only. When page notes cannot be drawn in the current view (scrolling, reflow, straightening, a zoom too large), Draw opens a drawing sheet on the page instead of asking first."
+msgstr "Solo para este libro. Cuando no se pueden dibujar notas de página en la vista actual (desplazamiento continuo, reflujo, enderezado, un zoom demasiado grande), Dibujar abre una hoja de dibujo en la página en lugar de preguntar antes."
+
+#: ink_reader_menu.lua
 msgid "Automatic uses the stylus route on devices that report a pen digitizer, and the finger route everywhere else. On a drawing sheet, finger and palm never draw; touches above the bounded sheet can still turn pages. With direct ink, press Stop to return all touch input to reading."
 msgstr "Automático usa el lápiz en los dispositivos que informan de un digitalizador de lápiz, y el dedo en todos los demás. En una hoja de dibujo, el dedo y la palma nunca dibujan; los toques por encima de la hoja delimitada aún pueden pasar páginas. Con tinta directa, pulsa Detener para devolver toda la entrada táctil a la lectura."
 
@@ -1692,6 +1700,10 @@ msgstr "Pulsa Detener en la barra de herramientas para volver a desactivar el di
 #: ink_reader_menu.lua
 msgid "Show toolbar"
 msgstr "Mostrar barra de herramientas"
+
+#: ink_reader_menu.lua
+msgid "Blank sheets hung on a page of this book, over the page. Page notes stay the default; a sheet is offered where the view cannot place them."
+msgstr "Hojas en blanco colgadas de una página de este libro, sobre la página. Las notas de página siguen siendo lo predeterminado; se ofrece una hoja donde la vista no puede colocarlas."
 
 #: ink_reader_menu.lua
 msgid "Blank sheets anchored to a position in a reflowable book."
@@ -1907,6 +1919,18 @@ msgstr "JustDraw: abrir/cerrar hoja de dibujo"
 #: main.lua
 msgid "JustDraw: toggle marker/pen"
 msgstr "JustDraw: alternar rotulador/pluma"
+
+#: main.lua
+msgid "Draw on a drawing sheet for this page instead?"
+msgstr "¿Dibujar en una hoja de dibujo para esta página?"
+
+#: main.lua
+msgid "Open drawing sheet"
+msgstr "Abrir hoja de dibujo"
+
+#: main.lua
+msgid "Could not open a drawing sheet on this page."
+msgstr "No se pudo abrir una hoja de dibujo en esta página."
 
 #: main.lua
 msgid "This sheet is read-only"

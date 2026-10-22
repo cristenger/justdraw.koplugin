@@ -178,6 +178,13 @@ return function(ctx)
         return env.UIManager.shown[#env.UIManager.shown]
     end
 
+    --- The drawing-sheet offer a refused page-ink view puts up (ADR-67), or
+    --- nil. Its text leads with the refusal's own sentence.
+    local function sheetOffer()
+        local w = lastShown()
+        if w and w.ok_text == "Open drawing sheet" then return w end
+    end
+
     -- =================================================================
     t:describe("main / page ink / the gate")
 
@@ -767,11 +774,79 @@ return function(ctx)
         p:onPageUpdate(2)
         env.UIManager:flush()
         t:eq(p.drawing, false, "drawing stopped")
-        t:eq(#env.notifications, 1, "with one sentence, not two")
-        t:eq(env.notifications[1], "Zoom out to see and draw page notes.",
-            "naming the thing to change")
+        local offer = sheetOffer()
+        t:check(offer ~= nil, "a drawing sheet is offered in its place")
+        t:check(offer and offer.text:find("Zoom out to see and draw page notes.", 1, true) == 1,
+            "leading with the thing to change")
+        t:eq(#env.notifications, 0, "and nothing said twice")
         t:eq(store:findPageInkSurface(12, 2), nil,
             "and a refused view creates no row")
+    end)
+
+    t:case("accepting the offer opens a sheet on this page and remembers it", function()
+        local p, store = documentPlugin{ view = { state = { zoom = 4 } } }
+        p:setDrawing(true)
+        local offer = sheetOffer()
+        t:check(offer ~= nil, "offered")
+        offer.ok_callback()
+        env.UIManager:flush()
+        t:eq(p.canvas_open, true, "a sheet is open")
+        local active = p.session:activeCanvas()
+        t:eq(active and active.anchor_kind, "page", "hung on the page")
+        t:eq(active and active.fixed_page, p:currentPage(), "this page")
+        t:eq(active and active.surface_role, "sheet", "a sheet, not page ink")
+        t:eq(p:pageSheetWithoutAsking(), true, "and the answer is kept for this book")
+        t:eq(store:findPageInkSurface(12, p:currentPage()), nil, "no page-ink row was made")
+        p:closeCanvas()
+        local function offers()
+            local n = 0
+            for _, w in ipairs(env.UIManager.shown) do
+                if w.ok_text == "Open drawing sheet" then n = n + 1 end
+            end
+            return n
+        end
+        local asked = offers()
+        p:setDrawing(true)
+        t:eq(p.canvas_open, true, "the next refusal opens it without asking")
+        t:eq(offers(), asked, "no second question")
+    end)
+
+    t:case("Draw after scrolling was turned on offers a sheet too", function()
+        -- The session is suspended by then, and says so rather than
+        -- `unsupported_mode`: the same refusal, one step earlier.
+        local p = documentPlugin{ canvases = { pageRow(1, 1) }, strokes = { [1] = { bar_stroke() } } }
+        p.view.page_scroll = true
+        p:onSetScrollMode(true)
+        env.UIManager:flush()
+        t:eq(p.document_session:stateName(), "suspended", "put away")
+        p:setDrawing(true)
+        local offer = sheetOffer()
+        t:check(offer and offer.text:find("Turn off continuous scrolling", 1, true) == 1,
+            "offered, with the scrolling sentence")
+    end)
+
+    t:case("declining the offer opens nothing and asks again next time", function()
+        local p, store = documentPlugin{ view = { state = { zoom = 4 } } }
+        p:setDrawing(true)
+        local offer = sheetOffer()
+        offer.cancel_callback()
+        env.UIManager:flush()
+        t:eq(p.canvas_open, false, "no sheet")
+        t:eq(#store.canvases, 0, "and no row")
+        t:eq(p:pageSheetWithoutAsking(), false, "nothing remembered")
+        p:setDrawing(true)
+        t:check(sheetOffer() ~= nil and sheetOffer() ~= offer, "asked again")
+    end)
+
+    t:case("a page turn withdraws an unanswered offer", function()
+        local p = documentPlugin{ view = { state = { zoom = 4 } } }
+        p:setDrawing(true)
+        local offer = sheetOffer()
+        p.view.state.page = 2
+        p:onPageUpdate(2)
+        offer.ok_callback()
+        env.UIManager:flush()
+        t:eq(p.canvas_open, false, "a late yes opens nothing on the wrong page")
     end)
 
     t:case("Retry saving ink turns the page before Draw comes back", function()
@@ -877,9 +952,11 @@ return function(ctx)
         env.UIManager:flush()
         t:eq(p.drawing, false, "drawing was turned off")
         t:eq(p.document_session:stateName(), "suspended", "and the surface put away")
-        t:eq(env.notifications[#env.notifications],
-            "Turn off continuous scrolling to draw page notes.",
-            "the reader is told which setting to change")
+        local offer = sheetOffer()
+        t:check(offer and offer.text:find(
+            "Turn off continuous scrolling to draw page notes.", 1, true) == 1,
+            "the reader is told which setting to change, and offered a sheet")
+        offer.cancel_callback()
         p.view.page_scroll = false
         p:onSetScrollMode(false)
         env.UIManager:flush()
@@ -915,17 +992,17 @@ return function(ctx)
     t:describe("main / page ink / refusals")
 
     local REFUSALS = {
-        { name = "continuous scrolling", view = { page_scroll = true },
+        { name = "continuous scrolling", view = { page_scroll = true }, offer = true,
           message = "Turn off continuous scrolling to draw page notes." },
-        { name = "reflow", view = { configurable = { text_wrap = 1 } },
+        { name = "reflow", view = { configurable = { text_wrap = 1 } }, offer = true,
           message = "Turn off reflow to draw page notes." },
-        { name = "page optimisation",
+        { name = "page optimisation", offer = true,
           view = { koptinterface = { is_optimizing_page = function() return true end } },
           message = "Turn off page optimisation to draw page notes." },
-        { name = "a rotated page state", view = { state = { rotation = 1 } },
+        { name = "a rotated page state", view = { state = { rotation = 1 } }, offer = true,
           message = "Page notes need the page unrotated." },
         { name = "a zoom past the raster budget", view = { state = { zoom = 4 } },
-          message = "Zoom out to see and draw page notes." },
+          offer = true, message = "Zoom out to see and draw page notes." },
         { name = "a view before its first recalculate",
           view = { state = { offset = false } },
           message = "Page notes can't be placed on this view." },
@@ -936,8 +1013,16 @@ return function(ctx)
             local p, store = documentPlugin{ view = refusal.view }
             p:setDrawing(true)
             t:eq(p.drawing, false, "drawing did not start")
-            t:eq(env.notifications[#env.notifications], refusal.message,
-                "and the refusal names the thing to change")
+            if refusal.offer then
+                -- A view refusal a sheet can answer: said in the offer (ADR-67).
+                local offer = sheetOffer()
+                t:check(offer and offer.text:find(refusal.message, 1, true) == 1,
+                    "and the refusal names the thing to change")
+            else
+                t:eq(env.notifications[#env.notifications], refusal.message,
+                    "and the refusal names the thing to change")
+                t:eq(sheetOffer(), nil, "with no sheet offered: a sheet would not help")
+            end
             t:eq(#store.canvases, 0, "a refused view creates no row")
         end)
     end
@@ -952,8 +1037,9 @@ return function(ctx)
         p:onZoomUpdate(4)
         env.UIManager:flush()
         t:eq(p.drawing, false, "drawing stopped")
-        t:eq(env.notifications[#env.notifications],
-            "Zoom out to see and draw page notes.", "and said why")
+        local offer = sheetOffer()
+        t:check(offer and offer.text:find("Zoom out to see and draw page notes.", 1, true) == 1,
+            "and said why")
         local bb = support.newBlitbuffer(600, 800)
         p:paintTo(bb, 0, 0)
         t:eq(#bb.blits, 0, "a refused view puts nothing on the page")
@@ -1071,6 +1157,74 @@ return function(ctx)
     end)
 
     -- =================================================================
+    t:describe("main / sheets hung on a fixed page (ADR-67)")
+
+    t:case("a PDF with page notes has a sheet session on the same connection", function()
+        local p, store = documentPlugin()
+        t:check(p.session ~= nil, "a sheet session beside page ink")
+        t:eq(p.session.anchor_mode, "page", "hanging sheets on pages")
+        t:eq(p.session.repository, p.document_session.repository, "one connection")
+        p:teardown()
+        t:eq(store.closed, false, "closed by its owner only")
+    end)
+
+    t:case("Open sheet here on a PDF hangs a sheet on this page and Draw goes to it", function()
+        local p, store = documentPlugin{ view = { state = { zoom = 4 } } }
+        p:openCanvasHere()
+        env.UIManager:flush()
+        t:eq(p.canvas_open, true, "a sheet is open")
+        local active = p.session:activeCanvas()
+        t:eq(active.anchor_kind, "page", "on the page")
+        t:eq(active.surface_role, "sheet", "as a sheet")
+        p:setDrawing(false)
+        p:setDrawing(true)
+        t:eq(p.drawing, true, "Draw is not refused by the page's view gate")
+        t:eq(sheetOffer(), nil, "and no sheet is offered over the open one")
+        t:eq(store:findPageInkSurface(12, p:currentPage()), nil, "no page-ink row")
+    end)
+
+    t:case("Go to this sheet's page turns to the page", function()
+        local p = documentPlugin()
+        p:openCanvasHere()
+        env.UIManager:flush()
+        p.view.state.page = 5
+        p:onPageUpdate(5)
+        env.reader_events = {}
+        t:eq(p:goToCanvasAnchor(), true, "went")
+        t:eq(env.reader_events[1], "onGotoPage", "by page number")
+    end)
+
+    t:case("a batch delete takes a PDF's sheet and its page ink together", function()
+        local p, store = documentPlugin{
+            canvases = { pageRow(1, 3) },
+            strokes = { [1] = { bar_stroke() } },
+        }
+        p:openCanvasHere()
+        env.UIManager:flush()
+        local sheet = p.session:activeCanvas()
+        t:eq(p:deleteDocumentNotes({ sheet.id, 1 }), true, "deleted")
+        t:eq(store.calls.deleteBookCanvases, 1, "in one call")
+        t:eq(#store.canvases, 0, "both rows gone")
+        t:eq(p.canvas_open, false, "the open sheet closed with it")
+    end)
+
+    t:case("a PDF's dossier carries its page notes and its sheets", function()
+        local p = documentPlugin{
+            canvases = { pageRow(1, 3) },
+            strokes = { [1] = { bar_stroke() } },
+        }
+        p:openCanvasHere()
+        env.UIManager:flush()
+        p:closeCanvas()
+        local spec = p.export_controller:notesSource()
+        t:check(spec ~= nil, "a source")
+        local items = require("ink_document_export_source").documentNotes(spec)
+        local kinds = {}
+        for _, item in ipairs(items or {}) do kinds[item.kind] = (kinds[item.kind] or 0) + 1 end
+        t:eq(kinds.page_ink, 1, "the page note")
+        t:eq(kinds.sheet, 1, "and the sheet")
+    end)
+
     t:describe("main / page ink / menu")
 
     t:case("the page-notes row is absent where it cannot exist", function()
@@ -1102,7 +1256,7 @@ return function(ctx)
             if sub[i].text == "Drawing sheet" then sheet_at = i end
             if sub[i].text == "Page notes" then notes_at = i end
         end
-        t:eq(sheet_at, nil, "no sheet row: a fixed layout cannot hold one (UX-3)")
+        t:check(sheet_at ~= nil, "a sheet row: a fixed layout's pages hold sheets too (ADR-67)")
         t:check(notes_at ~= nil and notes_at <= 4,
             "page notes near the top, right after the drawing actions")
     end)

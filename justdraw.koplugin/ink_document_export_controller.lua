@@ -128,23 +128,27 @@ function Controller:notesScope()
     local legacy = self.legacy and self.legacy()
     local has_legacy = legacy ~= nil and not legacy:isEmpty()
     local has_native = self.ui.annotation and #self.ui.annotation.annotations > 0
+    -- A fixed layout has page ink *and* sheets hung on its pages (ADR-67), so
+    -- the page notes count whether or not a sheet session is open.
+    local document = self.document_session and self.document_session()
+    local page_notes = 0
+    if document and document:isAvailable() then
+        page_notes = document:countSurfaces()
+    end
     local session = self.session()
     if session and session:isAvailable() then
         local _repository, index = session:exportSources()
         local sheets = (index and index:count()) or 0
-        if sheets == 0 and not has_legacy and not has_native then return nil end
+        if sheets + page_notes == 0 and not has_legacy and not has_native then
+            return nil
+        end
         if not index or not index:isComplete() then
             return { value = "notes", label = _("Document notes"),
                 enabled = false, reason = "index_incomplete" }
         end
         return { value = "notes", label = _("Document notes") }
     end
-    local document = self.document_session and self.document_session()
-    local notes = 0
-    if document and document:isAvailable() then
-        notes = document:countSurfaces()
-    end
-    if notes == 0 and not has_legacy and not has_native then return nil end
+    if page_notes == 0 and not has_legacy and not has_native then return nil end
     return { value = "notes", label = _("Document notes") }
 end
 
@@ -167,10 +171,15 @@ function Controller:canExport()
     local legacy = self.legacy and self.legacy()
     if legacy and not legacy:isEmpty() then return true end
     local session = self.session()
-    if not session or not session:isAvailable() then return false end
-    if self.canvas_open() and session:activeCanvas() then return true end
-    local _repository, index = session:exportSources()
-    return index ~= nil and index:isComplete() and index:count() > 0
+    if session and session:isAvailable() then
+        if self.canvas_open() and session:activeCanvas() then return true end
+        local _repository, index = session:exportSources()
+        if index ~= nil and index:isComplete() and index:count() > 0 then return true end
+    end
+    -- Reached on a fixed layout whose view `ExportReader` refuses: its page
+    -- notes are still a dossier.
+    local document = self.document_session and self.document_session()
+    return document ~= nil and document:isAvailable() and document:countSurfaces() > 0
 end
 
 --[[--
@@ -261,9 +270,14 @@ end
 --[[--
 Everything `documentNotes` needs to enumerate this book, or a refusal.
 
-The two halves of a book's notes are keyed differently and the reader is on
-one side or the other, never both: a reflowable book has sheets and an anchor
-index, a fixed layout has page-ink rows and a book id. Legacy ink is on both.
+The two halves of a book's notes are keyed differently: a reflowable book has
+sheets and an anchor index, a fixed layout has page-ink rows and a book id --
+and, since ADR-67, sheets hung on its pages with a page index of their own.
+Legacy ink is on both.
+
+A fixed layout whose sheet session could not open still exports its page ink:
+the sheets are what is missing, not the book's notes. A reflowable book has
+nothing else, so there an index still building is a refusal.
 ]]
 function Controller:notesSource()
     local spec = {
@@ -294,6 +308,23 @@ function Controller:notesSource()
             spec.memberships=memberships
         end
         return spec
+    end
+    local session = self.session()
+    if session and session:isAvailable() then
+        local repository, index = session:exportSources()
+        if not repository then return nil, index or "unavailable" end
+        if not index or not index:isComplete() then
+            return nil, "index_incomplete"
+        end
+        local canvases, list_err = session:allCanvases()
+        if not canvases then return nil, list_err or "list_failed" end
+        spec.sheet_repository, spec.index, spec.canvases = repository, index, canvases
+        if repository._select and session.book_id then
+            local memberships, err = require("ink_note_repository").new(repository)
+                :memberships(session.book_id)
+            if not memberships then return nil, err end
+            spec.memberships = memberships
+        end
     end
     local document = self.document_session and self.document_session()
     if document and document:isAvailable() then

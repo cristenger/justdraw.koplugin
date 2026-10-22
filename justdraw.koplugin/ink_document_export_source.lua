@@ -122,7 +122,7 @@ local function sheets(opts, items, max_pages)
             kind = "sheet",
             page = opts.index:pageOf(row.id),
             surface = row,
-            repository = opts.repository,
+            repository = opts.sheet_repository or opts.repository,
             logical_w = tonumber(row.logical_w),
             logical_h = tonumber(row.logical_h),
             units = "px",
@@ -157,9 +157,12 @@ local function legacyPages(opts, items, max_pages)
 end
 
 --[[--
-  opts.rolling      true for a reflowable book (sheets), else page ink
+  opts.rolling      true for a reflowable book (sheets only); a fixed layout
+                    has page ink, and sheets hung on its pages too (ADR-67)
   opts.canvases     the sheet rows -- the session's `allCanvases()`
-  opts.index        the anchor index, for the reading order
+  opts.index        the anchor or page index, for the reading order
+  opts.sheet_repository  the read side holding the sheets, when it is not
+                    `repository` -- on a fixed layout they share a connection
   opts.repository   the read side of whichever store holds the surfaces
   opts.book_id      this book, for the page-ink walk
   opts.units        "pt" | "px" -- what a page's own units are (ADR-38)
@@ -176,12 +179,14 @@ function DocumentSource.documentNotes(opts)
     local items = {}
 
     local ok, err
-    if opts.rolling then
+    if opts.rolling or opts.canvases then
         ok, err = sheets(opts, items, max_pages)
-    else
-        ok, err = pageInkSurfaces(opts, items, max_pages)
+        if not ok then return nil, err end
     end
-    if not ok then return nil, err end
+    if not opts.rolling then
+        ok, err = pageInkSurfaces(opts, items, max_pages)
+        if not ok then return nil, err end
+    end
 
     ok, err = legacyPages(opts, items, max_pages)
     if not ok then return nil, err end

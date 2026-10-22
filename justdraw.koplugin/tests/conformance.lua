@@ -1117,6 +1117,33 @@ else
             if foreign then repo:deleteCanvas(foreign.id) end
         end
 
+        -- A sheet hung on a fixed page (ADR-67): the schema has always allowed
+        -- it; the listings have to keep it apart from the xpointer sheets.
+        do
+            local sheets_before = repo:countCanvases(book_id)
+            local hung = repo:createCanvas(book_id, {
+                anchor_kind = "page", anchor_key = "page:2", fixed_page = 2,
+                logical_w = 600, logical_h = 800,
+            })
+            local listed = repo:listPageSheets(book_id)
+            claim("canvas database: a sheet hangs on a fixed page as a sheet",
+                true, hung ~= nil and hung.surface_role == "sheet"
+                    and hung.coordinate_space == "surface"
+                    and listed ~= nil and #listed == 1 and listed[1].id == hung.id
+                    and repo:countPageSheets(book_id) == 1,
+                hung and (hung.surface_role .. "/" .. hung.coordinate_space) or "refused")
+            claim("canvas database: the xpointer listing never sees it",
+                true, repo:countCanvases(book_id) == sheets_before,
+                tostring(sheets_before) .. " -> " .. tostring(repo:countCanvases(book_id)))
+            local _, odd = repo:createCanvas(book_id, {
+                anchor_kind = "page", anchor_key = "page:3", fixed_page = 3,
+                anchor_raw = "/body/p[1]", logical_w = 600, logical_h = 800,
+            })
+            claim("canvas database: a page sheet carrying an xpointer is refused",
+                true, odd == "bad_surface", tostring(odd))
+            if hung then repo:deleteCanvas(hung.id) end
+        end
+
         -- A stroke long enough to span chunks, with coordinates that exercise
         -- the whole quantiser range.
         local n = Codec.MAX_POINTS + 77

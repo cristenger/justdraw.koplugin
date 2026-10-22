@@ -62,7 +62,7 @@ cascade away with the canvas.
 `surface_role` and `coordinate_space` are last in the canvases table and
 defaulted, so a database migrated up from v1 by `ALTER TABLE ADD COLUMN` --
 which can only append -- ends up declaring exactly what this creates (ADR-37).
-A sheet hung on a fixed page would share `anchor_kind = 'page'` and
+A sheet hung on a fixed page (ADR-67) shares `anchor_kind = 'page'` and
 `fixed_page` with page ink, which is why the role is a column of its own rather
 than a reading of those two.
 ]]
@@ -668,25 +668,28 @@ index is built from these rows; the strokes of a canvas are read only when that
 canvas is opened.
 
 Page ink is deliberately absent: it has no xpointer to resolve and the index
-would have nothing to do with it (ADR-37). Its own listing is below.
+would have nothing to do with it (ADR-37). Its own listing is below. So are
+sheets hung on a fixed page (ADR-67): they are sheets, but the anchor index
+would put their missing xpointer to CREngine, so they have a listing of their
+own as well.
 ]]
 function Repository:listCanvases(book_id)
     local ready, reason = self:_ready(false)
     if not ready then return nil, reason end
     return self:_select(
         CANVAS_COLUMNS .. [[
-         WHERE book_id = ?1 AND surface_role = 'sheet'
+         WHERE book_id = ?1 AND surface_role = 'sheet' AND anchor_kind = 'xpointer'
          ORDER BY updated_at DESC, id;]],
         { book_id }, canvasRow)
 end
 
---- How many sheets this book has, without reading one of them.
+--- How many xpointer sheets this book has, without reading one of them.
 function Repository:countCanvases(book_id)
     local ready, reason = self:_ready(false)
     if not ready then return nil, reason end
     local rows, err = self:_select([[
         SELECT count(*) FROM canvases
-         WHERE book_id = ?1 AND surface_role = 'sheet';]],
+         WHERE book_id = ?1 AND surface_role = 'sheet' AND anchor_kind = 'xpointer';]],
         { book_id }, function(row) return num(row[1]) or 0 end)
     if not rows then return nil, err end
     return rows[1] or 0
@@ -712,14 +715,55 @@ function Repository:listCanvasesBatch(book_id, opts)
     local after_id = tonumber(opts.after_id)
     if after_id then
         return self:_select(CANVAS_COLUMNS .. [[
-             WHERE book_id = ?1 AND surface_role = 'sheet' AND id > ?2
+             WHERE book_id = ?1 AND surface_role = 'sheet'
+               AND anchor_kind = 'xpointer' AND id > ?2
              ORDER BY id LIMIT ?3;]],
             { book_id, after_id, limit }, canvasRow)
     end
     return self:_select(CANVAS_COLUMNS .. [[
-         WHERE book_id = ?1 AND surface_role = 'sheet'
+         WHERE book_id = ?1 AND surface_role = 'sheet' AND anchor_kind = 'xpointer'
          ORDER BY id LIMIT ?2;]],
         { book_id, limit }, canvasRow)
+end
+
+--[[--
+One bounded page of the sheets hung on fixed pages (ADR-67), by page then id.
+
+The cursor is the pair because the order is: a page number is not unique, and
+a cursor over it alone would skip the second sheet of a page at a batch edge.
+
+  opts.after_page, opts.after_id  the last row of the previous batch
+  opts.limit                      default 100, clamped to 1..500
+]]
+function Repository:listPageSheets(book_id, opts)
+    local ready, reason = self:_ready(false)
+    if not ready then return nil, reason end
+    opts = opts or {}
+    local limit = batchLimit(opts.limit, 100)
+    local after_page = tonumber(opts.after_page)
+    if after_page then
+        return self:_select(CANVAS_COLUMNS .. [[
+             WHERE book_id = ?1 AND surface_role = 'sheet' AND anchor_kind = 'page'
+               AND (fixed_page > ?2 OR (fixed_page = ?2 AND id > ?3))
+             ORDER BY fixed_page, id LIMIT ?4;]],
+            { book_id, after_page, tonumber(opts.after_id) or 0, limit }, canvasRow)
+    end
+    return self:_select(CANVAS_COLUMNS .. [[
+         WHERE book_id = ?1 AND surface_role = 'sheet' AND anchor_kind = 'page'
+         ORDER BY fixed_page, id LIMIT ?2;]],
+        { book_id, limit }, canvasRow)
+end
+
+--- How many sheets hang on this book's fixed pages, without reading one.
+function Repository:countPageSheets(book_id)
+    local ready, reason = self:_ready(false)
+    if not ready then return nil, reason end
+    local rows, err = self:_select([[
+        SELECT count(*) FROM canvases
+         WHERE book_id = ?1 AND surface_role = 'sheet' AND anchor_kind = 'page';]],
+        { book_id }, function(row) return num(row[1]) or 0 end)
+    if not rows then return nil, err end
+    return rows[1] or 0
 end
 
 --[[--
@@ -732,24 +776,28 @@ resolved by the anchor index against a document that has no such position.
 
 So: a sheet is in surface coordinates, and page ink is in the page's own units,
 anchored by a page number that is a real page, with none of the xpointer fields
-set (ADR-37/38). Anything else is `bad_surface`, before the insert.
+set (ADR-37/38). A sheet hung on a page holds to the same page rule (ADR-67).
+Anything else is `bad_surface`, before the insert.
 ]]
+--- A page anchor names a real page and carries none of the xpointer fields.
+local function wholePage(spec)
+    local page = spec.fixed_page
+    if not finite(page) or page < 1 or page ~= math.floor(page) then return false end
+    return spec.anchor_raw == nil and spec.anchor_normalized == nil
+        and spec.anchor_dom_version == nil
+end
+
 local function surfaceOf(spec, kind)
     local role = spec.surface_role or "sheet"
     local space = spec.coordinate_space
     if role == "sheet" then
         if space == nil then space = "surface" end
         if space ~= "surface" then return nil end
+        if kind == "page" and not wholePage(spec) then return nil end
     elseif role == "page_ink" then
         if space == nil then space = "native_page" end
         if space ~= "native_page" then return nil end
-        if kind ~= "page" then return nil end
-        local page = spec.fixed_page
-        if not finite(page) or page < 1 or page ~= math.floor(page) then return nil end
-        if spec.anchor_raw ~= nil or spec.anchor_normalized ~= nil
-            or spec.anchor_dom_version ~= nil then
-            return nil
-        end
+        if kind ~= "page" or not wholePage(spec) then return nil end
     else
         return nil
     end

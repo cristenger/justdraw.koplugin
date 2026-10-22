@@ -2549,6 +2549,7 @@ for _, spec in ipairs({
     "canvas_codec_spec",
     "canvas_repository_spec",
     "canvas_anchor_spec",
+    "page_index_spec",
     "canvas_geometry_spec",
     "document_transform_spec",
     "canvas_cache_spec",

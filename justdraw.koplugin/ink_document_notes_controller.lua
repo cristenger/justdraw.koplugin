@@ -140,16 +140,24 @@ function Controller:open()
             self:changed()
         end,
     }
-    if opts.rolling and host.session and host.session:isAvailable() then
-        opts.repository, opts.index = host.session:exportSources()
-        if opts.repository then
+    -- A reflowable book's notes are its sheets. A fixed layout's are its page
+    -- ink and, since ADR-67, the sheets hung on its pages, through the same
+    -- connection; a sheet session that could not open there leaves the page
+    -- ink to browse rather than refusing the whole book.
+    if host.session and host.session:isAvailable() then
+        opts.sheet_repository, opts.index = host.session:exportSources()
+        if opts.sheet_repository then
             opts.memberships = function()
-                return require("ink_note_repository").new(opts.repository):memberships(host.session.book_id)
+                return require("ink_note_repository").new(opts.sheet_repository)
+                    :memberships(host.session.book_id)
             end
         end
-    elseif not opts.rolling and host.document_session and host.document_session:isAvailable() then
+    elseif opts.rolling and host.session then
+        opts.source_error = "no_repository"
+    end
+    if not opts.rolling and host.document_session and host.document_session:isAvailable() then
         opts.repository, opts.book_id = host.document_session:exportSources()
-    elseif opts.rolling and host.session or not opts.rolling and host.document_session then
+    elseif not opts.rolling and host.document_session then
         opts.source_error = "no_repository"
     end
     local duplicates = {}
@@ -521,10 +529,22 @@ function Controller:resolveDestination(item, destination)
             return nil, "unavailable"
         end
         local row = item.surface and session.index and session.index:get(item.surface.id)
-        if not row or row.anchor_key ~= item.surface.anchor_key then return nil, "no_sheet" end
+        if not row or row.anchor_key ~= item.surface.anchor_key
+            or tonumber(row.fixed_page) ~= tonumber(item.surface.fixed_page) then
+            return nil, "no_sheet"
+        end
         target.canvas = row
-        target.xp = Anchor.resolve(document, row)
-        if not target.xp then return nil, "location_unavailable" end
+        if row.anchor_kind == "page" then
+            -- Hung on a page of a fixed layout (ADR-67): the page is the place.
+            target.page = tonumber(row.fixed_page)
+            if not target.page or target.page < 1
+                or target.page > document:getPageCount() then
+                return nil, "location_unavailable"
+            end
+        else
+            target.xp = Anchor.resolve(document, row)
+            if not target.xp then return nil, "location_unavailable" end
+        end
         if destination ~= "read" then
             local valid, err = session:validateCanvas(row)
             if not valid then return nil, err end

@@ -8,8 +8,9 @@ stylus diagnostics) at the same level as Start drawing, and rows that could
 never apply on this book greyed out rather than gone (audit UX-3). A greyed row
 is a promise about a feature the reader cannot have here; an absent one is
 not. So the shape is decided once, here, from what this reader can actually
-have: a sheet row only in a reflowable book, page notes only in a fixed layout
-on the runtime that has them, the frozen legacy ink only when there is some,
+have: a sheet row wherever there is a sheet session -- a reflowable book, or a
+fixed layout whose page notes opened (ADR-67) -- page notes only in a fixed
+layout on the runtime that has them, the frozen legacy ink only when there is some,
 and the settings one level down.
 
 The rows themselves are the plugin's -- `styleItem`, `penItem`, `sideItem`,
@@ -77,6 +78,19 @@ local function settingsItems(plugin, labels)
             help_text = _("Adds a JustDraw button to the menu that appears when you select text, so drawing can start from there. Turn it off if you never draw."),
         }
     end
+    -- Per book, and only where a refused page-ink view can be answered with
+    -- a sheet at all (ADR-67).
+    if plugin.ui.paging and plugin.session ~= nil then
+        items[#items + 1] = {
+            text = _("Open drawing sheets without asking"),
+            checked_func = function() return plugin:pageSheetWithoutAsking() end,
+            keep_menu_open = true,
+            callback = function()
+                plugin:setPageSheetWithoutAsking(not plugin:pageSheetWithoutAsking())
+            end,
+            help_text = _([[For this book only. When page notes cannot be drawn in the current view (scrolling, reflow, straightening, a zoom too large), Draw opens a drawing sheet on the page instead of asking first.]]),
+        }
+    end
     items[#items].separator = true
     items[#items + 1] = {
         text = _("Input mode"),
@@ -138,8 +152,10 @@ function ReaderMenu.add(plugin, menu_items, labels)
         },
     }
 
-    -- Where the ink lives, which depends on the book.
-    if plugin.ui.rolling then
+    -- Where the ink lives, which depends on the book. A fixed layout has a
+    -- sheet session only beside its page notes, which it shares a database
+    -- with (ADR-67): no page notes, no sheet row.
+    if plugin.ui.rolling or (plugin.ui.paging and plugin.session ~= nil) then
         items[#items + 1] = {
             text = labels.drawing_sheet,
             enabled_func = function()
@@ -150,7 +166,9 @@ function ReaderMenu.add(plugin, menu_items, labels)
             -- opens (ADR-62).
             help_text_func = function()
                 return plugin:canvasRefusalMessage()
-                    or _([[Blank sheets anchored to a position in a reflowable book.]])
+                    or (plugin.ui.paging
+                        and _([[Blank sheets hung on a page of this book, over the page. Page notes stay the default; a sheet is offered where the view cannot place them.]])
+                        or _([[Blank sheets anchored to a position in a reflowable book.]]))
             end,
             sub_item_table_func = function() return plugin:canvasMenu() end,
         }
