@@ -24,13 +24,16 @@ JustDraw gives you three places to write, and one place to find them all again.
   stays where you put it under zoom and pan.
 - **Drawing sheets** — a panel over a reflowable book (EPUB). A sheet is
   anchored to a passage rather than to a page number, so it stays with the text
-  when the font or margins change.
+  when the font or margins change. A PDF page can hold sheets too, for when you
+  want separate paper or the view cannot take page notes.
+  A sheet can grow into a note of several sheets.
 - **Document notes** — one list of everything in the book you are reading: your
   sheets and page notes, plus KOReader's own highlights, bookmarks and typed
   notes. From here you can read, filter, export and jump back to any of them.
 
-You do not choose between page notes and sheets: the plugin picks one from the
-document you have open.
+You do not have to choose between page notes and sheets: the plugin picks one
+from the document you have open, and offers a sheet on a PDF page only when
+page notes cannot be drawn there.
 
 ## Requirements
 
@@ -81,7 +84,13 @@ the menu, KOReader's Gesture Manager lists the plugin's actions under
 **In a PDF or other fixed-layout document,** your ink goes on the current page
 and stays with it: turn the page and you get that page's own layer. Manage them
 under **JustDraw → Page notes**, which offers *Delete this page note* and
-*Delete all page notes*.
+*Delete all page notes*. Page notes work with dewatermark and the white
+threshold turned on. Some views cannot hold them: continuous scrolling, reflow,
+Auto Straighten, or a zoom too large. In those views **Draw** tells you why and
+offers a **drawing sheet** on the page instead. Accept once and that book opens
+the sheet without asking; **Settings → Open drawing sheets without asking** turns
+this off again. **JustDraw → Drawing sheet** also works in a PDF, with sheets
+hung on the page you are on.
 
 **In an EPUB,** you draw on a sheet: **Start drawing**, the selection menu's
 **JustDraw** button, or **JustDraw → Drawing sheet → Open sheet here** opens one
@@ -92,6 +101,11 @@ then icons for **Pen · Eraser · Edit · Undo · Redo · More**. **More** start
 with *Document notes* and *Sheet height* (**40 % · 70 % · 100 %**); tap or drag
 the strip above the icons to resize it directly. **Edit** offers the same
 lasso, shapes and paste as a notebook (see [Editing ink](#editing-ink)).
+
+A sheet can become a note of several sheets: **More → Add sheet** adds a blank
+one after the last and turns to it. The top row then reads **‹ · 2 / 3 · ›**: the
+arrows turn, and tapping the count lists the sheets. The note reopens
+on the sheet you last turned to. Deleting a sheet turns to its neighbour.
 
 Because a sheet belongs to a passage and not to a page, you can keep reading
 with one open. When the page behind it changes, the sheet's top edge says which
@@ -174,8 +188,10 @@ The stylus's eraser end always erases, and ends any selection first.
    ink, and KOReader's own notes, highlights and bookmarks. Each row names its
    page and its kind.
 3. **Filter** narrows by type, chapter, page range or annotation text, and sorts
-   by document order or last change. **Select** marks rows. **Export…** writes
-   all notes, the filtered results or just your selection.
+   by document order or last change. **Select** marks rows. While selecting,
+   **Delete…** deletes the selected drawings and page notes, all of them or
+   none. KOReader's own notes and older ink are kept. **Export…** writes all
+   notes, the filtered results or just your selection.
 4. Tap a row to open it. You can zoom and pan, and step through the list with
    **Previous note** / **Next note**.
 5. From a drawing, **View on page** puts that sheet back over its place in the
@@ -225,6 +241,10 @@ Depending on where you start it, you can export the page you are on, one sheet,
 one notebook or one page of it, or every note in the book. For PDFs the notes
 list also offers **Annotated pages as images…** and **Complete document as
 images…**; for EPUB, **Complete EPUB with notes appendix…**.
+
+In a PDF, the export dialog also offers **Include the book's pages**. Each page
+that has notes is then exported once, clean, before its notes. The choice
+applies to that export only.
 
 Output is a picture of your ink, not editable vectors. If the folder looks too
 full you are asked before anything is written, and leftovers from an interrupted
